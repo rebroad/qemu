@@ -207,7 +207,10 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
     access_perms = (pde & PTE_ACCESS_MASK) >> PTE_ACCESS_SHIFT;
     error_code = access_table[*access_index][access_perms];
     if (error_code && !((env->mmuregs[0] & MMU_NF) && is_user)) {
-		qemu_log("%s: error_code=%d, access_perms=%d\n", __func__, error_code, access_perms);
+		qemu_log("%s: error_code=%d, *access_index=%d, access_perms=%d pde=0x%x\n",
+				__func__, error_code, *access_index, access_perms, pde);
+	    qemu_log("MMU Registers: reg0=0x%x, reg1=0x%x, reg2=0x%x\n",
+		    	env->mmuregs[0], env->mmuregs[1], env->mmuregs[2]);
         return error_code;
     }
 

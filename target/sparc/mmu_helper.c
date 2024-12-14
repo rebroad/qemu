@@ -69,6 +69,8 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
                                 int *access_index, target_ulong address,
                                 int rw, int mmu_idx)
 {
+    qemu_log("%s: line=%d\n", __func__, __LINE__);
+
     int access_perms = 0;
     hwaddr pde_ptr;
     uint32_t pde;
@@ -207,6 +209,8 @@ bool sparc_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                         MMUAccessType access_type, int mmu_idx,
                         bool probe, uintptr_t retaddr)
 {
+    qemu_log("%s: line=%d\n", __func__, __LINE__);
+
     CPUSPARCState *env = cpu_env(cs);
     CPUTLBEntryFull full = {};
     target_ulong vaddr;
@@ -721,6 +725,8 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
                                 int *access_index, target_ulong address,
                                 int rw, int mmu_idx)
 {
+    qemu_log("%s: line=%d\n", __func__, __LINE__);
+
     /* ??? We treat everything as a small page, then explicitly flush
        everything when an entry is evicted.  */
     full->lg_page_size = TARGET_PAGE_BITS;
@@ -758,6 +764,8 @@ bool sparc_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                         MMUAccessType access_type, int mmu_idx,
                         bool probe, uintptr_t retaddr)
 {
+    qemu_log("%s: line=%d\n", __func__, __LINE__);
+
     CPUSPARCState *env = cpu_env(cs);
     CPUTLBEntryFull full = {};
     int error_code = 0, access_index;

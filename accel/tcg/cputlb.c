@@ -1295,7 +1295,8 @@ static void io_failed(CPUState *cpu, CPUTLBEntryFull *full, vaddr addr,
 		qemu_log("io_failed: phys_addr=0x%lx addr=0x%lx, TARGET_PAGE_MASK=0x%x, physaddr=0x%lx\n",
 			full->phys_addr, addr, TARGET_PAGE_MASK, physaddr);
 
-        cpu->cc->tcg_ops->do_transaction_failed(cpu, physaddr, addr, size,
+		if (full->phys_addr != 0xdeadbeefdeadb000ULL)
+        	cpu->cc->tcg_ops->do_transaction_failed(cpu, physaddr, addr, size,
                                                 access_type, mmu_idx,
                                                 full->attrs, response, retaddr);
     }

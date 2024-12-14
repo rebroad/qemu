@@ -432,7 +432,7 @@ static void sparc_raise_mmu_fault(CPUState *cs, hwaddr addr,
                is_exec ? "exec" : is_write ? "write" : "read", size,
                size == 1 ? "" : "s", addr, env->pc);
     }
-	if (size == 4) abort();
+	//if (size == 4) abort();
     /* Don't overwrite translation and access faults */
     fault_type = (env->mmuregs[3] & 0x1c) >> 2;
     if ((fault_type > 4) || (fault_type == 0)) {

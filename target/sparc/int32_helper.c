@@ -159,6 +159,7 @@ void sparc_cpu_do_interrupt(CPUState *cs)
         env->npc = env->npc + 4;
     }
 #endif
+	qemu_log("sparc_cpu_do_interrupt: Setting psret to 0\n");
     env->psret = 0;
     cwp = cpu_cwp_dec(env, env->cwp - 1);
     cpu_set_cwp(env, cwp);

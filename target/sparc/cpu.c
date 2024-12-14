@@ -55,6 +55,7 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #endif
 #else
 #if !defined(TARGET_SPARC64)
+	qemu_printf("sparc_cpu_reset_hold: ResetType=%d\n", type);
     env->psret = 0;
     env->psrs = 1;
     env->psrps = 1;

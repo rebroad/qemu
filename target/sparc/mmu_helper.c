@@ -69,7 +69,10 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
                                 int *access_index, target_ulong address,
                                 int rw, int mmu_idx)
 {
-    qemu_log("%s: line=%d\n", __func__, __LINE__);
+    qemu_log("%s: Entering with address=0x%x, rw=%d, mmu_idx=%d\n",
+			__func__, address, rw, mmu_idx);
+	qemu_log("MMU Registers: reg0=0x%x, reg1=0x%x, reg2=0x%x\n",
+			env->mmuregs[0], env->mmuregs[1], env->mmuregs[2]);
 
     int access_perms = 0;
     hwaddr pde_ptr;
@@ -95,66 +98,90 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
     }
 
     *access_index = ((rw & 1) << 2) | (rw & 2) | (is_user ? 0 : 1);
-    full->phys_addr = 0xffffffffffff0000ULL;
+    full->phys_addr = 0xdeadbeefdeadbeefULL;
 
     /* SPARC reference MMU table walk: Context table->L1->L2->PTE */
     /* Context base + context number */
     pde_ptr = (env->mmuregs[1] << 4) + (env->mmuregs[2] << 2);
+	qemu_log("Context table ptr: 0x%lx\n", pde_ptr);
     pde = address_space_ldl(cs->as, pde_ptr, MEMTXATTRS_UNSPECIFIED, &result);
     if (result != MEMTX_OK) {
+		qemu_log("Context table read failed, result=%d\n", result);
         return 4 << 2; /* Translation fault, L = 0 */
     }
+	qemu_log("Context PDE: 0x%x\n", pde);
 
     /* Ctx pde */
     switch (pde & PTE_ENTRYTYPE_MASK) {
     default:
     case 0: /* Invalid */
+		qemu_log("Invalid context PDE\n");
         return 1 << 2;
     case 2: /* L0 PTE, maybe should not happen? */
+		qemu_log("Unexpected context PDE\n");
+		return 4 << 2;
     case 3: /* Reserved */
+		qemu_log("Reserved context PDE\n");
         return 4 << 2;
     case 1: /* L0 PDE */
         pde_ptr = ((address >> 22) & ~3) + ((pde & ~3) << 4);
+		qemu_log("L0 PDE ptr: 0x%lx\n", pde_ptr);
         pde = address_space_ldl(cs->as, pde_ptr,
                                 MEMTXATTRS_UNSPECIFIED, &result);
         if (result != MEMTX_OK) {
+			qemu_log("L0 PDE read failed, result=%d\n", result);
             return (1 << 8) | (4 << 2); /* Translation fault, L = 1 */
         }
+		qemu_log("L0 PDE: 0x%x\n", pde);
 
         switch (pde & PTE_ENTRYTYPE_MASK) {
         default:
         case 0: /* Invalid */
+			qemu_log("Invalid L0 PDE\n");
             return (1 << 8) | (1 << 2);
         case 3: /* Reserved */
+			qemu_log("Reserved L0 PDE\n");
             return (1 << 8) | (4 << 2);
         case 1: /* L1 PDE */
             pde_ptr = ((address & 0xfc0000) >> 16) + ((pde & ~3) << 4);
+			qemu_log("L1 PDE ptr: 0x%lx\n", pde_ptr);
             pde = address_space_ldl(cs->as, pde_ptr,
                                     MEMTXATTRS_UNSPECIFIED, &result);
             if (result != MEMTX_OK) {
+				qemu_log("L1 PDE read failed, result=%d\n", result);
                 return (2 << 8) | (4 << 2); /* Translation fault, L = 2 */
             }
+			qemu_log("L1 PDE: 0x%x\n", pde);
 
             switch (pde & PTE_ENTRYTYPE_MASK) {
             default:
             case 0: /* Invalid */
+				qemu_log("Invalid L1 PDE\n");
                 return (2 << 8) | (1 << 2);
             case 3: /* Reserved */
+				qemu_log("Reserved L1 PDE\n");
                 return (2 << 8) | (4 << 2);
             case 1: /* L2 PDE */
                 pde_ptr = ((address & 0x3f000) >> 10) + ((pde & ~3) << 4);
+				qemu_log("L2 PDE ptr: 0x%lx\n", pde_ptr);
                 pde = address_space_ldl(cs->as, pde_ptr,
                                         MEMTXATTRS_UNSPECIFIED, &result);
                 if (result != MEMTX_OK) {
+					qemu_log("L2 PDE read failed, result=%d\n", result);
                     return (3 << 8) | (4 << 2); /* Translation fault, L = 3 */
                 }
+				qemu_log("L2 PDE: 0x%x\n", pde);
 
                 switch (pde & PTE_ENTRYTYPE_MASK) {
                 default:
                 case 0: /* Invalid */
+					qemu_log("Invalid L2 PDE\n");
                     return (3 << 8) | (1 << 2);
                 case 1: /* PDE, should not happen */
+					qemu_log("Unexpected L2 PDE\n");
+                    return (3 << 8) | (4 << 2);
                 case 3: /* Reserved */
+					qemu_log("Reserved L2 PDE\n");
                     return (3 << 8) | (4 << 2);
                 case 2: /* L3 PTE */
                     page_offset = 0;

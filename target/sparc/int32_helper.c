@@ -102,6 +102,11 @@ void sparc_cpu_do_interrupt(CPUState *cs)
     CPUSPARCState *env = cpu_env(cs);
     int cwp, intno = cs->exception_index;
 
+	qemu_log("sparc_cpu_do_interrupt: exception_index=0x%x, pc=0x%x, npc=0x%x\n",
+			intno, env->pc, env->npc);
+	qemu_log("sparc_cpu_do_interrupt: psret=%d, interrupt_index=0x%x\n",
+			env->psret, env->interrupt_index);
+
     if (qemu_loglevel_mask(CPU_LOG_INT)) {
         static int count;
         const char *name;

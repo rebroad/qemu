@@ -300,6 +300,8 @@ static void do_command_phase(ESPState *s)
     SCSIDevice *current_lun;
     uint8_t buf[ESP_CMDFIFO_SZ];
 
+	memset (buf, 0, ESP_CMDFIFO_SZ);
+
     trace_esp_do_command_phase(s->lun);
     cmdlen = fifo8_num_used(&s->cmdfifo);
     if (!cmdlen || !s->current_dev) {
@@ -483,6 +485,8 @@ static void esp_do_dma(ESPState *s)
 {
     uint32_t len, cmdlen;
     uint8_t buf[ESP_CMDFIFO_SZ];
+
+	memset (buf, 0, ESP_CMDFIFO_SZ);
 
     len = esp_get_tc(s);
 

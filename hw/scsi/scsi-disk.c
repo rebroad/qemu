@@ -2819,11 +2819,14 @@ static void scsi_block_realize(SCSIDevice *dev, Error **errp)
      * READ CAPACITY.  If they don't, they likely would assume these sizes
      * anyway. (TODO: check in /sys).
      */
-    if (s->qdev.type == TYPE_ROM || s->qdev.type == TYPE_WORM) {
-        s->qdev.blocksize = 2048;
-    } else {
-        s->qdev.blocksize = 512;
-    }
+	if (s->qdev.conf.logical_block_size == 0) {
+    	if (s->qdev.type == TYPE_ROM || s->qdev.type == TYPE_WORM) {
+       		s->qdev.blocksize = 2048;
+    	} else {
+        	s->qdev.blocksize = 512;
+    	}
+	} else
+		s->qdev.blocksize = s->qdev.conf.logical_block_size;
 
     /* Makes the scsi-block device not removable by using HMP and QMP eject
      * command.

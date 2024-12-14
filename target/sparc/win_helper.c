@@ -129,6 +129,7 @@ void helper_rett(CPUSPARCState *env)
     unsigned int cwp;
 
     if (env->psret == 1) {
+	    qemu_log("helper_rett: psret already 1!\n");
         cpu_raise_exception_ra(env, TT_ILL_INSN, GETPC());
     }
 

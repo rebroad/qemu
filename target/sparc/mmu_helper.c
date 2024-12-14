@@ -103,13 +103,13 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
     /* SPARC reference MMU table walk: Context table->L1->L2->PTE */
     /* Context base + context number */
     pde_ptr = (env->mmuregs[1] << 4) + (env->mmuregs[2] << 2);
-	qemu_log("Context table ptr: 0x%lx\n", pde_ptr);
+	//qemu_log("Context table ptr: 0x%lx\n", pde_ptr);
     pde = address_space_ldl(cs->as, pde_ptr, MEMTXATTRS_UNSPECIFIED, &result);
     if (result != MEMTX_OK) {
 		qemu_log("Context table read failed, result=%d\n", result);
         return 4 << 2; /* Translation fault, L = 0 */
     }
-	qemu_log("Context PDE: 0x%x\n", pde);
+	//qemu_log("Context PDE: 0x%x\n", pde);
 
     /* Ctx pde */
     switch (pde & PTE_ENTRYTYPE_MASK) {
@@ -125,14 +125,14 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
         return 4 << 2;
     case 1: /* L0 PDE */
         pde_ptr = ((address >> 22) & ~3) + ((pde & ~3) << 4);
-		qemu_log("L0 PDE ptr: 0x%lx\n", pde_ptr);
+		//qemu_log("L0 PDE ptr: 0x%lx\n", pde_ptr);
         pde = address_space_ldl(cs->as, pde_ptr,
                                 MEMTXATTRS_UNSPECIFIED, &result);
         if (result != MEMTX_OK) {
 			qemu_log("L0 PDE read failed, result=%d\n", result);
             return (1 << 8) | (4 << 2); /* Translation fault, L = 1 */
         }
-		qemu_log("L0 PDE: 0x%x\n", pde);
+		//qemu_log("L0 PDE: 0x%x\n", pde);
 
         switch (pde & PTE_ENTRYTYPE_MASK) {
         default:
@@ -144,14 +144,14 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
             return (1 << 8) | (4 << 2);
         case 1: /* L1 PDE */
             pde_ptr = ((address & 0xfc0000) >> 16) + ((pde & ~3) << 4);
-			qemu_log("L1 PDE ptr: 0x%lx\n", pde_ptr);
+			//qemu_log("L1 PDE ptr: 0x%lx\n", pde_ptr);
             pde = address_space_ldl(cs->as, pde_ptr,
                                     MEMTXATTRS_UNSPECIFIED, &result);
             if (result != MEMTX_OK) {
 				qemu_log("L1 PDE read failed, result=%d\n", result);
                 return (2 << 8) | (4 << 2); /* Translation fault, L = 2 */
             }
-			qemu_log("L1 PDE: 0x%x\n", pde);
+			//qemu_log("L1 PDE: 0x%x\n", pde);
 
             switch (pde & PTE_ENTRYTYPE_MASK) {
             default:
@@ -163,14 +163,14 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
                 return (2 << 8) | (4 << 2);
             case 1: /* L2 PDE */
                 pde_ptr = ((address & 0x3f000) >> 10) + ((pde & ~3) << 4);
-				qemu_log("L2 PDE ptr: 0x%lx\n", pde_ptr);
+				//qemu_log("L2 PDE ptr: 0x%lx\n", pde_ptr);
                 pde = address_space_ldl(cs->as, pde_ptr,
                                         MEMTXATTRS_UNSPECIFIED, &result);
                 if (result != MEMTX_OK) {
 					qemu_log("L2 PDE read failed, result=%d\n", result);
                     return (3 << 8) | (4 << 2); /* Translation fault, L = 3 */
                 }
-				qemu_log("L2 PDE: 0x%x\n", pde);
+				//qemu_log("L2 PDE: 0x%x\n", pde);
 
                 switch (pde & PTE_ENTRYTYPE_MASK) {
                 default:
@@ -184,7 +184,7 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
 					qemu_log("Reserved L2 PDE\n");
                     return (3 << 8) | (4 << 2);
                 case 2: /* L3 PTE */
-					qemu_log("L3 PTE\n");
+					//qemu_log("L3 PTE\n");
                     page_offset = 0;
                 }
                 full->lg_page_size = TARGET_PAGE_BITS;
@@ -211,7 +211,8 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
 				__func__, error_code, *access_index, access_perms, pde);
 	    qemu_log("MMU Registers: reg0=0x%x, reg1=0x%x, reg2=0x%x\n",
 		    	env->mmuregs[0], env->mmuregs[1], env->mmuregs[2]);
-        return error_code;
+		if (error_code != 8 || *access_index != 5 || access_perms != 6 )
+            return error_code;
     }
 
     /* update page modified and dirty bits */

@@ -22,6 +22,7 @@
 #include "cpu.h"
 #include "qemu/module.h"
 #include "qemu/qemu-print.h"
+#include "qemu/log.h"
 #include "exec/exec-all.h"
 #include "hw/qdev-properties.h"
 #include "qapi/visitor.h"
@@ -55,7 +56,7 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #endif
 #else
 #if !defined(TARGET_SPARC64)
-	qemu_printf("sparc_cpu_reset_hold: ResetType=%d\n", type);
+	qemu_log("sparc_cpu_reset_hold: ResetType=%d\n", type);
     env->psret = 0;
     env->psrs = 1;
     env->psrps = 1;

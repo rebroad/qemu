@@ -1651,9 +1651,8 @@ static bool mmu_lookup1(CPUState *cpu, MMULookupPageData *data, MemOp memop,
     CPUTLBEntryFull *full;
     int flags;
 
-    qemu_log("mmu_lookup1: addr=0x%lx, index=%lu, mmu_idx=%d, access_type=%d\n",
-			addr, index, mmu_idx, access_type);
-	qemu_log("mmu_lookup1: tlb_addr=0x%lx, entry=%p\n", tlb_addr, (void*)entry);
+    //qemu_log("mmu_lookup1: addr=0x%lx, index=%lu, mmu_idx=%d, access_type=%d\n", addr, index, mmu_idx, access_type);
+	//qemu_log("mmu_lookup1: tlb_addr=0x%lx, entry=%p\n", tlb_addr, (void*)entry);
 
     /* If the TLB entry is for a different page, reload and try again.  */
     if (!tlb_hit(tlb_addr, addr)) {

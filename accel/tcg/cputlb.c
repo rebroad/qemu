@@ -1233,8 +1233,7 @@ static bool tlb_fill_align(CPUState *cpu, vaddr addr, MMUAccessType type,
     const TCGCPUOps *ops = cpu->cc->tcg_ops;
     CPUTLBEntryFull full;
 
-	qemu_log("tlb_fill_align: addr=0x%lx, type=%d, mmu_idx=%d, memop=%d, "
-			"size=%d, probe=%d\n", addr, type, mmu_idx, memop, size, probe);
+	qemu_log("tlb_fill_align: addr=0x%lx, type=%d, mmu_idx=%d, memop=%d, " "size=%d, probe=%d\n", addr, type, mmu_idx, memop, size, probe);
 
     if (ops->tlb_fill_align) {
 		qemu_log("tlb_fill_align: Using custom method\n");
@@ -1651,8 +1650,8 @@ static bool mmu_lookup1(CPUState *cpu, MMULookupPageData *data, MemOp memop,
     CPUTLBEntryFull *full;
     int flags;
 
-    //qemu_log("mmu_lookup1: addr=0x%lx, index=%lu, mmu_idx=%d, access_type=%d\n", addr, index, mmu_idx, access_type);
-	//qemu_log("mmu_lookup1: tlb_addr=0x%lx, entry=%p\n", tlb_addr, (void*)entry);
+    qemu_log("mmu_lookup1: addr=0x%lx, index=%lu, mmu_idx=%d, access_type=%d\n", addr, index, mmu_idx, access_type);
+	qemu_log("mmu_lookup1: tlb_addr=0x%lx, entry=%p\n", tlb_addr, (void*)entry);
 
     /* If the TLB entry is for a different page, reload and try again.  */
     if (!tlb_hit(tlb_addr, addr)) {
@@ -1669,7 +1668,7 @@ static bool mmu_lookup1(CPUState *cpu, MMULookupPageData *data, MemOp memop,
     }
 
     full = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
-	qemu_log("mmu_lookup1: full=%p, phys_addr=0x%lx, slow_flags[%d]=0x%x\n",
+	//qemu_log("mmu_lookup1: full=%p, phys_addr=0x%lx, slow_flags[%d]=0x%x\n",
 			(void*)full, full->phys_addr, access_type, full->slow_flags[access_type]);
     flags = tlb_addr & (TLB_FLAGS_MASK & ~TLB_FORCE_SLOW);
     flags |= full->slow_flags[access_type];

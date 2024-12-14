@@ -1233,13 +1233,20 @@ static bool tlb_fill_align(CPUState *cpu, vaddr addr, MMUAccessType type,
     const TCGCPUOps *ops = cpu->cc->tcg_ops;
     CPUTLBEntryFull full;
 
+	qemu_log("tlb_fill_align: addr=0x%lx, type=%d, mmu_idx=%d, memop=%d, "
+			"size=%d, probe=%d\n", addr, type, mmu_idx, memop, size, probe);
+
     if (ops->tlb_fill_align) {
+		qemu_log("tlb_fill_align: Using custom method\n");
         if (ops->tlb_fill_align(cpu, &full, addr, type, mmu_idx,
                                 memop, size, probe, ra)) {
+			qemu_log("tlb_fill_align1: full phys_addr=0x%lx\n", full.phys_addr);
             tlb_set_page_full(cpu, mmu_idx, addr, &full);
+			qemu_log("tlb_fill_align2: full phys_addr=0x%lx\n", full.phys_addr);
             return true;
         }
     } else {
+		qemu_log("tlb_fill_align: Using legacy method\n");
         /* Legacy behaviour is alignment before paging. */
         if (addr & ((1u << memop_alignment_bits(memop)) - 1)) {
             ops->do_unaligned_access(cpu, addr, type, mmu_idx, ra);

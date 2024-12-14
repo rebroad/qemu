@@ -1286,6 +1286,9 @@ static void io_failed(CPUState *cpu, CPUTLBEntryFull *full, vaddr addr,
         && cpu->cc->tcg_ops->do_transaction_failed) {
         hwaddr physaddr = full->phys_addr | (addr & ~TARGET_PAGE_MASK);
 
+		qemu_log("io_failed: phys_addr=0x%lx addr=0x%lx, TARGET_PAGE_MASK=0x%x, physaddr=0x%lx\n",
+			full->phys_addr, addr, TARGET_PAGE_MASK, physaddr);
+
         cpu->cc->tcg_ops->do_transaction_failed(cpu, physaddr, addr, size,
                                                 access_type, mmu_idx,
                                                 full->attrs, response, retaddr);
@@ -1641,8 +1644,13 @@ static bool mmu_lookup1(CPUState *cpu, MMULookupPageData *data, MemOp memop,
     CPUTLBEntryFull *full;
     int flags;
 
+    qemu_log("mmu_lookup1: addr=0x%lx, index=%lu, mmu_idx=%d, access_type=%d\n",
+			addr, index, mmu_idx, access_type);
+	qemu_log("mmu_lookup1: tlb_addr=0x%lx, entry=%p\n", tlb_addr, (void*)entry);
+
     /* If the TLB entry is for a different page, reload and try again.  */
     if (!tlb_hit(tlb_addr, addr)) {
+		qemu_log("mmu_lookup1: TLB miss, attempting reload\n");
         if (!victim_tlb_hit(cpu, mmu_idx, index, access_type,
                             addr & TARGET_PAGE_MASK)) {
             tlb_fill_align(cpu, addr, access_type, mmu_idx,
@@ -1655,6 +1663,8 @@ static bool mmu_lookup1(CPUState *cpu, MMULookupPageData *data, MemOp memop,
     }
 
     full = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
+	qemu_log("mmu_lookup1: full=%p, phys_addr=0x%lx, slow_flags[%d]=0x%x\n",
+			(void*)full, full->phys_addr, access_type, full->slow_flags[access_type]);
     flags = tlb_addr & (TLB_FLAGS_MASK & ~TLB_FORCE_SLOW);
     flags |= full->slow_flags[access_type];
 

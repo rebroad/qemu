@@ -421,19 +421,18 @@ static void sparc_raise_mmu_fault(CPUState *cs, hwaddr addr,
     CPUSPARCState *env = cpu_env(cs);
     int fault_type;
 
-#ifdef DEBUG_UNASSIGNED
     if (is_asi) {
-        printf("Unassigned mem %s access of %d byte%s to " HWADDR_FMT_plx
+        qemu_log("Unassigned mem %s access of %d byte%s to " HWADDR_FMT_plx
                " asi 0x%02x from " TARGET_FMT_lx "\n",
                is_exec ? "exec" : is_write ? "write" : "read", size,
                size == 1 ? "" : "s", addr, is_asi, env->pc);
     } else {
-        printf("Unassigned mem %s access of %d byte%s to " HWADDR_FMT_plx
+        qemu_log("Unassigned mem %s access of %d byte%s to " HWADDR_FMT_plx
                " from " TARGET_FMT_lx "\n",
                is_exec ? "exec" : is_write ? "write" : "read", size,
                size == 1 ? "" : "s", addr, env->pc);
     }
-#endif
+	if (size == 4) abort();
     /* Don't overwrite translation and access faults */
     fault_type = (env->mmuregs[3] & 0x1c) >> 2;
     if ((fault_type > 4) || (fault_type == 0)) {

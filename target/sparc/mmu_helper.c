@@ -184,16 +184,19 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
 					qemu_log("Reserved L2 PDE\n");
                     return (3 << 8) | (4 << 2);
                 case 2: /* L3 PTE */
+					qemu_log("L3 PTE\n");
                     page_offset = 0;
                 }
                 full->lg_page_size = TARGET_PAGE_BITS;
                 break;
             case 2: /* L2 PTE */
+				qemu_log("L2 PTE\n");
                 page_offset = address & 0x3f000;
                 full->lg_page_size = 18;
             }
             break;
         case 2: /* L1 PTE */
+			qemu_log("L1 PTE\n");
             page_offset = address & 0xfff000;
             full->lg_page_size = 24;
             break;
@@ -210,11 +213,14 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
     /* update page modified and dirty bits */
     is_dirty = (rw & 1) && !(pde & PG_MODIFIED_MASK);
     if (!(pde & PG_ACCESSED_MASK) || is_dirty) {
+		qemu_log("pde 0x%x -> 0x%x\n", pde, pde|PG_ACCESSED_MASK);
         pde |= PG_ACCESSED_MASK;
         if (is_dirty) {
+		    qemu_log("pde 0x%x -> 0x%x\n", pde, pde|PG_MODIFIED_MASK);
             pde |= PG_MODIFIED_MASK;
         }
         stl_phys_notdirty(cs->as, pde_ptr, pde);
+		qemu_log("after stl_phys_notdirty, pde=0x%x\n", pde);
     }
 
     /* the page can be put in the TLB */
@@ -227,6 +233,8 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
 
     /* Even if large ptes, we map only one 4KB page in the cache to
        avoid filling it too fast */
+	qemu_log("Setting phys_addr. pde=0x%x PTE_ADDR_MASK=0x%x page_offset=0x%lx lg_page_size=%d\n",
+			pde, PTE_ADDR_MASK, page_offset, full->lg_page_size);
     full->phys_addr = ((hwaddr)(pde & PTE_ADDR_MASK) << 4) + page_offset;
     return error_code;
 }

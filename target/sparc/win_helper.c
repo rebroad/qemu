@@ -90,7 +90,7 @@ void cpu_put_psr_raw(CPUSPARCState *env, target_ulong val)
     env->psrpil = (val & PSR_PIL) >> 8;
     env->psrs = (val & PSR_S) ? 1 : 0;
     env->psrps = (val & PSR_PS) ? 1 : 0;
-	qemu_log("cpu_put_psr_paw: val=%d psret=%d\n", val, val & PSR_ET);
+	//qemu_log("cpu_put_psr_paw: val=%d psret=%d\n", val, val & PSR_ET);
     env->psret = (val & PSR_ET) ? 1 : 0;
 #endif
 #if !defined(TARGET_SPARC64)
@@ -134,7 +134,7 @@ void helper_rett(CPUSPARCState *env)
 
     env->psret = 1;
     cwp = cpu_cwp_inc(env, env->cwp + 1) ;
-	qemu_log("helper_rett: psret=1 cwp=%d\n", cwp);
+	//qemu_log("helper_rett: psret=1 cwp=%d\n", cwp);
     if (env->wim & (1 << cwp)) {
         cpu_raise_exception_ra(env, TT_WIN_UNF, GETPC());
     }

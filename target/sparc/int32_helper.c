@@ -102,10 +102,8 @@ void sparc_cpu_do_interrupt(CPUState *cs)
     CPUSPARCState *env = cpu_env(cs);
     int cwp, intno = cs->exception_index;
 
-	qemu_log("sparc_cpu_do_interrupt: exception_index=0x%x, pc=0x%x, npc=0x%x\n",
-			intno, env->pc, env->npc);
-	qemu_log("sparc_cpu_do_interrupt: psret=%d, interrupt_index=0x%x\n",
-			env->psret, env->interrupt_index);
+	//qemu_log("sparc_cpu_do_interrupt: exception_index=0x%x, pc=0x%x, npc=0x%x\n", intno, env->pc, env->npc);
+	//qemu_log("sparc_cpu_do_interrupt: psret=%d, interrupt_index=0x%x\n", env->psret, env->interrupt_index);
 
     if (qemu_loglevel_mask(CPU_LOG_INT)) {
         static int count;
@@ -170,7 +168,7 @@ void sparc_cpu_do_interrupt(CPUState *cs)
     env->pc = env->tbr;
     env->npc = env->pc + 4;
     cs->exception_index = -1;
-	qemu_log("sparc_cpu_do_interrupt: Setting psret to 0, exception_index to -1\n");
+	//qemu_log("sparc_cpu_do_interrupt: Setting psret to 0, exception_index to -1\n");
 
 #if !defined(CONFIG_USER_ONLY)
     /* IRQ acknowledgment */

@@ -69,10 +69,7 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
                                 int *access_index, target_ulong address,
                                 int rw, int mmu_idx)
 {
-    qemu_log("%s: Entering with address=0x%x, rw=%d, mmu_idx=%d\n",
-			__func__, address, rw, mmu_idx);
-	qemu_log("MMU Registers: reg0=0x%x, reg1=0x%x, reg2=0x%x\n",
-			env->mmuregs[0], env->mmuregs[1], env->mmuregs[2]);
+	//qemu_log("MMU Registers: reg0=0x%x, reg1=0x%x, reg2=0x%x\n", env->mmuregs[0], env->mmuregs[1], env->mmuregs[2]);
 
     int access_perms = 0;
     hwaddr pde_ptr;
@@ -207,12 +204,14 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
     access_perms = (pde & PTE_ACCESS_MASK) >> PTE_ACCESS_SHIFT;
     error_code = access_table[*access_index][access_perms];
     if (error_code && !((env->mmuregs[0] & MMU_NF) && is_user)) {
-		qemu_log("%s: error_code=%d, *access_index=%d, access_perms=%d pde=0x%x\n",
-				__func__, error_code, *access_index, access_perms, pde);
-	    qemu_log("MMU Registers: reg0=0x%x, reg1=0x%x, reg2=0x%x\n",
-		    	env->mmuregs[0], env->mmuregs[1], env->mmuregs[2]);
-		if (error_code != 8 || *access_index != 5 || access_perms != 6 )
-            return error_code;
+		if (error_code != 8 || *access_index != 5 || access_perms != 6 ) {
+			qemu_log("%s: error_code=%d, *access_index=%d, access_perms=%d pde=0x%x\n",
+					__func__, error_code, *access_index, access_perms, pde);
+        	qemu_log("%s: Exiting with address=0x%x, rw=%d, mmu_idx=%d\n", __func__, address, rw, mmu_idx);
+	    	qemu_log("MMU Registers: reg0=0x%x, reg1=0x%x, reg2=0x%x\n",
+		    		env->mmuregs[0], env->mmuregs[1], env->mmuregs[2]);
+		}
+        return error_code;
     }
 
     /* update page modified and dirty bits */

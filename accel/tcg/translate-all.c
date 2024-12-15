@@ -275,11 +275,13 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     tcg_func_start(tcg_ctx);
 
     tcg_ctx->cpu = env_cpu(env);
+	//qemu_log("%s: before gen_intermediate_code\n", __func__);
     gen_intermediate_code(env_cpu(env), tb, max_insns, pc, host_pc);
     assert(tb->size != 0);
     tcg_ctx->cpu = NULL;
     *max_insns = tb->icount;
 
+	//qemu_log("%s: before tcg_gen_code\n", __func__);
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 

@@ -2761,7 +2761,7 @@ print_insn_sparc (bfd_vma memaddr, disassemble_info *info)
               /* Can't do simple format if source and dest are different.  */
               continue;
 
-          (*info->fprintf_func) (stream, "%s", opcode->name);
+          (*info->fprintf_func) (stream, "-noom-%s-noom-", opcode->name);
 
           {
             const char *s;
@@ -2939,7 +2939,7 @@ print_insn_sparc (bfd_vma memaddr, disassemble_info *info)
                                 if (printed_one)
                                   (info->fprintf_func) (stream, "|");
                                 name = sparc_decode_membar (bit);
-                                (info->fprintf_func) (stream, "%s", name);
+                                (info->fprintf_func) (stream, "-narm-%s-narm-", name);
                                 printed_one = 1;
                               }
                             bit >>= 1;
@@ -3047,7 +3047,7 @@ print_insn_sparc (bfd_vma memaddr, disassemble_info *info)
                       const char *name = sparc_decode_prefetch (X_RD (insn));
 
                       if (name)
-                        (*info->fprintf_func) (stream, "%s", name);
+                        (*info->fprintf_func) (stream, "-nerm-%s-nerm-", name);
                       else
                         (*info->fprintf_func) (stream, "%ld", X_RD (insn));
                       break;
@@ -3088,7 +3088,7 @@ print_insn_sparc (bfd_vma memaddr, disassemble_info *info)
                         name = sparc_decode_asi_v8 (X_ASI (insn));
 
                       if (name)
-                        (*info->fprintf_func) (stream, "%s", name);
+                        (*info->fprintf_func) (stream, "-name-%s-name-", name);
                       else
                         (*info->fprintf_func) (stream, "(%ld)", X_ASI (insn));
                       break;

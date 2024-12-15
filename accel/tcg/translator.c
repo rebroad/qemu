@@ -117,6 +117,7 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
                      vaddr pc, void *host_pc, const TranslatorOps *ops,
                      DisasContextBase *db)
 {
+	qemu_log("%s: Enter\n", __func__);
     uint32_t cflags = tb_cflags(tb);
     TCGOp *icount_start_insn;
     TCGOp *first_insn_start = NULL;
@@ -236,6 +237,7 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
             qemu_log_unlock(logfile);
         }
     }
+	qemu_log("%s: Exit\n", __func__);
 }
 
 static bool translator_ld(CPUArchState *env, DisasContextBase *db,

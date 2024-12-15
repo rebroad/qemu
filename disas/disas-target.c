@@ -19,6 +19,7 @@ static int translator_read_memory(bfd_vma memaddr, bfd_byte *myaddr,
 
 void target_disas(FILE *out, CPUState *cpu, const struct DisasContextBase *db)
 {
+	//qemu_log("%s: Enter\n", __func__);
     uint64_t code = db->pc_first;
     size_t size = translator_st_len(db);
     uint64_t pc;
@@ -44,8 +45,9 @@ void target_disas(FILE *out, CPUState *cpu, const struct DisasContextBase *db)
 
     for (pc = code; size > 0; pc += count, size -= count) {
         fprintf(out, "0x%08" PRIx64 ":  ", pc);
-        count = s.info.print_insn(pc, &s.info);
-        fprintf(out, "\n");
+        count = s.info.print_insn(pc, &s.info); // HERE
+        fprintf(out, "\ncount=%d,size=%lu,insn_type=%d,data_size=%d,target=0x%lx\n",
+				count, size, s.info.insn_type, s.info.data_size,s.info.target);
         if (count < 0) {
             break;
         }
@@ -57,6 +59,7 @@ void target_disas(FILE *out, CPUState *cpu, const struct DisasContextBase *db)
             break;
         }
     }
+	//qemu_log("%s: Exit\n", __func__);
 }
 
 #ifdef CONFIG_PLUGIN

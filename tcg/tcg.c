@@ -6089,6 +6089,7 @@ static void tcg_out_st_helper_args(TCGContext *s, const TCGLabelQemuLdst *ldst,
 
 int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
 {
+	//qemu_log("%s: Enter\n", __func__);
     int i, start_words, num_insns;
     TCGOp *op;
 

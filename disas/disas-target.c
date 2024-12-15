@@ -53,7 +53,11 @@ void target_disas(FILE *out, CPUState *cpu, const struct DisasContextBase *db, i
 				count,size,s.info.insn_type,s.info.data_size,s.info.target,s.info.num_symbols,s.info.opcode);
 				/*cpu->crash_occurred,cpu->exit_request,cpu->dirty_pages,cpu->exception_index,cpu->halted,
 				cpu->ignore_memory_transaction_failures,cpu->throttle_us_per_full.cpu->cpu_index);*/
-		// TODO - break if erm?
+		if (*erm) {
+			*erm=0;
+			fprintf(out, "%s: Skip this PC as erm was 1\n", __func__);
+			break;
+		}
         if (count < 0) {
             break;
         }

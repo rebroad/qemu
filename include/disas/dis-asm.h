@@ -306,6 +306,8 @@ typedef struct disassemble_info {
   asymbol **symbols;
   /* Number of symbols in array.  */
   int num_symbols;
+  /* Opcode name */
+  char *opcode;
 
   /* For use by the disassembler.
      The top 16 bits are reserved for public use (and are documented here).

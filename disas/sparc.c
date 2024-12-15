@@ -2761,7 +2761,8 @@ print_insn_sparc (bfd_vma memaddr, disassemble_info *info)
               /* Can't do simple format if source and dest are different.  */
               continue;
 
-          (*info->fprintf_func) (stream, "-noom-%s-noom-", opcode->name);
+          (*info->fprintf_func) (stream, "-noom-%s-noom-", opcode->name); // HERE
+		  info->opcode = (char*)opcode->name;
 
           {
             const char *s;

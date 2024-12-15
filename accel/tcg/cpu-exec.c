@@ -995,7 +995,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 mmap_unlock();
 				if (erm) {
 					erm=0;
-					qemu_log("%s: erm=1\n", __func__);
+					qemu_log("%s: erm=1 pc=0x%lx->0x%lx\n", __func__, pc, pc+(vaddr)4);
+					pc+=4;
+					break;
 				}
 
                 /*

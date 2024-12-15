@@ -4,7 +4,7 @@
 /* Disassemble this for me please... (debugging). */
 #ifdef CONFIG_TCG
 void disas(FILE *out, const void *code, size_t size);
-void target_disas(FILE *out, CPUState *cpu, const DisasContextBase *db);
+void target_disas(FILE *out, CPUState *cpu, const DisasContextBase *db, int *erm);
 #endif
 
 void monitor_disas(Monitor *mon, CPUState *cpu, uint64_t pc,

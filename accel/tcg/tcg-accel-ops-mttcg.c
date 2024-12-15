@@ -24,6 +24,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "sysemu/tcg.h"
 #include "sysemu/replay.h"
 #include "sysemu/cpu-timers.h"
@@ -64,6 +65,7 @@ static void mttcg_force_rcu(Notifier *notify, void *data)
 
 static void *mttcg_cpu_thread_fn(void *arg)
 {
+	int erm=0; // HERE
     MttcgForceRcuNotifier force_rcu;
     CPUState *cpu = arg;
 
@@ -106,13 +108,17 @@ static void *mttcg_cpu_thread_fn(void *arg)
                 break;
             case EXCP_ATOMIC:
                 bql_unlock();
-                cpu_exec_step_atomic(cpu);
+                cpu_exec_step_atomic(cpu, &erm);
                 bql_lock();
             default:
                 /* Ignore everything else? */
                 break;
             }
         }
+		if (erm) {
+			erm=0;
+			qemu_log("%s: erm became 1...\n", __func__);
+		}
 
         qatomic_set_mb(&cpu->exit_request, 0);
         qemu_wait_io_event(cpu);

@@ -265,7 +265,7 @@ void page_init(void)
  */
 static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
                            vaddr pc, void *host_pc,
-                           int *max_insns, int64_t *ti)
+                           int *max_insns, int64_t *ti, int *erm)
 {
     int ret = sigsetjmp(tcg_ctx->jmp_trans, 0);
     if (unlikely(ret != 0)) {
@@ -276,7 +276,7 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
 
     tcg_ctx->cpu = env_cpu(env);
 	//qemu_log("%s: before gen_intermediate_code\n", __func__);
-    gen_intermediate_code(env_cpu(env), tb, max_insns, pc, host_pc);
+    gen_intermediate_code(env_cpu(env), tb, max_insns, pc, host_pc, erm);
     assert(tb->size != 0);
     tcg_ctx->cpu = NULL;
     *max_insns = tb->icount;
@@ -288,7 +288,7 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
 /* Called with mmap_lock held for user mode emulation.  */
 TranslationBlock *tb_gen_code(CPUState *cpu,
                               vaddr pc, uint64_t cs_base,
-                              uint32_t flags, int cflags)
+                              uint32_t flags, int cflags, int *erm)
 {
     CPUArchState *env = cpu_env(cpu);
     TranslationBlock *tb, *existing_tb;
@@ -357,7 +357,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
  restart_translate:
     trace_translate_block(tb, pc, tb->tc.ptr);
 
-    gen_code_size = setjmp_gen_code(env, tb, pc, host_pc, &max_insns, &ti);
+    gen_code_size = setjmp_gen_code(env, tb, pc, host_pc, &max_insns, &ti, erm);
     if (unlikely(gen_code_size < 0)) {
         switch (gen_code_size) {
         case -1:

@@ -115,9 +115,8 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
 
 void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
                      vaddr pc, void *host_pc, const TranslatorOps *ops,
-                     DisasContextBase *db)
+                     DisasContextBase *db, int *erm)
 {
-	qemu_log("%s: Enter\n", __func__);
     uint32_t cflags = tb_cflags(tb);
     TCGOp *icount_start_insn;
     TCGOp *first_insn_start = NULL;
@@ -231,13 +230,12 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
             if (!ops->disas_log ||
                 !ops->disas_log(db, cpu, logfile)) {
                 fprintf(logfile, "IN: %s\n", lookup_symbol(db->pc_first));
-                target_disas(logfile, cpu, db);
+                target_disas(logfile, cpu, db, erm);
             }
             fprintf(logfile, "\n");
             qemu_log_unlock(logfile);
         }
     }
-	qemu_log("%s: Exit\n", __func__);
 }
 
 static bool translator_ld(CPUArchState *env, DisasContextBase *db,

@@ -565,7 +565,7 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
     assert_no_pages_locked();
 }
 
-void cpu_exec_step_atomic(CPUState *cpu)
+void cpu_exec_step_atomic(CPUState *cpu, int *erm)
 {
     CPUArchState *env = cpu_env(cpu);
     TranslationBlock *tb;
@@ -597,7 +597,7 @@ void cpu_exec_step_atomic(CPUState *cpu)
         tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
         if (tb == NULL) {
             mmap_lock();
-            tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+            tb = tb_gen_code(cpu, pc, cs_base, flags, cflags, erm);
             mmap_unlock();
         }
 
@@ -952,6 +952,7 @@ static int __attribute__((noinline))
 cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 {
     int ret;
+	int erm=0;
 
     /* if an exception is pending, we execute it here */
     while (!cpu_handle_exception(cpu, &ret)) {
@@ -990,8 +991,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 uint32_t h;
 
                 mmap_lock();
-                tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+                tb = tb_gen_code(cpu, pc, cs_base, flags, cflags, &erm);
                 mmap_unlock();
+				if (erm) {
+					erm=0;
+					qemu_log("%s: erm=1 so break\n", __func__);
+					break;
+				}
 
                 /*
                  * We add the TB in the virtual pc hash table

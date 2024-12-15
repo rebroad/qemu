@@ -24,6 +24,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qemu/lockable.h"
 #include "sysemu/tcg.h"
 #include "sysemu/replay.h"
@@ -179,6 +180,7 @@ static int rr_cpu_count(void)
 
 static void *rr_cpu_thread_fn(void *arg)
 {
+	int erm=0; // HERE
     Notifier force_rcu;
     CPUState *cpu = arg;
 
@@ -269,7 +271,7 @@ static void *rr_cpu_thread_fn(void *arg)
                     break;
                 } else if (r == EXCP_ATOMIC) {
                     bql_unlock();
-                    cpu_exec_step_atomic(cpu);
+                    cpu_exec_step_atomic(cpu, &erm);
                     bql_lock();
                     break;
                 }
@@ -280,6 +282,10 @@ static void *rr_cpu_thread_fn(void *arg)
                 break;
             }
 
+			if (erm) {
+				erm=0;
+				qemu_log("%s: erm became true\n", __func__);
+			}
             cpu = CPU_NEXT(cpu);
         } /* while (cpu && !cpu->exit_request).. */
 

@@ -24,7 +24,7 @@
 #define EXCP_ATOMIC     0x10005 /* stop-the-world and emulate atomic */
 
 void cpu_exec_init_all(void);
-void cpu_exec_step_atomic(CPUState *cpu);
+void cpu_exec_step_atomic(CPUState *cpu, int *erm);
 
 #define REAL_HOST_PAGE_ALIGN(addr) ROUND_UP((addr), qemu_real_host_page_size())
 

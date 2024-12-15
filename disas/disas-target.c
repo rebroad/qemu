@@ -46,13 +46,14 @@ void target_disas(FILE *out, CPUState *cpu, const struct DisasContextBase *db, i
     for (pc = code; size > 0; pc += count, size -= count) {
         fprintf(out, "0x%08" PRIx64 ":  ", pc);
         count = s.info.print_insn(pc, &s.info); // HERE
-		if (strcmp(s.info.opcode, "undef")==0) *erm=1;
+		if (strcmp(s.info.opcode, "unimp")==0) *erm=1;
         fprintf(out, "\ncount=%d,size=%lu,insn_type=%d,data_size=%d,target=%ld,num_symbols=%d,opcode=%s\n",
 				/*",cpu.crash=%d,cpu.exit=%d,cpu.dirty=%d.cpu.exception_index=%d,cpu.halted=%d"
 				",cpu.ignore_mem=%d,cpu.throttle=%dcpu.index=%d\n",*/
 				count,size,s.info.insn_type,s.info.data_size,s.info.target,s.info.num_symbols,s.info.opcode);
 				/*cpu->crash_occurred,cpu->exit_request,cpu->dirty_pages,cpu->exception_index,cpu->halted,
 				cpu->ignore_memory_transaction_failures,cpu->throttle_us_per_full.cpu->cpu_index);*/
+		// TODO - break if erm?
         if (count < 0) {
             break;
         }

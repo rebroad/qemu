@@ -715,8 +715,7 @@ static inline bool cpu_handle_halt(CPUState *cpu)
 	        qemu_log("%s: 1->0\n", __func__);
 
         cpu->halted = 0;
-    } else
-	    qemu_log("%s: 0\n", __func__);
+    }
 #else
 	qemu_log("%s: ?\n", __func__);
 #endif /* !CONFIG_USER_ONLY */

@@ -778,6 +778,8 @@ static void sparc_restore_state_to_opc(CPUState *cs,
 
 static bool sparc_cpu_has_work(CPUState *cs)
 {
+    // REBTODO - maybe increment 2 values here, work or idle, based on the value that can be queried
+    // from the monitor?
     return (cs->interrupt_request & CPU_INTERRUPT_HARD) &&
            cpu_interrupts_enabled(cpu_env(cs));
 }

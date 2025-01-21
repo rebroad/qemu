@@ -85,6 +85,7 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #ifndef CONFIG_USER_ONLY
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
+    // REBTODO - keeps stats of true or false for busy or idle and make queryable from monitor
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
 
@@ -95,6 +96,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (type != TT_EXTINT || cpu_pil_allowed(env, pil)) {
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
+                // REBTODO - can we set cs->halted=1 here like in i386/kvm/kvm.c?
                 return true;
             }
         }

@@ -17,6 +17,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <time.h>
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
@@ -85,7 +86,11 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #ifndef CONFIG_USER_ONLY
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    // REBTODO - keeps stats of true or false for busy or idle and make queryable from monitor
+    static unsigned long long true_count = 0, false_count = 0;
+    static time_t last_print_time = 0;
+    static unsigned long long last_true_count = 0, last_false_count = 0;
+    bool result = false;
+
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
 
@@ -97,11 +102,26 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
                 // REBTODO - can we set cs->halted=1 here like in i386/kvm/kvm.c?
-                return true;
+                result = true;
             }
         }
     }
-    return false;
+
+    if (result)
+        true_count++;
+    else
+        false_count++;
+
+    time_t current_time = time(NULL);
+    if (current_time != last_print_time) {
+        fprintf(stderr, "REB Interrupt stats - True: %llu, False: %llu\n", true_count - last_true_count,
+                false_count - last_false_count);
+        last_print_time = current_time;
+        last_true_count = true_count;
+        last_false_count = false_count;
+    }
+
+    return result;
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -780,10 +800,21 @@ static void sparc_restore_state_to_opc(CPUState *cs,
 
 static bool sparc_cpu_has_work(CPUState *cs)
 {
-    // REBTODO - maybe increment 2 values here, work or idle, based on the value that can be queried
-    // from the monitor?
-    return (cs->interrupt_request & CPU_INTERRUPT_HARD) &&
+    static unsigned long long true_count = 0, false_count = 0;
+    static time_t last_print_time = 0;
+    bool result = (cs->interrupt_request & CPU_INTERRUPT_HARD) &&
            cpu_interrupts_enabled(cpu_env(cs));
+
+    if (result) true_count++;
+    else false_count++;
+
+    time_t current_time = time(NULL);
+    if (current_time != last_print_time) {
+        fprintf(stderr, "REB has_work stats - True: %llu, False: %llu\n", true_count, false_count);
+        last_print_time = current_time;
+    }
+
+    return result;
 }
 
 static int sparc_cpu_mmu_index(CPUState *cs, bool ifetch)

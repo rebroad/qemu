@@ -404,6 +404,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (type != TT_EXTINT || cpu_pil_allowed(env, pil)) {
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
+                // REBTODO - can we set cs->halted=1 here like in i386/kvm/kvm.c?
                 result = true;
             }
         }
@@ -646,9 +647,8 @@ static void sparc_cpu_parse_features(const char *typename, char *features,
 
     if (!features) return;
 
-    for (featurestr = strtok(features, ",");
-        featurestr;
-        featurestr = strtok(NULL, ",")) {
+    for (featurestr = strtok(features, ","); featurestr;
+            featurestr = strtok(NULL, ",")) {
         const char *name;
         const char *val = NULL;
         char *eq = NULL;

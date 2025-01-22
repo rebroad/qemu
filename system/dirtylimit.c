@@ -303,7 +303,7 @@ static void dirtylimit_set_throttle(CPUState *cpu,
             cpu->throttle_us_per_full -= throttle_us;
         }
 
-		qemu_log("%s: sleep_pct = %d\n", __func__, sleep_pct); // REB
+		fprintf(stderr, "%s: sleep_pct = %ld\n", __func__, sleep_pct); // REB
         trace_dirtylimit_throttle_pct(cpu->cpu_index,
                                       sleep_pct,
                                       throttle_us);

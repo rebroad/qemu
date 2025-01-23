@@ -88,6 +88,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
 	static unsigned long long true_count = 0, false_count = 0;
 	static time_t last_print_time = 0;
+	static unsigned long long last_true_count = 0, last_false_count = 0;
 	bool result = false;
 
     if (interrupt_request & CPU_INTERRUPT_HARD) {
@@ -113,8 +114,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
 	time_t current_time = time(NULL);
 	if (current_time != last_print_time) {
-		fprintf(stderr, "REB Interrupt stats - True: %llu, False: %llu\n", true_count, false_count);
+		fprintf(stderr, "REB Interrupt stats - True: %llu, False: %llu\n", true_count - last_true_count,
+				false_count - last_false_count);
 		last_print_time = current_time;
+		last_true_count = true_count;
+		last_false_count = false_count;
 	}
 
     return result;

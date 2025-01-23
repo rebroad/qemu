@@ -18,6 +18,8 @@
  */
 
 #include <time.h>
+#include <unistd.h>
+#include <sys/time.h>
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
@@ -84,42 +86,122 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 }
 
 #ifndef CONFIG_USER_ONLY
+static struct {
+    unsigned long long true_count;
+    unsigned long long false_count;
+    struct timespec last_call_time;
+    struct timespec last_true_time;
+    struct timespec last_false_time;
+
+    // Timing statistics
+    long long total_interval_ns;
+    long long true_interval_ns;
+    long long false_interval_ns;
+    long long min_interval_ns;
+    long long max_interval_ns;
+    long long min_true_interval_ns;
+    long long max_true_interval_ns;
+    long long min_false_interval_ns;
+    long long max_false_interval_ns;
+
+    time_t last_print_time;
+} stats = {0};
+
+static long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
+    return (end->tv_sec - start->tv_sec) * 1000000000LL + 
+           (end->tv_nsec - start->tv_nsec);
+}
+
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-	static unsigned long long true_count = 0, false_count = 0;
-	static time_t last_print_time = 0;
-	static unsigned long long last_true_count = 0, last_false_count = 0;
-	bool result = false;
+    struct timespec current_time;
+    clock_gettime(CLOCK_MONOTONIC, &current_time);
 
+    // Calculate interval since last call
+    long long interval_ns = timespec_diff_ns(&stats.last_call_time, &current_time);
+
+    // Update overall interval stats
+    stats.total_interval_ns += interval_ns;
+    stats.min_interval_ns = (stats.min_interval_ns == 0) ? 
+        interval_ns : (interval_ns < stats.min_interval_ns ? interval_ns : stats.min_interval_ns);
+    stats.max_interval_ns = (interval_ns > stats.max_interval_ns) ? interval_ns : stats.max_interval_ns;
+
+    bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
-
         if (cpu_interrupts_enabled(env) && env->interrupt_index > 0) {
             int pil = env->interrupt_index & 0xf;
             int type = env->interrupt_index & 0xf0;
-
             if (type != TT_EXTINT || cpu_pil_allowed(env, pil)) {
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
-				// REBTODO - can we set cs->halted=1 here like in i386/kvm/kvm.c?
                 result = true;
             }
         }
     }
 
-    if (result)
-		true_count++;
-	else
-		false_count++;
+    // Update result-specific stats
+    if (result) {
+        stats.true_count++;
 
-	time_t current_time = time(NULL);
-	if (current_time != last_print_time) {
-		fprintf(stderr, "REB Interrupt stats - True: %llu, False: %llu\n", true_count - last_true_count,
-				false_count - last_false_count);
-		last_print_time = current_time;
-		last_true_count = true_count;
-		last_false_count = false_count;
-	}
+        // True interval calculation
+        if (stats.last_true_time.tv_sec != 0) {
+            long long true_interval = timespec_diff_ns(&stats.last_true_time, &current_time);
+            stats.true_interval_ns += true_interval;
+            stats.min_true_interval_ns = (stats.min_true_interval_ns == 0) ? 
+                true_interval : (true_interval < stats.min_true_interval_ns ? true_interval : stats.min_true_interval_ns);
+            stats.max_true_interval_ns = (true_interval > stats.max_true_interval_ns) ? true_interval : stats.max_true_interval_ns;
+        }
+        memcpy(&stats.last_true_time, &current_time, sizeof(struct timespec));
+    } else {
+        stats.false_count++;
+
+        // False interval calculation
+        if (stats.last_false_time.tv_sec != 0) {
+            long long false_interval = timespec_diff_ns(&stats.last_false_time, &current_time);
+            stats.false_interval_ns += false_interval;
+            stats.min_false_interval_ns = (stats.min_false_interval_ns == 0) ? 
+                false_interval : (false_interval < stats.min_false_interval_ns ? false_interval : stats.min_false_interval_ns);
+            stats.max_false_interval_ns = (false_interval > stats.max_false_interval_ns) ? false_interval : stats.max_false_interval_ns;
+        }
+        memcpy(&stats.last_false_time, &current_time, sizeof(struct timespec));
+    }
+
+    // Optional sleep mechanism (you can adjust the conditions)
+    //if (interval_ns > 1000000 && interval_ns < 10000000) {  // 1-10ms range example
+    //    usleep(100);
+    //}
+
+    // Print stats every second
+    time_t current_wall_time = time(NULL);
+    if (current_wall_time != stats.last_print_time) {
+        printf("Interrupt Stats:\n"
+               "  Counts - True: %llu, False: %llu\n"
+               "  Avg Interval: %lld ns\n"
+               "  Min/Max Interval: %lld/%lld ns\n"
+               "  Avg True Interval: %lld ns (Min/Max: %lld/%lld)\n"
+               "  Avg False Interval: %lld ns (Min/Max: %lld/%lld)\n",
+               stats.true_count, stats.false_count,
+               stats.total_interval_ns / (stats.true_count + stats.false_count),
+               stats.min_interval_ns, stats.max_interval_ns,
+               stats.true_count ? stats.true_interval_ns / stats.true_count : 0,
+               stats.min_true_interval_ns, stats.max_true_interval_ns,
+               stats.false_count ? stats.false_interval_ns / stats.false_count : 0,
+               stats.min_false_interval_ns, stats.max_false_interval_ns);
+
+        // Reset min/max for next period
+        stats.min_interval_ns = 0;
+        stats.max_interval_ns = 0;
+        stats.min_true_interval_ns = 0;
+        stats.max_true_interval_ns = 0;
+        stats.min_false_interval_ns = 0;
+        stats.max_false_interval_ns = 0;
+
+        stats.last_print_time = current_wall_time;
+    }
+
+    // Update last call time
+    memcpy(&stats.last_call_time, &current_time, sizeof(struct timespec));
 
     return result;
 }

@@ -109,7 +109,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     struct timespec current_time;
     clock_gettime(CLOCK_MONOTONIC, &current_time);
-    static time_t last_print_time = time(NULL);
+    static time_t last_print_time = 0;
 	static int true_count = 0, false_count = 0, sleeps = 0;
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval_ns, max_true_interval_ns;
@@ -150,9 +150,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     time_t current_wall_time = time(NULL);
-    if (current_wall_time != last_print_time) {
+    if (last_print_time && current_wall_time != last_print_time) {
         printf("Interrupt Stats:\n"
-               "  Counts - True: %llu, False: %llu, Sleeps: %d\n"
+               "  Counts - True: %u, False: %u, Sleeps: %u\n"
                "  Avg True Interval: %lld ns (Min/Max: %lld/%lld)\n"
                "  Avg False Interval: %lld ns (Min/Max: %lld/%lld)\n",
                true_count, false_count, sleeps,
@@ -167,18 +167,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 		false_count = 0;
 		true_interval_ns = 0;
 		false_interval_ns = 0;
-        min_interval_ns = 0;
-        max_interval_ns = 0;
         min_true_interval_ns = 0;
         max_true_interval_ns = 0;
         min_false_interval_ns = 0;
         max_false_interval_ns = 0;
 
-        stats.last_print_time = current_wall_time;
+        last_print_time = current_wall_time;
     }
-
-    // Update last call time
-    memcpy(&stats.last_call_time, &current_time, sizeof(struct timespec));
 
     return result;
 }

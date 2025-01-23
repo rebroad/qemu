@@ -91,6 +91,18 @@ static long long timespec_diff_ns(struct timespec *start, struct timespec *end) 
            (end->tv_nsec - start->tv_nsec);
 }
 
+static void timespecadd(struct timespec *a, const struct timespec *b)
+{
+    a->tv_sec += b->tv_sec;
+    a->tv_nsec += b->tv_nsec;
+
+    // Normalize to ensure tv_nsec is between 0 and 999,999,999
+    while (a->tv_nsec >= 1000000000) {
+        a->tv_sec++;
+        a->tv_nsec -= 1000000000;
+    }
+}
+
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     bool result = false;
@@ -114,8 +126,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval_ns, max_true_interval_ns;
     static long long false_interval_ns, min_false_interval_ns, max_false_interval_ns;
+    static long long to_sleep = 50000; // microseconds
 
-    // Update result-specific stats
     if (result) {
         true_count++;
 
@@ -139,9 +151,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 false_interval : (false_interval < min_false_interval_ns ? false_interval : min_false_interval_ns);
             max_false_interval_ns = (false_interval > max_false_interval_ns) ? false_interval : max_false_interval_ns;
 
-            if (false_interval < 420) {
+            if (false_interval < 520) {
                 sleeps++;
-                usleep(100);
+                struct timespec sleep_duration = {0, to_sleep * 1000};
+                timespecadd(&last_false_time, &sleep_duration);
+                timespecadd(&last_true_time, &sleep_duration);
+                usleep(to_sleep);
             }
 
         }
@@ -150,16 +165,20 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     time_t current_wall_time = time(NULL);
-    if (last_print_time && current_wall_time != last_print_time) {
+    if (current_wall_time != last_print_time) {
         printf("Interrupt Stats:\n"
-               "  Counts - True: %u, False: %u, Sleeps: %u\n"
-               "  Avg True Interval: %lld ns (Min/Max: %lld/%lld)\n"
-               "  Avg False Interval: %lld ns (Min/Max: %lld/%lld)\n",
-               true_count, false_count, sleeps,
+               "  Counts - True: %u, False: %u, to_sleep: %llu, sleeps: %u\n"
+               "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
+               "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n",
+               true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval_ns, max_true_interval_ns,
                false_count ? false_interval_ns / false_count : 0,
                min_false_interval_ns, max_false_interval_ns);
+
+        if (sleeps)
+            if (true_count < 100) to_sleep=to_sleep*99/100;
+            else if (true_count >= 100) to_sleep=to_sleep*100/99;
 
         // Reset min/max for next period
         sleeps = 0;

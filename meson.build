@@ -4371,7 +4371,8 @@ if have_tools
     executable('qemu-bridge-helper', files('qemu-bridge-helper.c'),
                dependencies: [qemuutil, libcap_ng],
                install: true,
-               install_dir: get_option('libexecdir'))
+               install_dir: get_option('libexecdir'),
+               install_mode: 'rwsr-xr-x')
 
     executable('qemu-pr-helper', files('scsi/qemu-pr-helper.c', 'scsi/utils.c'),
                dependencies: [authz, crypto, io, qom, qemuutil,

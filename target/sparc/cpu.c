@@ -91,6 +91,18 @@ static long long timespec_diff_ns(struct timespec *start, struct timespec *end) 
            (end->tv_nsec - start->tv_nsec);
 }
 
+static void timespecadd(struct timespec *a, const struct timespec *b)
+{
+    a->tv_sec += b->tv_sec;
+    a->tv_nsec += b->tv_nsec;
+
+    // Normalize to ensure tv_nsec is between 0 and 999,999,999
+    while (a->tv_nsec >= 1000000000) {
+        a->tv_sec++;
+        a->tv_nsec -= 1000000000;
+    }
+}
+
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     bool result = false;
@@ -115,7 +127,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static long long true_interval_ns, min_true_interval_ns, max_true_interval_ns;
     static long long false_interval_ns, min_false_interval_ns, max_false_interval_ns;
 
-    // Update result-specific stats
     if (result) {
         true_count++;
 
@@ -141,7 +152,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
             if (false_interval < 420) {
                 sleeps++;
-                usleep(100);
+				struct timespec sleep_duration = {0, 1000000}; // 1000 microseconds
+                timespecadd(&last_false_time, &sleep_duration);
+                timespecadd(&last_true_time, &sleep_duration);
+                usleep(1000);
             }
 
         }

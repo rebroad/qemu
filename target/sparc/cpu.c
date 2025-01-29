@@ -152,10 +152,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
             if (false_interval < 420) {
                 sleeps++;
-				struct timespec sleep_duration = {0, 1000000}; // 1000 microseconds
+				struct timespec sleep_duration = {0, 10000000}; // 10000 microseconds
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
-                usleep(1000);
+                usleep(10000);
             }
 
         }
@@ -164,7 +164,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     time_t current_wall_time = time(NULL);
-    if (last_print_time && current_wall_time != last_print_time) {
+    if (current_wall_time != last_print_time) {
         printf("Interrupt Stats:\n"
                "  Counts - True: %u, False: %u, Sleeps: %u\n"
                "  Avg True Interval: %lld ns (Min/Max: %lld/%lld)\n"

@@ -131,6 +131,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static int max_true_streak = 0, last_max_true_streak = 0;
 	static int min_true_streak = 0, last_min_true_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0, min_false_streak = 0;
+	static int post_boot_indication = 0; static bool preboot_detected = 0;
 
     if (result) {
         true_count++;
@@ -172,17 +173,24 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval_ns = (false_interval > max_false_interval_ns) ? false_interval : max_false_interval_ns;
 
             erm_sleep = to_sleep;
-			if (last_max_true_streak == 2 && last_max_false_streak == 3 && last_true_count == 100)
-				erm_sleep = 100000;
+			if (last_max_true_streak == 2 && last_max_false_streak == 3 && last_true_count == 100) {
+				erm_sleep = 100000; // Pre-boot
+				preboot_detected = 1;
+			}
             if (false_interval < 520 || erm_sleep > to_sleep) {
-                if (last_max_false_streak > 550 && last_min_true_streak == 1 && last_true_count > 20)
-                    erm_sleep++;
+                if (last_max_false_streak > 550 && last_min_true_streak == 1 && last_true_count > 20) {
+					post_boot_indication++;
+					if (post_boot_indication > 2)
+						erm_sleep = 100000; // Post-shutdown
+				} else
+					post_boot_indication = 0;
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
                 usleep(erm_sleep);
-            }
+            } else
+			    post_boot_indication = 0;
         }
         memcpy(&last_false_time, &current_time, sizeof(struct timespec));
     }
@@ -190,12 +198,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     // Print stats every second
     time_t current_wall_time = time(NULL);
     if (current_wall_time != last_print_time) {
-        printf("Interrupt Stats:\n"
+        printf("Interrupt Stats: %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks (this second): Max: %d, Min: %d\n"
                "  False Streaks (this second): Max: %d, Min: %d\n",
+			   preboot_detected ? "pre-boot " : "", post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval_ns, max_true_interval_ns,
@@ -205,8 +214,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                max_false_streak, min_false_streak);
 
         if (sleeps) {
-            if (true_count < 100) to_sleep = to_sleep * 99 / 100;
-            else to_sleep = to_sleep * 100 / 99;
+            if (true_count < 50) to_sleep = to_sleep * 99 / 100;
+            else if (true_count >= 100) to_sleep = to_sleep * 100 / 99;
         }
 
         last_true_count = true_count;
@@ -219,6 +228,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         min_true_streak = 0; max_true_streak = 0;
         last_max_false_streak = max_false_streak;
         min_false_streak = 0; max_false_streak = 0;
+		preboot_detected = 0;
 
         last_print_time = current_wall_time;
     }

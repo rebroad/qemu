@@ -129,7 +129,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static long to_sleep = 50000, erm_sleep = 50000; // microseconds
     static int current_true_streak = 0, current_false_streak = 0;
     static int max_true_streak = 0, last_max_true_streak = 0;
-	static int min_true_streak = 0, last_min_true_streak = 0;
+	static int min_true_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0, min_false_streak = 0;
 	static int post_boot_indication = 0; static bool preboot_detected = 0;
 
@@ -178,7 +178,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 				preboot_detected = 1;
 			}
             if (false_interval < 520 || erm_sleep > to_sleep) {
-                if (last_max_false_streak > 550 && last_min_true_streak == 1 && last_true_count > 20) {
+                if (last_max_false_streak >= 540 && last_max_false_streak <= 600 && last_max_true_streak == 1 && last_true_count > 20) {
 					post_boot_indication++;
 					if (post_boot_indication > 2)
 						erm_sleep = 100000; // Post-shutdown
@@ -189,8 +189,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
                 usleep(erm_sleep);
-            } else
-			    post_boot_indication = 0;
+            }
         }
         memcpy(&last_false_time, &current_time, sizeof(struct timespec));
     }
@@ -223,7 +222,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         true_interval_ns = 0; false_interval_ns = 0;
         min_true_interval_ns = 0; max_true_interval_ns = 0;
         min_false_interval_ns = 0; max_false_interval_ns = 0;
-        last_min_true_streak = min_true_streak;
 		last_max_true_streak = max_true_streak;
         min_true_streak = 0; max_true_streak = 0;
         last_max_false_streak = max_false_streak;

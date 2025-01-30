@@ -178,7 +178,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 				preboot_detected = 1;
 			}
             if (false_interval < 520 || erm_sleep > to_sleep) {
-                if (last_max_false_streak >= 540 && last_max_false_streak <= 600 && last_max_true_streak == 1 && last_true_count > 20) {
+                if (((last_max_false_streak >= 540 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1 && last_true_count > 20) {
 					post_boot_indication++;
 					if (post_boot_indication > 2)
 						erm_sleep = 100000; // Post-shutdown

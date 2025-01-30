@@ -171,6 +171,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval_ns = (false_interval > max_false_interval_ns) ? false_interval : max_false_interval_ns;
 
             if (false_interval < 520) {
+				if (max_false_streak > 550 && min_true_streak == 1) to_sleep = 100000;
                 sleeps++;
                 struct timespec sleep_duration = {0, to_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
@@ -200,7 +201,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         if (sleeps) {
             if (true_count < 100) to_sleep = to_sleep * 99 / 100;
-            else if (true_count >= 100) to_sleep = to_sleep * 100 / 99;
+            else if (true_count > 100) to_sleep = to_sleep * 100 / 99;
 		}
 
         // Reset per-second stats (min/max streaks reset, current streak persists)

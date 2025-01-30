@@ -168,8 +168,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
             if (false_interval < 520) {
                 erm_sleep = to_sleep;
-                if (last_max_false_streak > 550 && last_min_true_streak == 1 && last_true_count > 20)
-                    erm_sleep = 100000;
+                //if (last_max_false_streak > 550 && last_min_true_streak == 1 && last_true_count > 20)
+                //    erm_sleep = 100000;
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
@@ -184,12 +184,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     time_t current_wall_time = time(NULL);
     if (current_wall_time != last_print_time) {
         printf("Interrupt Stats:\n"
-               "  Counts - True: %u, False: %u, erm_sleep: %lu, sleeps: %u\n"
+               "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks (this second): Max: %d, Min: %d\n"
                "  False Streaks (this second): Max: %d, Min: %d\n",
-               true_count, false_count, erm_sleep, sleeps,
+               true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval_ns, max_true_interval_ns,
                false_count ? false_interval_ns / false_count : 0,
@@ -199,7 +199,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         if (sleeps) {
             if (true_count < 100) to_sleep = to_sleep * 99 / 100;
-            else if (true_count > 100) to_sleep = to_sleep * 100 / 99;
+            else to_sleep = to_sleep * 100 / 99;
         }
 
         last_true_count = true_count;

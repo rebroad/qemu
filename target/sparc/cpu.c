@@ -127,9 +127,18 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static long long true_interval_ns, min_true_interval_ns, max_true_interval_ns;
     static long long false_interval_ns, min_false_interval_ns, max_false_interval_ns;
     static long long to_sleep = 50000; // microseconds
+    static int current_true_streak = 0, current_false_streak = 0;
+    static int max_true_streak = 0, min_true_streak = 0;
+    static int max_false_streak = 0, min_false_streak = 0;
 
     if (result) {
         true_count++;
+        current_true_streak++;
+        if (current_false_streak && (!min_false_streak || current_false_streak < min_false_streak))
+            min_false_streak = current_false_streak;
+        current_false_streak = 0; // Reset false streak
+
+        if (current_true_streak > max_true_streak) max_true_streak = current_true_streak;
 
         // True interval calculation
         if (last_true_time.tv_sec != 0) {
@@ -142,6 +151,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         memcpy(&last_true_time, &current_time, sizeof(struct timespec));
     } else {
         false_count++;
+        current_false_streak++;
+        if (current_true_streak && (!min_true_streak || current_true_streak < min_true_streak))
+            min_true_streak = current_true_streak;
+        current_true_streak = 0; // Reset true streak
+
+        if (current_false_streak > max_false_streak) max_false_streak = current_false_streak;
 
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
@@ -158,7 +173,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 timespecadd(&last_true_time, &sleep_duration);
                 usleep(to_sleep);
             }
-
         }
         memcpy(&last_false_time, &current_time, sizeof(struct timespec));
     }
@@ -169,18 +183,23 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         printf("Interrupt Stats:\n"
                "  Counts - True: %u, False: %u, to_sleep: %llu, sleeps: %u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
-               "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n",
+               "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
+               "  True Streaks (this second): Max: %d, Min: %d\n"
+               "  False Streaks (this second): Max: %d, Min: %d\n",
                true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval_ns, max_true_interval_ns,
                false_count ? false_interval_ns / false_count : 0,
-               min_false_interval_ns, max_false_interval_ns);
+               min_false_interval_ns, max_false_interval_ns,
+               max_true_streak, min_true_streak,
+               max_false_streak, min_false_streak);
 
-        if (sleeps)
-            if (true_count < 100) to_sleep=to_sleep*99/100;
-            else if (true_count >= 100) to_sleep=to_sleep*100/99;
+        if (sleeps) {
+            if (true_count < 100) to_sleep = to_sleep * 99 / 100;
+            else if (true_count >= 100) to_sleep = to_sleep * 100 / 99;
+        }
 
-        // Reset min/max for next period
+        // Reset per-second stats (min/max streaks reset, current streak persists)
         sleeps = 0;
         true_count = 0;
         false_count = 0;
@@ -207,8 +226,7 @@ static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info)
 }
 
 static void
-cpu_add_feat_as_prop(const char *typename, const char *name, const char *val)
-{
+cpu_add_feat_as_prop(const char *typename, const char *name, const char *val) {
     GlobalProperty *prop = g_new0(typeof(*prop), 1);
     prop->driver = typename;
     prop->property = g_strdup(name);
@@ -218,24 +236,18 @@ cpu_add_feat_as_prop(const char *typename, const char *name, const char *val)
 
 /* Parse "+feature,-feature,feature=foo" CPU feature string */
 static void sparc_cpu_parse_features(const char *typename, char *features,
-                                     Error **errp)
-{
+                                     Error **errp) {
     GList *l, *plus_features = NULL, *minus_features = NULL;
     char *featurestr; /* Single 'key=value" string being parsed */
     static bool cpu_globals_initialized;
 
-    if (cpu_globals_initialized) {
-        return;
-    }
+    if (cpu_globals_initialized) return;
     cpu_globals_initialized = true;
 
-    if (!features) {
-        return;
-    }
+    if (!features) return;
 
-    for (featurestr = strtok(features, ",");
-         featurestr;
-         featurestr = strtok(NULL, ",")) {
+    for (featurestr = strtok(features, ","); featurestr;
+            featurestr = strtok(NULL, ",")) {
         const char *name;
         const char *val = NULL;
         char *eq = NULL;

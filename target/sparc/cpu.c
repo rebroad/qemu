@@ -168,8 +168,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
             if (false_interval < 520) {
                 erm_sleep = to_sleep;
-                //if (last_max_false_streak > 550 && last_min_true_streak == 1 && last_true_count > 20)
-                //    erm_sleep = 100000;
+                if (last_max_false_streak > 550 && last_min_true_streak == 1 && last_true_count > 20)
+                    erm_sleep++;
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);

@@ -204,15 +204,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 		}
 
         // Reset per-second stats (min/max streaks reset, current streak persists)
-        sleeps = 0;
-        true_count = 0;
-        false_count = 0;
-        true_interval_ns = 0;
-        false_interval_ns = 0;
-        min_true_interval_ns = 0;
-        max_true_interval_ns = 0;
-        min_false_interval_ns = 0;
-        max_false_interval_ns = 0;
+        sleeps = 0; true_count = 0; false_count = 0;
+        true_interval_ns = 0; false_interval_ns = 0;
+        min_true_interval_ns = 0; max_true_interval_ns = 0;
+        min_false_interval_ns = 0; max_false_interval_ns = 0;
+		min_true_streak = 0; max_true_streak = 0;
+		min_false_streak = 0; max_false_streak = 0;
 
         last_print_time = current_wall_time;
     }

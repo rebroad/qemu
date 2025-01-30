@@ -87,7 +87,7 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 
 #ifndef CONFIG_USER_ONLY
 static long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
-    return (end->tv_sec - start->tv_sec) * 1000000000LL + 
+    return (end->tv_sec - start->tv_sec) * 1000000000LL +
            (end->tv_nsec - start->tv_nsec);
 }
 
@@ -122,10 +122,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     struct timespec current_time;
     clock_gettime(CLOCK_MONOTONIC, &current_time);
     static time_t last_print_time = 0;
-	static int true_count = 0, false_count = 0, sleeps = 0;
+    static int true_count = 0, false_count = 0, sleeps = 0;
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval_ns, max_true_interval_ns;
     static long long false_interval_ns, min_false_interval_ns, max_false_interval_ns;
+    static long long to_sleep = 50000; // microseconds
 
     if (result) {
         true_count++;
@@ -134,7 +135,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         if (last_true_time.tv_sec != 0) {
             long long true_interval = timespec_diff_ns(&last_true_time, &current_time);
             true_interval_ns += true_interval;
-            min_true_interval_ns = (min_true_interval_ns == 0) ? 
+            min_true_interval_ns = (min_true_interval_ns == 0) ?
                 true_interval : (true_interval < min_true_interval_ns ? true_interval : min_true_interval_ns);
             max_true_interval_ns = (true_interval > max_true_interval_ns) ? true_interval : max_true_interval_ns;
         }
@@ -146,16 +147,16 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         if (last_false_time.tv_sec != 0) {
             long long false_interval = timespec_diff_ns(&last_false_time, &current_time);
             false_interval_ns += false_interval;
-            min_false_interval_ns = (min_false_interval_ns == 0) ? 
+            min_false_interval_ns = (min_false_interval_ns == 0) ?
                 false_interval : (false_interval < min_false_interval_ns ? false_interval : min_false_interval_ns);
             max_false_interval_ns = (false_interval > max_false_interval_ns) ? false_interval : max_false_interval_ns;
 
-            if (false_interval < 420) {
+            if (false_interval < 520) {
                 sleeps++;
-				struct timespec sleep_duration = {0, 10000000}; // 10000 microseconds
+                struct timespec sleep_duration = {0, to_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
-                usleep(10000);
+                usleep(to_sleep);
             }
 
         }
@@ -166,21 +167,25 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     time_t current_wall_time = time(NULL);
     if (current_wall_time != last_print_time) {
         printf("Interrupt Stats:\n"
-               "  Counts - True: %u, False: %u, Sleeps: %u\n"
-               "  Avg True Interval: %lld ns (Min/Max: %lld/%lld)\n"
-               "  Avg False Interval: %lld ns (Min/Max: %lld/%lld)\n",
-               true_count, false_count, sleeps,
+               "  Counts - True: %u, False: %u, to_sleep: %llu, sleeps: %u\n"
+               "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
+               "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n",
+               true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval_ns, max_true_interval_ns,
                false_count ? false_interval_ns / false_count : 0,
                min_false_interval_ns, max_false_interval_ns);
 
+        if (sleeps)
+            if (true_count < 100) to_sleep=to_sleep*99/100;
+            else if (true_count >= 100) to_sleep=to_sleep*100/99;
+
         // Reset min/max for next period
         sleeps = 0;
-		true_count = 0;
-		false_count = 0;
-		true_interval_ns = 0;
-		false_interval_ns = 0;
+        true_count = 0;
+        false_count = 0;
+        true_interval_ns = 0;
+        false_interval_ns = 0;
         min_true_interval_ns = 0;
         max_true_interval_ns = 0;
         min_false_interval_ns = 0;

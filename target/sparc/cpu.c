@@ -173,10 +173,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval_ns = (false_interval > max_false_interval_ns) ? false_interval : max_false_interval_ns;
 
             erm_sleep = to_sleep;
-			if (last_max_true_streak == 2 && last_max_false_streak == 3 && last_true_count == 100) {
+			if (last_max_true_streak == 2 && last_max_false_streak == 3 && ((last_true_count <= 3 && preboot_detected) || (last_true_count == 100 && !preboot_detected))) {
 				erm_sleep = 100000; // Pre-boot
 				preboot_detected = 1;
-			}
+			} else
+				preboot_detected = 0;
             if (false_interval < 520 || erm_sleep > to_sleep) {
                 if (((last_max_false_streak >= 540 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1 && last_true_count > 20) {
 					post_boot_indication++;
@@ -226,7 +227,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         min_true_streak = 0; max_true_streak = 0;
         last_max_false_streak = max_false_streak;
         min_false_streak = 0; max_false_streak = 0;
-		preboot_detected = 0;
 
         last_print_time = current_wall_time;
     }

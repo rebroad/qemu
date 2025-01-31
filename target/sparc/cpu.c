@@ -178,9 +178,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			else
 				preboot_detected = 0;
             if (false_interval < 520 || erm_sleep > to_sleep) {
-                if (((last_max_false_streak >= 540 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1 && last_true_count > 20)
-					post_boot_indication++;
-				else {
+                if (((last_max_false_streak >= 540 && last_true_count > 10 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && last_true_count > 15 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1) {
+					if (post_boot_indication < 200) post_boot_indication++;
+				} else {
 					post_boot_indication = 0;
 					if (last_max_true_streak == 2 && false_interval < 342 && last_max_false_streak < 41 && last_min_false_streak < 4)
 						idle_os = 1;

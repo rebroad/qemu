@@ -20,6 +20,11 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <fcntl.h>
+#include <termios.h>
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
@@ -103,8 +108,34 @@ static void timespecadd(struct timespec *a, const struct timespec *b)
     }
 }
 
+static void set_nonblocking_mode(bool enable) {
+    static struct termios oldt, newt;
+    if (enable) {
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL, 0) | O_NONBLOCK);
+    } else {
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL, 0) & ~O_NONBLOCK);
+    }
+}
+
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
+    static bool sleep_enabled = true;
+
+	set_nonblocking_mode(true);
+	char ch;
+	if (read(STDIN_FILENO, &ch, 1) == 1) {
+        if (ch == 'S' || ch == 's') {
+            sleep_enabled = !sleep_enabled;
+            printf("Sleep %s\n", sleep_enabled ? "Enabled" : "Disabled");
+        }
+    }
+    set_nonblocking_mode(false);
+
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
@@ -185,7 +216,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			} else if (last_min_false_interval > 520) idle_os = 0;
 			if (post_boot_indication > 2 || idle_os)
 				erm_sleep = 100000;
-			if (false_interval < 520 || erm_sleep > to_sleep) {
+			if (sleep_enabled && (false_interval < 520 || erm_sleep > to_sleep)) {
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);

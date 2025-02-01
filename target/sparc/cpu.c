@@ -126,6 +126,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval, max_true_interval;
     static long long false_interval_ns, min_false_interval, max_false_interval;
+	static long long last_min_false_interval = 0;
     static long to_sleep = 50000, erm_sleep = 50000; // microseconds
     static int current_true_streak = 0, current_false_streak = 0;
     static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
@@ -173,7 +174,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval = (false_interval > max_false_interval) ? false_interval : max_false_interval;
 
             erm_sleep = to_sleep;
-			if ((last_max_false_streak < 8 && last_true_count <= 100 && preboot_detected) || (last_max_false_streak == 3 && last_max_true_streak == 2 && last_true_count == 100 && !preboot_detected))
+			if (last_min_false_interval < 1000 && ((last_max_false_streak < 8 && last_true_count <= 100 && preboot_detected) || (last_max_false_streak == 3 && last_max_true_streak == 2 && last_true_count == 100 && !preboot_detected)))
 				preboot_detected = 1;
 			else
 				preboot_detected = 0;
@@ -226,6 +227,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         sleeps = 0; true_count = 0; false_count = 0;
         true_interval_ns = 0; false_interval_ns = 0;
         min_true_interval = 0; max_true_interval = 0;
+		last_min_false_interval = min_false_interval;
         min_false_interval = 0; max_false_interval = 0;
 		last_max_true_streak = max_true_streak;
         min_true_streak = 0; max_true_streak = 0;

@@ -124,8 +124,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static time_t last_print_time = 0;
     static int true_count = 0, last_true_count = 0, false_count = 0, sleeps = 0;
     static struct timespec last_true_time, last_false_time;
-    static long long true_interval_ns, min_true_interval_ns, max_true_interval_ns;
-    static long long false_interval_ns, min_false_interval_ns, max_false_interval_ns;
+    static long long true_interval_ns, min_true_interval, max_true_interval;
+    static long long false_interval_ns, min_false_interval, max_false_interval;
     static long to_sleep = 50000, erm_sleep = 50000; // microseconds
     static int current_true_streak = 0, current_false_streak = 0;
     static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
@@ -148,9 +148,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         if (last_true_time.tv_sec != 0) {
             long long true_interval = timespec_diff_ns(&last_true_time, &current_time);
             true_interval_ns += true_interval;
-            min_true_interval_ns = (min_true_interval_ns == 0) ?
-                true_interval : (true_interval < min_true_interval_ns ? true_interval : min_true_interval_ns);
-            max_true_interval_ns = (true_interval > max_true_interval_ns) ? true_interval : max_true_interval_ns;
+            min_true_interval = (min_true_interval == 0) ?
+                true_interval : (true_interval < min_true_interval ? true_interval : min_true_interval);
+            max_true_interval = (true_interval > max_true_interval) ? true_interval : max_true_interval;
         }
         memcpy(&last_true_time, &current_time, sizeof(struct timespec));
     } else {
@@ -168,9 +168,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         if (last_false_time.tv_sec != 0) {
             long long false_interval = timespec_diff_ns(&last_false_time, &current_time);
             false_interval_ns += false_interval;
-            min_false_interval_ns = (min_false_interval_ns == 0) ?
-                false_interval : (false_interval < min_false_interval_ns ? false_interval : min_false_interval_ns);
-            max_false_interval_ns = (false_interval > max_false_interval_ns) ? false_interval : max_false_interval_ns;
+            min_false_interval = (min_false_interval == 0) ?
+                false_interval : (false_interval < min_false_interval ? false_interval : min_false_interval);
+            max_false_interval = (false_interval > max_false_interval) ? false_interval : max_false_interval;
 
             erm_sleep = to_sleep;
 			if ((last_max_false_streak < 8 && last_true_count <= 100 && preboot_detected) || (last_max_false_streak == 3 && last_max_true_streak == 2 && last_true_count == 100 && !preboot_detected))
@@ -211,9 +211,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			   preboot_detected ? "pre-boot " : "", post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
-               min_true_interval_ns, max_true_interval_ns,
+               min_true_interval, max_true_interval,
                false_count ? false_interval_ns / false_count : 0,
-               min_false_interval_ns, max_false_interval_ns,
+               min_false_interval, max_false_interval,
                max_true_streak, min_true_streak,
                max_false_streak, min_false_streak);
 
@@ -225,8 +225,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         last_true_count = true_count;
         sleeps = 0; true_count = 0; false_count = 0;
         true_interval_ns = 0; false_interval_ns = 0;
-        min_true_interval_ns = 0; max_true_interval_ns = 0;
-        min_false_interval_ns = 0; max_false_interval_ns = 0;
+        min_true_interval = 0; max_true_interval = 0;
+        min_false_interval = 0; max_false_interval = 0;
 		last_max_true_streak = max_true_streak;
         min_true_streak = 0; max_true_streak = 0;
         last_min_false_streak = min_false_streak;

@@ -126,13 +126,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval, max_true_interval;
     static long long false_interval_ns, min_false_interval, max_false_interval;
-	static long long last_min_false_interval = 0;
     static long to_sleep = 50000, erm_sleep = 50000; // microseconds
     static int current_true_streak = 0, current_false_streak = 0;
     static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
-	static int post_boot_indication = 0; static bool preboot_detected = 0, idle_os = 0;
+	static int post_boot_indication = 0; static bool idle_os = 0;
 
     if (result) {
         true_count++;
@@ -174,10 +173,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval = (false_interval > max_false_interval) ? false_interval : max_false_interval;
 
             erm_sleep = to_sleep;
-			if (((last_min_false_interval < 30000 && last_max_false_streak < 8 && preboot_detected) || (last_min_false_interval < 1000 && last_max_false_streak == 3 && last_max_true_streak == 2 && last_true_count == 100 && !preboot_detected)))
-				preboot_detected = 1;
-			else
-				preboot_detected = 0;
             if (false_interval < 520 || erm_sleep > to_sleep) {
                 if (((last_max_false_streak >= 540 && last_true_count > 10 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && last_true_count > 15 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1) {
 					if (post_boot_indication < 200) post_boot_indication++;
@@ -187,7 +182,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 						idle_os = 1;
 				}
 			}
-			if (post_boot_indication > 2 || idle_os || preboot_detected)
+			if (post_boot_indication > 2 || idle_os)
 				erm_sleep = 100000;
 			if (false_interval < 520 || erm_sleep > to_sleep) {
                 sleeps++;
@@ -209,7 +204,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks (this second): Max: %d, Min: %d\n"
                "  False Streaks (this second): Max: %d, Min: %d\n",
-			   preboot_detected ? "pre-boot " : "", post_boot_indication > 2 ? "post-boot" : "",
+			   idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,
@@ -227,7 +222,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         sleeps = 0; true_count = 0; false_count = 0;
         true_interval_ns = 0; false_interval_ns = 0;
         min_true_interval = 0; max_true_interval = 0;
-		last_min_false_interval = min_false_interval;
         min_false_interval = 0; max_false_interval = 0;
 		last_max_true_streak = max_true_streak;
         min_true_streak = 0; max_true_streak = 0;

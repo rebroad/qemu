@@ -126,6 +126,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval, max_true_interval;
     static long long false_interval_ns, min_false_interval, max_false_interval;
+	static long long last_min_false_interval = 0;
     static long to_sleep = 50000, erm_sleep = 50000; // microseconds
     static int current_true_streak = 0, current_false_streak = 0;
     static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
@@ -173,7 +174,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval = (false_interval > max_false_interval) ? false_interval : max_false_interval;
 
             erm_sleep = to_sleep;
-            if (false_interval < 520 || erm_sleep > to_sleep) {
+            if (false_interval < 520) {
                 if (((last_max_false_streak >= 540 && last_true_count > 10 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && last_true_count > 15 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1) {
 					if (post_boot_indication < 200) post_boot_indication++;
 				} else {
@@ -181,7 +182,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 					if (last_max_true_streak == 2 && false_interval < 342 && last_max_false_streak < 41 && last_min_false_streak < 4)
 						idle_os = 1;
 				}
-			}
+			} else if (last_min_false_interval > 520) idle_os = 0;
 			if (post_boot_indication > 2 || idle_os)
 				erm_sleep = 100000;
 			if (false_interval < 520 || erm_sleep > to_sleep) {
@@ -222,6 +223,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         sleeps = 0; true_count = 0; false_count = 0;
         true_interval_ns = 0; false_interval_ns = 0;
         min_true_interval = 0; max_true_interval = 0;
+		last_min_false_interval = min_false_interval;
         min_false_interval = 0; max_false_interval = 0;
 		last_max_true_streak = max_true_streak;
         min_true_streak = 0; max_true_streak = 0;

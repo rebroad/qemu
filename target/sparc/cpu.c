@@ -174,7 +174,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval = (false_interval > max_false_interval) ? false_interval : max_false_interval;
 
             erm_sleep = to_sleep;
-			if (((last_min_false_interval < 30000 && last_max_false_streak < 8 && last_true_count <= 100 && preboot_detected) || (last_min_false_interval < 1000 && last_max_false_streak == 3 && last_max_true_streak == 2 && last_true_count == 100 && !preboot_detected)))
+			if (((last_min_false_interval < 30000 && last_max_false_streak < 8 && preboot_detected) || (last_min_false_interval < 1000 && last_max_false_streak == 3 && last_max_true_streak == 2 && last_true_count == 100 && !preboot_detected)))
 				preboot_detected = 1;
 			else
 				preboot_detected = 0;

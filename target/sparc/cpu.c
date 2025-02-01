@@ -108,33 +108,19 @@ static void timespecadd(struct timespec *a, const struct timespec *b)
     }
 }
 
-static void set_nonblocking_mode(bool enable) {
-    static struct termios oldt, newt;
-    if (enable) {
-        tcgetattr(STDIN_FILENO, &oldt);
-        newt = oldt;
-        newt.c_lflag &= ~(ICANON | ECHO);
-        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-        fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL, 0) | O_NONBLOCK);
+static bool file_exists(const char *filename) {
+	if (access(filename, F_OK) == 0) {
+        printf("File '%s' exists.\n", filename); // Debug print
+        return true;
     } else {
-        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-        fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL, 0) & ~O_NONBLOCK);
+        printf("File '%s' does not exist. Error: %s\n", filename, strerror(errno)); // Debug print
+        return false;
     }
 }
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     static bool sleep_enabled = true;
-
-	set_nonblocking_mode(true);
-	char ch;
-	if (read(STDIN_FILENO, &ch, 1) == 1) {
-        if (ch == 'S' || ch == 's') {
-            sleep_enabled = !sleep_enabled;
-            printf("Sleep %s\n", sleep_enabled ? "Enabled" : "Disabled");
-        }
-    }
-    set_nonblocking_mode(false);
 
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
@@ -230,6 +216,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     // Print stats every second
     time_t current_wall_time = time(NULL);
     if (current_wall_time != last_print_time) {
+	    static const char *sleep_file = "sleep_enabled.txt";
+        sleep_enabled = file_exists(sleep_file);
+
         printf("Interrupt Stats: %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"

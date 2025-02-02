@@ -108,13 +108,55 @@ static void timespecadd(struct timespec *a, const struct timespec *b)
     }
 }
 
-static bool file_exists(const char *filename) {
-	if (access(filename, F_OK) == 0) {
-        //printf("File '%s' exists.\n", filename); // Debug print
-        return true;
-    } else {
-        //printf("File '%s' does not exist. Error: %s\n", filename, strerror(errno)); // Debug print
+struct SleepCriteria {
+    bool on_true;           // Whether to sleep on TRUE results
+    bool compare_over;      // true = OVER, false = BELOW
+    long long threshold;    // Threshold in nanoseconds
+    bool valid;            // Whether criteria was successfully parsed
+};
+
+// Add this function to parse the sleep file
+static struct SleepCriteria parse_sleep_file(const char *filename) {
+    struct SleepCriteria criteria = {0};
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        return criteria;
+    }
+
+    char line[256];
+    char value[32];
+    
+    while (fgets(line, sizeof(line), file)) {
+        if (sscanf(line, "RESULT=%s", value) == 1) {
+            criteria.on_true = (strcmp(value, "TRUE") == 0);
+        }
+        else if (sscanf(line, "COMPARE=%s", value) == 1) {
+            criteria.compare_over = (strcmp(value, "OVER") == 0);
+        }
+        else if (sscanf(line, "THRESHOLD=%lld", &criteria.threshold) == 1) {
+            criteria.valid = true;
+        }
+    }
+    
+    fclose(file);
+    return criteria;
+}
+
+static bool should_sleep(struct SleepCriteria criteria, bool result, long long interval) {
+    if (!criteria.valid) {
         return false;
+    }
+    
+    // Only proceed if we're checking for the correct result type
+    if (criteria.on_true != result) {
+        return false;
+    }
+    
+    // Check if interval meets the threshold criteria
+    if (criteria.compare_over) {
+        return interval > criteria.threshold;
+    } else {
+        return interval < criteria.threshold;
     }
 }
 
@@ -239,14 +281,20 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     if (current_time != last_print_time) {
+		sleep_criteria = parse_sleep_file(sleep_file);
 
         printf("Interrupt Stats: %s%s\n"
+			   "Sleep Criteria: %s on %s %s %lld ns\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n"
                "  False Streaks: Min: %d, Max: %d\n",
 			   idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
+			   sleep_criteria.valid ? "Active" : "Invalid",
+			   sleep_criteria.on_true ? "TRUE" : "FALSE",
+			   sleep_criteria.compare_over ? "OVER" : "BELOW",
+			   sleep_criteria.threshold,
                true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,

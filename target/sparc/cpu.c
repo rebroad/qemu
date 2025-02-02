@@ -110,10 +110,10 @@ static void timespecadd(struct timespec *a, const struct timespec *b)
 
 static bool file_exists(const char *filename) {
 	if (access(filename, F_OK) == 0) {
-        printf("File '%s' exists.\n", filename); // Debug print
+        //printf("File '%s' exists.\n", filename); // Debug print
         return true;
     } else {
-        printf("File '%s' does not exist. Error: %s\n", filename, strerror(errno)); // Debug print
+        //printf("File '%s' does not exist. Error: %s\n", filename, strerror(errno)); // Debug print
         return false;
     }
 }
@@ -223,16 +223,16 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
-               "  True Streaks (this second): Max: %d, Min: %d\n"
-               "  False Streaks (this second): Max: %d, Min: %d\n",
+               "  True Streaks: Min: %d, Max: %d\n"
+               "  False Streaks: Min: %d, Max: %d\n",
 			   idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,
                false_count ? false_interval_ns / false_count : 0,
                min_false_interval, max_false_interval,
-               max_true_streak, min_true_streak,
-               max_false_streak, min_false_streak);
+               min_true_streak, max_true_streak,
+               min_false_streak, max_false_streak);
 
         if (sleeps) {
             if (true_count < 50) to_sleep = to_sleep * 99 / 100;

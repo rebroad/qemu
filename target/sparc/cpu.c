@@ -120,8 +120,6 @@ static bool file_exists(const char *filename) {
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    static bool sleep_enabled = true;
-
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
@@ -136,10 +134,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         }
     }
 
-    struct timespec current_time;
-    clock_gettime(CLOCK_MONOTONIC, &current_time);
-    static time_t last_print_time = 0;
-    static int true_count = 0, last_true_count = 0, false_count = 0, sleeps = 0;
+    static bool sleep_enabled = true, measuring_mode = false;
+    struct timespec current_ts;
+    clock_gettime(CLOCK_MONOTONIC, &current_ts);
+    static time_t last_print_time = 0, last_measure_time = 0;
+    static int true_count = 0, last_true_count = 0, false_count = 0, sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval, max_true_interval;
     static long long false_interval_ns, min_false_interval, max_false_interval;
@@ -150,6 +149,20 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
 	static int post_boot_indication = 0; static bool idle_os = 0;
+
+    time_t current_time = time(NULL);
+
+    // Every 20 seconds, disable sleep for a 1 second to measure
+	if (current_time - last_measure_time >= 20) {
+		measuring_mode = true;
+		last_measure_time = current_time;
+		sleep_enabled = false;
+	} else if (measuring_mode && current_time - last_measure_time >= 1) {
+		natural_true_rate = true_count;
+		measuring_mode = false;
+	    static const char *sleep_file = "sleep_enabled.txt";
+        sleep_enabled = file_exists(sleep_file);
+	}
 
     if (result) {
         true_count++;
@@ -164,13 +177,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         // True interval calculation
         if (last_true_time.tv_sec != 0) {
-            long long true_interval = timespec_diff_ns(&last_true_time, &current_time);
+            long long true_interval = timespec_diff_ns(&last_true_time, &current_ts);
             true_interval_ns += true_interval;
             min_true_interval = (min_true_interval == 0) ?
                 true_interval : (true_interval < min_true_interval ? true_interval : min_true_interval);
             max_true_interval = (true_interval > max_true_interval) ? true_interval : max_true_interval;
         }
-        memcpy(&last_true_time, &current_time, sizeof(struct timespec));
+        memcpy(&last_true_time, &current_ts, sizeof(struct timespec));
     } else {
         false_count++;
         current_false_streak++;
@@ -184,7 +197,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
-            long long false_interval = timespec_diff_ns(&last_false_time, &current_time);
+            long long false_interval = timespec_diff_ns(&last_false_time, &current_ts);
             false_interval_ns += false_interval;
             min_false_interval = (min_false_interval == 0) ?
                 false_interval : (false_interval < min_false_interval ? false_interval : min_false_interval);
@@ -210,14 +223,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 usleep(erm_sleep);
 			}
         }
-        memcpy(&last_false_time, &current_time, sizeof(struct timespec));
+        memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }
 
+
     // Print stats every second
-    time_t current_wall_time = time(NULL);
-    if (current_wall_time != last_print_time) {
-	    static const char *sleep_file = "sleep_enabled.txt";
-        sleep_enabled = file_exists(sleep_file);
+    if (current_time != last_print_time) {
 
         printf("Interrupt Stats: %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u\n"
@@ -235,8 +246,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                min_false_streak, max_false_streak);
 
         if (sleeps) {
-            if (true_count < 50) to_sleep = to_sleep * 99 / 100;
-            else if (true_count >= 100) to_sleep = to_sleep * 100 / 99;
+            if (true_count < natural_true_rate / 2) to_sleep = to_sleep * 99 / 100;
+            else if (true_count >= natural_true_rate) to_sleep = to_sleep * 100 / 99;
         }
 
         last_true_count = true_count;
@@ -251,7 +262,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         last_max_false_streak = max_false_streak;
         min_false_streak = 0; max_false_streak = 0;
 
-        last_print_time = current_wall_time;
+        last_print_time = current_time;
     }
 
     return result;

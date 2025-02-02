@@ -143,7 +143,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static long long true_interval_ns, min_true_interval, max_true_interval;
     static long long false_interval_ns, min_false_interval, max_false_interval;
 	static long long last_min_false_interval = 0;
-    static long to_sleep = 50000, erm_sleep = 50000; // microseconds
+    static long to_sleep = 19000, erm_sleep = 0; // microseconds
     static int current_true_streak = 0, current_false_streak = 0;
     static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
     static int min_false_streak = 0, last_min_false_streak = 0;
@@ -213,7 +213,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 						idle_os = 1;
 				}
 			} else if (last_min_false_interval > 520) idle_os = 0;
-			if (post_boot_indication > 2 || idle_os)
+			if (post_boot_indication > 2)
 				erm_sleep = 100000;
 			if (sleep_enabled && (false_interval < 520 || erm_sleep > to_sleep)) {
                 sleeps++;

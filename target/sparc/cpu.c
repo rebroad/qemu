@@ -149,6 +149,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
 	static int post_boot_indication = 0; static bool idle_os = 0;
+	static const char *sleep_file = "sleep_enabled.txt";
+	static struct SleepCriteria sleep_criteria = {0};
 
     time_t current_time = time(NULL);
 
@@ -160,8 +162,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 	} else if (measuring_mode && current_time - last_measure_time >= 1) {
 		natural_true_rate = true_count;
 		measuring_mode = false;
-	    static const char *sleep_file = "sleep_enabled.txt";
-        sleep_enabled = file_exists(sleep_file);
+        sleep_enabled = true;
 	}
 
     if (result) {
@@ -182,6 +183,15 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             min_true_interval = (min_true_interval == 0) ?
                 true_interval : (true_interval < min_true_interval ? true_interval : min_true_interval);
             max_true_interval = (true_interval > max_true_interval) ? true_interval : max_true_interval;
+
+            erm_sleep = to_sleep;
+			if (sleep_enabled && (should_sleep(sleep_criteria, true, true_interval) || erm_sleep > to_sleep)) {
+                sleeps++;
+                struct timespec sleep_duration = {0, erm_sleep * 1000};
+                timespecadd(&last_false_time, &sleep_duration);
+                timespecadd(&last_true_time, &sleep_duration);
+                usleep(erm_sleep);
+			}
         }
         memcpy(&last_true_time, &current_ts, sizeof(struct timespec));
     } else {
@@ -215,7 +225,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			} else if (last_min_false_interval > 520) idle_os = 0;
 			if (post_boot_indication > 2)
 				erm_sleep = 100000;
-			if (sleep_enabled && (false_interval < 520 || erm_sleep > to_sleep)) {
+			if (sleep_enabled && (should_sleep(sleep_criteria, false, false_interval) || erm_sleep > to_sleep)) {
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);

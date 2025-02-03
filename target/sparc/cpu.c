@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <math.h>
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
@@ -160,6 +161,73 @@ static bool should_sleep(struct SleepCriteria criteria, bool result, long long i
     }
 }
 
+#define NUM_BANDS 256
+#define HISTORY_SECONDS 60
+
+struct TimingSpectrum {
+    // Use logarithmic bands to better capture the 300ns - 100ms range
+    unsigned long long band_boundaries[NUM_BANDS + 1];
+    unsigned int counts[NUM_BANDS];
+    unsigned int total_samples;
+    time_t timestamp;
+};
+
+struct SystemState {
+    struct TimingSpectrum false_intervals[HISTORY_SECONDS];
+    struct TimingSpectrum true_intervals[HISTORY_SECONDS];
+    struct TimingSpectrum total_intervals[HISTORY_SECONDS];
+    int current_vm_state;  // 0 for idle, 1 for busy
+    int current_index;     // Current position in circular buffer
+};
+
+static void initialize_bands(unsigned long long *boundaries) {
+    // Min timing: ~300ns, Max timing: ~100ms
+    double min_log = log10(300.0);
+    double max_log = log10(100000000.0);
+    double step = (max_log - min_log) / NUM_BANDS;
+
+    for (int i = 0; i <= NUM_BANDS; i++) {
+        boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
+    }
+}
+
+static void add_timing_sample(struct TimingSpectrum *spectrum, unsigned long long timing) {
+    for (int i = 0; i < NUM_BANDS; i++) {
+        if (timing < spectrum->band_boundaries[i + 1]) {
+            spectrum->counts[i]++;
+            break;
+        }
+    }
+    spectrum->total_samples++;
+}
+
+static void output_csv(FILE *f, const struct SystemState *state) {
+    fprintf(f, "Timestamp,VMState,IntervalType,Band,LowerBound,UpperBound,Count\n");
+
+    for (int t = 0; t < HISTORY_SECONDS; t++) {
+        for (int b = 0; b < NUM_BANDS; b++) {
+            fprintf(f, "%ld,%d,FALSE,%d,%llu,%llu,%u\n",
+                   state->false_intervals[t].timestamp,
+                   state->current_vm_state, b,
+                   state->false_intervals[t].band_boundaries[b],
+                   state->false_intervals[t].band_boundaries[b+1],
+                   state->false_intervals[t].counts[b]);
+            fprintf(f, "%ld,%d,TRUE,%d,%llu,%llu,%u\n",
+                   state->true_intervals[t].timestamp,
+                   state->current_vm_state, b,
+                   state->true_intervals[t].band_boundaries[b],
+                   state->true_intervals[t].band_boundaries[b+1],
+                   state->true_intervals[t].counts[b]);
+            fprintf(f, "%ld,%d,TOTAL,%d,%llu,%llu,%u\n",
+                   state->total_intervals[t].timestamp,
+                   state->current_vm_state, b,
+                   state->total_intervals[t].band_boundaries[b],
+                   state->total_intervals[t].band_boundaries[b+1],
+                   state->total_intervals[t].counts[b]);
+        }
+    }
+}
+
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     bool result = false;
@@ -262,7 +330,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         if (last_true_time.tv_sec != 0) {
             long long interval = timespec_diff_ns(&last_true_time, &current_ts);
 			if (system_state.current_vm_state < 2)
-				add_timing_sample(&system_state.true_intervals[system_dtate.current_index], interval);
+				add_timing_sample(&system_state.true_intervals[system_state.current_index], interval);
             true_interval_ns += interval;
             min_true_interval = (min_true_interval == 0) ?
                 interval : (interval < min_true_interval ? interval : min_true_interval);

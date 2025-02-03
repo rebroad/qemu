@@ -192,6 +192,7 @@ static void update_timing_correlation(struct TimingSpectrum *spectrum, bool is_i
 }
 
 #define CORRELATION_FILE "timing_correlation.bin"
+#define BOOTDISK_FILE ".go-boot"
 
 static void save_timing_correlation(void) {
     FILE *f = fopen(CORRELATION_FILE, "wb");
@@ -336,7 +337,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
-	static int post_boot_indication = 0; static bool idle_os = 0;
+	static int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
 
     // Load existing correlation data
 	if (!correlation_loaded) {
@@ -499,6 +500,17 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 				timing_correlation.busy_sample_count >= 100) {
 				save_timing_correlation();
 			}
+		}
+
+		if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 4608 && min_false_interval < 6965 && (false_interval_ns / false_count) > 6644546 && (false_interval_ns / false_count) < 7111839 && (true_interval_ns / true_count) > 9999178 && (true_interval_ns / true_count) < 10099196 && min_false_streak == 1 && max_false_streak < 6 && min_true_streak == 1 && max_true_streak == 2) {
+			prom_boot++;
+			if (prom_boot == 2) {
+				printf("\nTRIGGER BOOT\n");
+				fopen(BOOTDISK_FILE, "w");
+			}
+		} else {
+			unlink(BOOTDISK_FILE);
+			prom_boot = 0;
 		}
 
         printf("Interrupt Stats: %s%s\n"

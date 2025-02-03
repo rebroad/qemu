@@ -92,6 +92,9 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 }
 
 #ifndef CONFIG_USER_ONLY
+#define NUM_BANDS 256
+#define HISTORY_SECONDS 60
+
 static long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
     return (end->tv_sec - start->tv_sec) * 1000000000LL +
            (end->tv_nsec - start->tv_nsec);
@@ -109,61 +112,6 @@ static void timespecadd(struct timespec *a, const struct timespec *b)
     }
 }
 
-struct SleepCriteria {
-    bool on_true;           // Whether to sleep on TRUE results
-    bool compare_over;      // true = OVER, false = BELOW
-    long long threshold;    // Threshold in nanoseconds
-    bool valid;            // Whether criteria was successfully parsed
-};
-
-// Add this function to parse the sleep file
-static struct SleepCriteria parse_sleep_file(const char *filename) {
-    struct SleepCriteria criteria = {0};
-    FILE *file = fopen(filename, "r");
-    if (!file) {
-        return criteria;
-    }
-
-    char line[256];
-    char value[32];
-    
-    while (fgets(line, sizeof(line), file)) {
-        if (sscanf(line, "RESULT=%s", value) == 1) {
-            criteria.on_true = (strcmp(value, "TRUE") == 0);
-        }
-        else if (sscanf(line, "COMPARE=%s", value) == 1) {
-            criteria.compare_over = (strcmp(value, "OVER") == 0);
-        }
-        else if (sscanf(line, "THRESHOLD=%lld", &criteria.threshold) == 1) {
-            criteria.valid = true;
-        }
-    }
-    
-    fclose(file);
-    return criteria;
-}
-
-static bool should_sleep(struct SleepCriteria criteria, bool result, long long interval) {
-    if (!criteria.valid) {
-        return false;
-    }
-    
-    // Only proceed if we're checking for the correct result type
-    if (criteria.on_true != result) {
-        return false;
-    }
-    
-    // Check if interval meets the threshold criteria
-    if (criteria.compare_over) {
-        return interval > criteria.threshold;
-    } else {
-        return interval < criteria.threshold;
-    }
-}
-
-#define NUM_BANDS 256
-#define HISTORY_SECONDS 60
-
 struct TimingSpectrum {
     // Use logarithmic bands to better capture the 300ns - 100ms range
     unsigned long long band_boundaries[NUM_BANDS + 1];
@@ -180,6 +128,109 @@ struct SystemState {
     int current_index;     // Current position in circular buffer
 };
 
+static struct SystemState system_state = {0};
+
+struct TimingCorrelation {
+    double false_mean;
+    double true_mean;
+    double total_mean;
+    double false_variance;
+    double true_variance;
+    double total_variance;
+    int idle_sample_count;
+    int busy_sample_count;
+};
+
+static struct TimingCorrelation timing_correlation = {0};
+
+static void update_timing_correlation(struct TimingSpectrum *spectrum, bool is_idle) {
+    unsigned long long total = 0;
+    unsigned int count = 0;
+    
+    // Calculate mean
+    for (int i = 0; i < NUM_BANDS; i++) {
+        total += spectrum->band_boundaries[i] * spectrum->counts[i];
+        count += spectrum->counts[i];
+    }
+    
+    if (count == 0) return;
+    
+    double mean = (double)total / count;
+    
+    // Calculate variance
+    double variance = 0;
+    for (int i = 0; i < NUM_BANDS; i++) {
+        for (unsigned int j = 0; j < spectrum->counts[i]; j++) {
+            double diff = spectrum->band_boundaries[i] - mean;
+            variance += diff * diff;
+        }
+    }
+    variance /= count;
+    
+    // Update correlation data
+    if (is_idle) {
+        timing_correlation.idle_sample_count++;
+        
+        // Running average calculation
+        double idle_ratio = (double)timing_correlation.idle_sample_count / 
+                            (timing_correlation.idle_sample_count + timing_correlation.busy_sample_count);
+        
+        timing_correlation.false_mean = 
+            timing_correlation.false_mean * (1 - idle_ratio) + mean * idle_ratio;
+        timing_correlation.false_variance = 
+            timing_correlation.false_variance * (1 - idle_ratio) + variance * idle_ratio;
+    } else {
+        timing_correlation.busy_sample_count++;
+        
+        // Running average calculation
+        double busy_ratio = (double)timing_correlation.busy_sample_count / 
+                            (timing_correlation.idle_sample_count + timing_correlation.busy_sample_count);
+        
+        timing_correlation.true_mean = 
+            timing_correlation.true_mean * (1 - busy_ratio) + mean * busy_ratio;
+        timing_correlation.true_variance = 
+            timing_correlation.true_variance * (1 - busy_ratio) + variance * busy_ratio;
+    }
+}
+
+static bool should_sleep(bool result, long long interval) {
+    // If we don't have enough samples, be conservative
+    if (timing_correlation.idle_sample_count < 10 || 
+        timing_correlation.busy_sample_count < 10) {
+        return false;
+    }
+    
+    // Calculate z-score
+    double mean, variance;
+    if (system_state.current_vm_state == 0) { // Idle
+        mean = timing_correlation.false_mean;
+        variance = timing_correlation.false_variance;
+    } else { // Busy
+        mean = timing_correlation.true_mean;
+        variance = timing_correlation.true_variance;
+    }
+    
+    // Standard deviation
+    double std_dev = sqrt(variance);
+    
+    // Z-score calculation
+    double z_score = fabs((interval - mean) / std_dev);
+    
+    // Adaptive sleep threshold
+    // More conservative when learning, more aggressive as we learn more
+    double learn_factor = sqrt(
+        (timing_correlation.idle_sample_count + timing_correlation.busy_sample_count) / 100.0
+    );
+    
+    // Sleep conditions
+    // 1. VM is idle
+    // 2. Interval is significantly different from the learned mean
+    // 3. We have enough learning samples
+    return (system_state.current_vm_state == 0 && 
+            z_score > (2.0 * learn_factor) && 
+            timing_correlation.idle_sample_count > 50);
+}
+    
 static void initialize_bands(unsigned long long *boundaries) {
     // Min timing: ~300ns, Max timing: ~100ms
     double min_log = log10(300.0);
@@ -260,8 +311,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
 	static int post_boot_indication = 0; static bool idle_os = 0;
-	static const char *sleep_file = "sleep_criteria.txt";
-	static struct SleepCriteria sleep_criteria = {0}; // TODO - this needs to be changed to take spectral samples and compare with the baselines (for idle and busy).
 
     // Initialize bands if needed
     if (!bands_initialized) {
@@ -312,6 +361,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
 			long long interval = timespec_diff_ns(last_time, &current_ts);
 			add_timing_sample(&system_state.total_intervals[system_state.current_index], interval);
+			update_timing_correlation(&system_state.total_intervals[system_state.current_index], system_state.current_vm_state == 0);
 		}
 	}
 
@@ -329,15 +379,17 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         // True interval calculation
         if (last_true_time.tv_sec != 0) {
             long long interval = timespec_diff_ns(&last_true_time, &current_ts);
-			if (system_state.current_vm_state < 2)
+			if (system_state.current_vm_state < 2) {
 				add_timing_sample(&system_state.true_intervals[system_state.current_index], interval);
+			    update_timing_correlation(&system_state.true_intervals[system_state.current_index], system_state.current_vm_state == 0);
+			}
             true_interval_ns += interval;
             min_true_interval = (min_true_interval == 0) ?
                 interval : (interval < min_true_interval ? interval : min_true_interval);
             max_true_interval = (interval > max_true_interval) ? interval : max_true_interval;
 
             erm_sleep = to_sleep;
-			if (sleep_enabled && (should_sleep(sleep_criteria, true, interval) || erm_sleep > to_sleep)) {
+			if (sleep_enabled && (should_sleep(true, interval) || erm_sleep > to_sleep)) {
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
@@ -360,8 +412,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
             long long interval = timespec_diff_ns(&last_false_time, &current_ts);
-			if (system_state.current_vm_state < 2)
+			if (system_state.current_vm_state < 2) {
 				add_timing_sample(&system_state.false_intervals[system_state.current_index], interval);
+			    update_timing_correlation(&system_state.false_intervals[system_state.current_index], system_state.current_vm_state == 0);
+			}
             false_interval_ns += interval;
             min_false_interval = (min_false_interval == 0) ?
                 interval : (interval < min_false_interval ? interval : min_false_interval);
@@ -379,7 +433,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			} else if (last_min_false_interval > 520) idle_os = 0;
 			if (post_boot_indication > 2)
 				erm_sleep = 100000;
-			if (sleep_enabled && (should_sleep(sleep_criteria, false, interval) || erm_sleep > to_sleep)) {
+			if (sleep_enabled && (should_sleep(false, interval) || erm_sleep > to_sleep)) {
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
@@ -411,20 +465,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			system_state.total_intervals[system_state.current_index].timestamp = current_time;
 		}
 
-		sleep_criteria = parse_sleep_file(sleep_file);
-
         printf("Interrupt Stats: %s%s\n"
-			   "Sleep Criteria: %s on %s %s %lld ns\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n"
                "  False Streaks: Min: %d, Max: %d\n",
 			   idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
-			   sleep_criteria.valid ? "Active" : "Invalid",
-			   sleep_criteria.on_true ? "TRUE" : "FALSE",
-			   sleep_criteria.compare_over ? "OVER" : "BELOW",
-			   sleep_criteria.threshold,
                true_count, false_count, to_sleep, sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,

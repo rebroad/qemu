@@ -128,8 +128,6 @@ struct SystemState {
     int current_index;     // Current position in circular buffer
 };
 
-static struct SystemState system_state = {0};
-
 struct TimingCorrelation {
     double false_mean;
     double true_mean;
@@ -193,6 +191,39 @@ static void update_timing_correlation(struct TimingSpectrum *spectrum, bool is_i
     }
 }
 
+#define CORRELATION_FILE "timing_correlation.bin"
+
+static void save_timing_correlation(void) {
+    FILE *f = fopen(CORRELATION_FILE, "wb");
+    if (!f) {
+        perror("Failed to open correlation file for writing");
+        return;
+    }
+
+    // Write the key correlation data
+    fwrite(&timing_correlation, sizeof(struct TimingCorrelation), 1, f);
+
+    fclose(f);
+}
+
+static bool load_timing_correlation(void) {
+    FILE *f = fopen(CORRELATION_FILE, "rb");
+    if (!f) {
+        // Not an error if file doesn't exist - we'll learn from scratch
+        return false;
+    }
+
+    size_t read_count = fread(&timing_correlation, sizeof(struct TimingCorrelation), 1, f);
+    fclose(f);
+
+    if (read_count != 1) {
+        perror("Failed to read correlation data");
+        return false;
+    }
+
+    return true;
+}
+
 static bool should_sleep(bool result, long long interval) {
     // If we don't have enough samples, be conservative
     if (timing_correlation.idle_sample_count < 10 || 
@@ -200,15 +231,12 @@ static bool should_sleep(bool result, long long interval) {
         return false;
     }
     
-    // Calculate z-score
+    // Calculate z-score based on overall timing characteristics
     double mean, variance;
-    if (system_state.current_vm_state == 0) { // Idle
-        mean = timing_correlation.false_mean;
-        variance = timing_correlation.false_variance;
-    } else { // Busy
-        mean = timing_correlation.true_mean;
-        variance = timing_correlation.true_variance;
-    }
+
+    // Use total interval statistics if we want a more generalized approach
+    mean = (timing_correlation.false_mean + timing_correlation.true_mean) / 2.0;
+    variance = (timing_correlation.false_variance + timing_correlation.true_variance) / 2.0;
     
     // Standard deviation
     double std_dev = sqrt(variance);
@@ -216,18 +244,15 @@ static bool should_sleep(bool result, long long interval) {
     // Z-score calculation
     double z_score = fabs((interval - mean) / std_dev);
     
-    // Adaptive sleep threshold
-    // More conservative when learning, more aggressive as we learn more
+    // Adaptive learning factor
     double learn_factor = sqrt(
         (timing_correlation.idle_sample_count + timing_correlation.busy_sample_count) / 100.0
     );
     
-    // Sleep conditions
-    // 1. VM is idle
-    // 2. Interval is significantly different from the learned mean
-    // 3. We have enough learning samples
-    return (system_state.current_vm_state == 0 && 
-            z_score > (2.0 * learn_factor) && 
+    // Combine result and interval characteristics
+	// More aggressive about sleeping for suspicious intervals
+	// that don't match the learned pattern
+    return (z_score > (2.0 * learn_factor) &&
             timing_correlation.idle_sample_count > 50);
 }
     
@@ -297,6 +322,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
 	static struct SystemState system_state = {0};
 	static bool bands_initialized = false;
+	static bool correlation_loaded = false;
 	static FILE *csv_file = NULL;
     static time_t last_print_time = 0, last_measure_time = 0, last_vm_state_check = 0;
     static bool sleep_enabled = true, measuring_mode = false;
@@ -311,6 +337,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
 	static int post_boot_indication = 0; static bool idle_os = 0;
+
+    // Load existing correlation data
+	if (!correlation_loaded) {
+		correlation_loaded = load_timing_correlation();
+	}
 
     // Initialize bands if needed
     if (!bands_initialized) {
@@ -463,6 +494,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			system_state.true_intervals[system_state.current_index].timestamp = current_time;
 			system_state.false_intervals[system_state.current_index].timestamp = current_time;
 			system_state.total_intervals[system_state.current_index].timestamp = current_time;
+
+			if (timing_correlation.idle_sample_count >= 100 &&
+				timing_correlation.busy_sample_count >= 100) {
+				save_timing_correlation();
+			}
 		}
 
         printf("Interrupt Stats: %s%s\n"

@@ -176,10 +176,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         }
     }
 
+	static struct SystemState system_state = {0};
+	static bool bands_initialized = false;
+	static FILE *csv_file = NULL;
+    static time_t last_print_time = 0, last_measure_time = 0, last_vm_state_check = 0;
     static bool sleep_enabled = true, measuring_mode = false;
-    struct timespec current_ts;
-    clock_gettime(CLOCK_MONOTONIC, &current_ts);
-    static time_t last_print_time = 0, last_measure_time = 0;
     static int true_count = 0, last_true_count = 0, false_count = 0, sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval, max_true_interval;
@@ -191,10 +192,38 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
 	static int post_boot_indication = 0; static bool idle_os = 0;
-	static const char *sleep_file = "sleep_enabled.txt";
-	static struct SleepCriteria sleep_criteria = {0};
+	static const char *sleep_file = "sleep_criteria.txt";
+	static struct SleepCriteria sleep_criteria = {0}; // TODO - this needs to be changed to take spectral samples and compare with the baselines (for idle and busy).
+
+    // Initialize bands if needed
+    if (!bands_initialized) {
+        for (int i = 0; i < HISTORY_SECONDS; i++) {
+            initialize_bands(system_state.true_intervals[i].band_boundaries);
+            initialize_bands(system_state.false_intervals[i].band_boundaries);
+            initialize_bands(system_state.total_intervals[i].band_boundaries);
+        }
+        csv_file = fopen("timing_spectrum.csv", "w");
+        if (csv_file) {
+            fprintf(csv_file, "Timestamp,VMState,IntervalType,Band,LowerBound,UpperBound,Count\n");
+        }
+        bands_initialized = true;
+    }
 
     time_t current_time = time(NULL);
+
+	// Check VM state every second
+    if (current_time != last_vm_state_check) {
+        FILE *state_file = fopen("vm_state.txt", "r");
+        if (state_file) {
+            int new_state;
+            if (fscanf(state_file, "%d", &new_state) == 1)
+                system_state.current_vm_state = new_state;
+			else // 2 is neither busy(1) or idle(0)
+                system_state.current_vm_state = 2;
+            fclose(state_file);
+        }
+        last_vm_state_check = current_time;
+    }
 
     // Every 20 seconds, disable sleep for a 1 second to measure
 	if (current_time - last_measure_time >= 20) {
@@ -205,6 +234,17 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 		natural_true_rate = true_count;
 		measuring_mode = false;
         sleep_enabled = true;
+	}
+
+    struct timespec current_ts;
+    clock_gettime(CLOCK_MONOTONIC, &current_ts);
+
+	if (system_state.current_vm_state < 2) {
+		if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
+			struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
+			long long interval = timespec_diff_ns(last_time, &current_ts);
+			add_timing_sample(&system_state.total_intervals[system_state.current_index], interval);
+		}
 	}
 
     if (result) {
@@ -220,14 +260,16 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         // True interval calculation
         if (last_true_time.tv_sec != 0) {
-            long long true_interval = timespec_diff_ns(&last_true_time, &current_ts);
-            true_interval_ns += true_interval;
+            long long interval = timespec_diff_ns(&last_true_time, &current_ts);
+			if (system_state.current_vm_state < 2)
+				add_timing_sample(&system_state.true_intervals[system_dtate.current_index], interval);
+            true_interval_ns += interval;
             min_true_interval = (min_true_interval == 0) ?
-                true_interval : (true_interval < min_true_interval ? true_interval : min_true_interval);
-            max_true_interval = (true_interval > max_true_interval) ? true_interval : max_true_interval;
+                interval : (interval < min_true_interval ? interval : min_true_interval);
+            max_true_interval = (interval > max_true_interval) ? interval : max_true_interval;
 
             erm_sleep = to_sleep;
-			if (sleep_enabled && (should_sleep(sleep_criteria, true, true_interval) || erm_sleep > to_sleep)) {
+			if (sleep_enabled && (should_sleep(sleep_criteria, true, interval) || erm_sleep > to_sleep)) {
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
@@ -249,25 +291,27 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
-            long long false_interval = timespec_diff_ns(&last_false_time, &current_ts);
-            false_interval_ns += false_interval;
+            long long interval = timespec_diff_ns(&last_false_time, &current_ts);
+			if (system_state.current_vm_state < 2)
+				add_timing_sample(&system_state.false_intervals[system_state.current_index], interval);
+            false_interval_ns += interval;
             min_false_interval = (min_false_interval == 0) ?
-                false_interval : (false_interval < min_false_interval ? false_interval : min_false_interval);
-            max_false_interval = (false_interval > max_false_interval) ? false_interval : max_false_interval;
+                interval : (interval < min_false_interval ? interval : min_false_interval);
+            max_false_interval = (interval > max_false_interval) ? interval : max_false_interval;
 
             erm_sleep = to_sleep;
-            if (false_interval < 520) {
+            if (interval < 520) {
                 if (((last_max_false_streak >= 540 && last_true_count > 10 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && last_true_count > 15 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1) {
 					if (post_boot_indication < 200) post_boot_indication++;
 				} else {
 					post_boot_indication = 0;
-					if (last_max_true_streak == 2 && false_interval < 342 && last_max_false_streak < 41 && last_min_false_streak < 4)
+					if (last_max_true_streak == 2 && interval < 342 && last_max_false_streak < 41 && last_min_false_streak < 4)
 						idle_os = 1;
 				}
 			} else if (last_min_false_interval > 520) idle_os = 0;
 			if (post_boot_indication > 2)
 				erm_sleep = 100000;
-			if (sleep_enabled && (should_sleep(sleep_criteria, false, false_interval) || erm_sleep > to_sleep)) {
+			if (sleep_enabled && (should_sleep(sleep_criteria, false, interval) || erm_sleep > to_sleep)) {
                 sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
@@ -281,6 +325,24 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     if (current_time != last_print_time) {
+		if (system_state.current_vm_state < 2) {
+			if (csv_file) {
+				output_csv(csv_file, &system_state);
+				fflush(csv_file);
+			}
+
+			system_state.current_index = (system_state.current_index + 1) % HISTORY_SECONDS;
+			memset(&system_state.true_intervals[system_state.current_index], 0, sizeof(struct TimingSpectrum));
+			memset(&system_state.false_intervals[system_state.current_index], 0, sizeof(struct TimingSpectrum));
+			memset(&system_state.total_intervals[system_state.current_index], 0, sizeof(struct TimingSpectrum));
+			initialize_bands(system_state.true_intervals[system_state.current_index].band_boundaries);
+			initialize_bands(system_state.false_intervals[system_state.current_index].band_boundaries);
+			initialize_bands(system_state.total_intervals[system_state.current_index].band_boundaries);
+			system_state.true_intervals[system_state.current_index].timestamp = current_time;
+			system_state.false_intervals[system_state.current_index].timestamp = current_time;
+			system_state.total_intervals[system_state.current_index].timestamp = current_time;
+		}
+
 		sleep_criteria = parse_sleep_file(sleep_file);
 
         printf("Interrupt Stats: %s%s\n"

@@ -127,7 +127,6 @@ struct BandModel {
 struct TimingModel {
     // Use logarithmic bands to better capture the 300ns - 100ms range
     unsigned long long boundaries[NUM_BANDS + 1];
-    unsigned int counts[NUM_BANDS];
     struct BandModel bands[NUM_BANDS];
     unsigned long long total_samples;
 };
@@ -228,23 +227,23 @@ static bool should_sleep(int result, long long interval) {
     // If the VM is busy, we're in learning mode. Update the model
     if (vm_state == 1) {
         for (int i = 0; i < NUM_BANDS; i++) {
-            if (model->counts[i] > 0) {
-                unsigned long long value = model->boundaries[i];
+            if (interval >= model->boundaries[i] && interval < model->boundaries[i + 1]) {
                 if (!model->bands[i].values_seen) {
-                    log_band_model_change(&model->bands[i], i, value, "first_use");
-                    model->bands[i].min_value = value;
-                    model->bands[i].max_value = value;
+                    log_band_model_change(&model->bands[i], i, interval, "first_use");
+                    model->bands[i].min_value = interval;
+                    model->bands[i].max_value = interval;
                     model->bands[i].values_seen = true;
                 } else {
-                    if (value < model->bands[i].min_value) {
-                        log_band_model_change(&model->bands[i], i, value, "min_update");
-                        model->bands[i].min_value = value;
+                    if (interval < model->bands[i].min_value) {
+                        log_band_model_change(&model->bands[i], i, interval, "min_update");
+                        model->bands[i].min_value = interval;
                     }
-                    if (value > model->bands[i].max_value) {
-                        log_band_model_change(&model->bands[i], i, value, "max_update");
-                        model->bands[i].max_value = value;
+                    if (interval > model->bands[i].max_value) {
+                        log_band_model_change(&model->bands[i], i, interval, "max_update");
+                        model->bands[i].max_value = interval;
                     }
                 }
+                break;
             }
         }
         model->total_samples++;
@@ -256,17 +255,17 @@ static bool should_sleep(int result, long long interval) {
     int outlier_count = 0, total_active_bands = 0;
 
     for (int i = 0; i < NUM_BANDS; i++) {
-        if (model->counts[i] > 0) {
+        if (interval >= model->boundaries[i] && interval < model->boundaries[i + 1]) {
             total_active_bands++;
-            unsigned long long value = model->boundaries[i];
 
             // If we see values in bands that were never active during busy state,
             // or values outside the ranges seen during busy state, count as outliers
             if (!model->bands[i].values_seen ||
-                value < model->bands[i].min_value ||
-                value > model->bands[i].max_value) {
+                interval < model->bands[i].min_value ||
+                interval > model->bands[i].max_value) {
                 outlier_count++;
             }
+            break;
         }
     }
 

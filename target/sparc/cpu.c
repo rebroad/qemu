@@ -121,11 +121,10 @@ struct BandModel {
     unsigned long long min_value;
     unsigned long long max_value;
     bool values_seen;
-    double mean, variance, entropy;
 };
 
 struct TimingModel {
-	unsigned long long boundaries[NUM_BANDS + 1];
+    unsigned long long boundaries[NUM_BANDS + 1];
     struct BandModel bands[NUM_BANDS];
     unsigned long long total_samples;
 };
@@ -186,11 +185,18 @@ static void periodic_model_save(void) {
     }
 }
 
-static char band_change_log[4096] = {0};
+typedef enum {
+    CHANGE_TYPE_NONE = 0,
+    CHANGE_TYPE_FIRST_USE,
+    CHANGE_TYPE_MIN_UPDATE,
+    CHANGE_TYPE_MAX_UPDATE,
+    CHANGE_TYPE_BOUNDARY_CHANGE
+} ChangeType;
 
 struct BandChange {
-    const char *change_type;  // Type of change: "min_update", "max_update", "first_use", "boundary_change"
+    ChangeType change_type;
     unsigned long long value; // The value associated with the change
+    const char *model_name;
     bool has_change;          // Whether a change has been recorded for this band
 };
 
@@ -198,94 +204,103 @@ static struct BandChange band_changes[NUM_BANDS]; // Array to track changes per 
 
 static void log_band_model_change(struct BandModel *band, int band_index,
                                   unsigned long long new_value,
-                                  const char *change_type) {
+                                  ChangeType change_type,
+                                  const char *model_name) {
     // Ignore if no change type is provided
-    if (!change_type) return;
+    if (change_type == CHANGE_TYPE_NONE) return;
 
     // Track the most significant change for this band
     if (!band_changes[band_index].has_change) {
         // No change recorded yet for this band
         band_changes[band_index].change_type = change_type;
         band_changes[band_index].value = new_value;
+        band_changes[band_index].model_name = model_name;
         band_changes[band_index].has_change = true;
     } else {
         // If this change is more significant, overwrite the previous one
-        if (strcmp(change_type, "first_use") == 0) {
+        if (change_type == CHANGE_TYPE_FIRST_USE) {
             // "first_use" is the most significant change
             band_changes[band_index].change_type = change_type;
             band_changes[band_index].value = new_value;
-        } else if (strcmp(change_type, "boundary_change") == 0 &&
-                   strcmp(band_changes[band_index].change_type, "first_use") != 0) {
+            band_changes[band_index].model_name = model_name;
+        } else if (change_type == CHANGE_TYPE_BOUNDARY_CHANGE &&
+                   band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE) {
             // "boundary_change" is more significant than "min_update" or "max_update"
             band_changes[band_index].change_type = change_type;
             band_changes[band_index].value = new_value;
-        } else if (strcmp(change_type, "max_update") == 0 &&
-                   strcmp(band_changes[band_index].change_type, "first_use") != 0 &&
-                   strcmp(band_changes[band_index].change_type, "boundary_change") != 0) {
+            band_changes[band_index].model_name = model_name;
+        } else if (change_type == CHANGE_TYPE_MAX_UPDATE &&
+                   band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE &&
+                   band_changes[band_index].change_type != CHANGE_TYPE_BOUNDARY_CHANGE) {
             // "max_update" is more significant than "min_update"
             band_changes[band_index].change_type = change_type;
             band_changes[band_index].value = new_value;
+            band_changes[band_index].model_name = model_name;
         }
     }
 }
 
-static bool should_sleep(int result, long long interval) {
+static bool should_sleep(int result, long long value) {
     bool on_battery = is_on_battery();
     struct TimingModel *model;
+    const char *model_name;
 
     // Select appropriate model based on the type of interval and power state
     if (result == 1) {
         model = on_battery ? &all_models.true_model_battery : &all_models.true_model_ac;
+        model_name = on_battery ? "true_model_battery" : "true_model_ac";
     } else if (result == 0) {
         model = on_battery ? &all_models.false_model_battery : &all_models.false_model_ac;
+        model_name = on_battery ? "false_model_battery" : "false_model_ac";
     } else {
         model = on_battery ? &all_models.total_model_battery : &all_models.total_model_ac;
+        model_name = on_battery ? "total_model_battery" : "total_model_ac";
     }
 
     // If the VM is busy, we're in learning mode. Update the model
-	if (vm_state == 1 || model->total_samples < 100000) {
-		for (int i = 0; i < NUM_BANDS; i++) {
-			if (interval >= model->boundaries[i] && interval < model->boundaries[i + 1]) {
-				if (!model->bands[i].values_seen) {
-					log_band_model_change(&model->bands[i], i, interval, "first_use");
-					model->bands[i].min_value = interval;
-					model->bands[i].max_value = interval;
-					model->bands[i].values_seen = true;
-				} else {
-					if (interval < model->bands[i].min_value) {
-						log_band_model_change(&model->bands[i], i, interval, "min_update");
-						model->bands[i].min_value = interval;
-					}
-					if (interval > model->bands[i].max_value) {
-						log_band_model_change(&model->bands[i], i, interval, "max_update");
-						model->bands[i].max_value = interval;
-					}
-				}
-				break;
-			}
-		}
-		model->total_samples++;
-	}
-	if (vm_state == 1) {
-		periodic_model_save();
-		return false;  // Don't sleep since VM is busy
-	}
+    if (vm_state == 1 || model->total_samples < 1000000) {
+        for (int i = 0; i < NUM_BANDS; i++) {
+            if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
+                if (!model->bands[i].values_seen) {
+                    log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_FIRST_USE, model_name);
+                    model->bands[i].min_value = value;
+                    model->bands[i].max_value = value;
+                    model->bands[i].values_seen = true;
+                } else {
+                    if (value < model->bands[i].min_value) {
+                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MIN_UPDATE, model_name);
+                        model->bands[i].min_value = value;
+                    }
+                    if (value > model->bands[i].max_value) {
+                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MAX_UPDATE, model_name);
+                        model->bands[i].max_value = value;
+                    }
+                }
+                break;
+            }
+        }
+        model->total_samples++;
+    }
+    if (vm_state == 1) {
+        periodic_model_save();
+        return false;  // Don't sleep since VM is busy
+    }
 
-	// Exit if we have a lack of samples
-	if (model->total_samples < 100) return false;
+    // Exit if we have a lack of samples
+    if (model->total_samples < 100) return false;
 
     // During normal operation, check for deviations from busy pattern
     int outlier_count = 0, total_active_bands = 0;
 
     for (int i = 0; i < NUM_BANDS; i++) {
-        if (interval >= model->boundaries[i] && interval < model->boundaries[i + 1]) {
+        if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
             total_active_bands++;
 
             // If we see values in bands that were never active during busy state,
             // or values outside the ranges seen during busy state, count as outliers
             if (!model->bands[i].values_seen ||
-                interval < model->bands[i].min_value ||
-                interval > model->bands[i].max_value) {
+                value < model->bands[i].min_value ||
+                value > model->bands[i].max_value) {
                 outlier_count++;
             }
             break;
@@ -308,8 +323,8 @@ static void initialize_bands(struct TimingModel *model) {
     }
 }
 
-static void adjust_band_boundaries(struct TimingModel *model) {
-	printf("%s: samples=%lld\n", __func__, model->total_samples);
+static void adjust_band_boundaries(struct TimingModel *model, const char* model_name) {
+    printf("%s: samples=%lld\n", __func__, model->total_samples);
     for (int i = 0; i < NUM_BANDS - 1; i++) {
         unsigned long long max_current_band = model->bands[i].max_value;
         unsigned long long min_next_band = model->bands[i + 1].min_value;
@@ -324,32 +339,51 @@ static void adjust_band_boundaries(struct TimingModel *model) {
 
             // Adjust the boundary between the current and next band
             model->boundaries[i + 1] = new_boundary;
+            log_band_model_change(&model->bands[i], i, 0, CHANGE_TYPE_BOUNDARY_CHANGE, model_name);
         }
     }
 }
 
 static void log_band_changes(void) {
+    char buffer[4096] = {0};
+
     for (int i = 0; i < NUM_BANDS; i++) {
         if (band_changes[i].has_change) {
-            char buffer[256];
-            snprintf(buffer, sizeof(buffer),
-                     "Band %d %s: value=%llu\n",
-                     i,
-                     band_changes[i].change_type,
+            const char *change_type_str = "";
+            switch (band_changes[i].change_type) {
+                case CHANGE_TYPE_FIRST_USE:
+                    change_type_str = "first_use";
+                    break;
+                case CHANGE_TYPE_MIN_UPDATE:
+                    change_type_str = "min_update";
+                    break;
+                case CHANGE_TYPE_MAX_UPDATE:
+                    change_type_str = "max_update";
+                    break;
+                case CHANGE_TYPE_BOUNDARY_CHANGE:
+                    change_type_str = "boundary_change";
+                    break;
+                default:
+                    break;
+            }
+            char line[256];
+            snprintf(line, sizeof(line),
+                     "Model: %s, Band %d %s: value=%llu\n",
+                     band_changes[i].model_name,
+                     i, change_type_str,
                      band_changes[i].value);
 
             // Append to the log
-            strncat(band_change_log, buffer, sizeof(band_change_log) - strlen(band_change_log) - 1);
+            strncat(buffer, line, sizeof(buffer) - strlen(buffer) - 1);
         }
     }
 
     // Print the log if there are any changes
-    if (strlen(band_change_log) > 0) {
-        printf("Model Changes:\n%s\n", band_change_log);
+    if (strlen(buffer) > 0) {
+        printf("Model Changes:\n%s\n", buffer);
     }
 
     // Reset the log and the changes array for the next second
-    memset(band_change_log, 0, sizeof(band_change_log));
     memset(band_changes, 0, sizeof(band_changes));
 }
 
@@ -425,12 +459,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         last_measure_time = current_time;
         sleep_enabled = false;
 
-        adjust_band_boundaries(&all_models.true_model_battery);
-        adjust_band_boundaries(&all_models.true_model_ac);
-        adjust_band_boundaries(&all_models.false_model_battery);
-        adjust_band_boundaries(&all_models.false_model_ac);
-        adjust_band_boundaries(&all_models.total_model_battery);
-        adjust_band_boundaries(&all_models.total_model_ac);
+        adjust_band_boundaries(&all_models.true_model_battery, "true_model_battery");
+        adjust_band_boundaries(&all_models.true_model_ac, "true_model_ac");
+        adjust_band_boundaries(&all_models.false_model_battery, "false_model_battery");
+        adjust_band_boundaries(&all_models.false_model_ac, "false_model_ac");
+        adjust_band_boundaries(&all_models.total_model_battery, "total_model_battery");
+        adjust_band_boundaries(&all_models.total_model_ac, "total_model_ac");
     } else if (measuring_mode && current_time - last_measure_time >= 1) {
         // Get true rate every 20 seconds
         natural_true_rate = true_count;

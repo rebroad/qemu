@@ -198,6 +198,30 @@ static void periodic_model_save(void) {
 
 static struct SystemState system_state = {0};
 
+static bool band_changes_this_second = false;
+static char band_change_log[4096] = {0};
+
+static void log_band_model_change(struct BandModel *band, int band_index,
+                                  unsigned long long new_value,
+                                  const char *change_type) {
+    if (!band_changes_this_second) {
+        memset(band_change_log, 0, sizeof(band_change_log));
+        band_changes_this_second = true;
+    }
+
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer),
+             "Band %d %s: value=%llu (min=%llu, max=%llu) ",
+             band_index,
+             change_type,
+             new_value,
+             band->min_value,
+             band->max_value);
+
+    // Append to existing log
+    strncat(band_change_log, buffer, sizeof(band_change_log) - strlen(band_change_log) - 1);
+}
+
 static bool should_sleep(int result, long long interval, struct TimingSpectrum *spectrum) {
 	bool on_battery = is_on_battery();
 	struct TimingModel *model;
@@ -217,12 +241,19 @@ static bool should_sleep(int result, long long interval, struct TimingSpectrum *
 			if (spectrum->counts[i] > 0) {
 				unsigned long long value = spectrum->band_boundaries[i];
 				if (!model->bands[i].values_seen) {
+					log_band_model_change(&model->bands[i], i, value, "first_use");
 					model->bands[i].min_value = value;
 					model->bands[i].max_value = value;
 					model->bands[i].values_seen = true;
 				} else {
-					if (value < model->bands[i].min_value) model->bands[i].min_value = value;
-					if (value > model->bands[i].max_value) model->bands[i].max_value = value;
+					if (value < model->bands[i].min_value) {
+						log_band_model_change(&model->bands[i], i, value, "min_update");
+						model->bands[i].min_value = value;
+					}
+					if (value > model->bands[i].max_value) {
+						log_band_model_change(&model->bands[i], i, value, "max_update");
+						model->bands[i].max_value = value;
+					}
 				}
 			}
 		}
@@ -435,6 +466,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 		} else {
 			unlink(BOOTDISK_FILE);
 			prom_boot = 0;
+		}
+
+        if (band_changes_this_second) {
+			printf("Model Changes:\n%s\n", band_change_log);
+			band_changes_this_second = false;
 		}
 
         printf("Interrupt Stats: %s%s\n"

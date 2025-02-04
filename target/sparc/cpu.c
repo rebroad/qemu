@@ -111,18 +111,19 @@ static void timespecadd(struct timespec *a, const struct timespec *b)
     }
 }
 
-struct TimingSpectrum {
-    // Use logarithmic bands to better capture the 300ns - 100ms range
-    unsigned long long band_boundaries[NUM_BANDS + 1];
-    unsigned int counts[NUM_BANDS];
+struct AllModels {
+    struct TimingModel true_model_battery;
+    struct TimingModel true_model_ac;
+    struct TimingModel false_model_battery;
+    struct TimingModel false_model_ac;
+    struct TimingModel total_model_battery;
+    struct TimingModel total_model_ac;
 };
 
-struct SystemState {
-    struct TimingSpectrum false_intervals;
-    struct TimingSpectrum true_intervals;
-    struct TimingSpectrum total_intervals;
-    int vm_state;  // 0 for idle, 1 for busy
-};
+static struct AllModels all_models = {0};
+
+static int vm_state = 0;
+static time_t last_models_save_time;
 
 #define MODELS_FILE "timing_models.bin"
 #define BOOTDISK_FILE ".go-boot"
@@ -131,25 +132,16 @@ struct BandModel {
     unsigned long long min_value;
     unsigned long long max_value;
     bool values_seen;
-	double mean, variance, entropy;
+    double mean, variance, entropy;
 };
 
 struct TimingModel {
+    // Use logarithmic bands to better capture the 300ns - 100ms range
+    unsigned long long band_boundaries[NUM_BANDS + 1];
+    unsigned int counts[NUM_BANDS];
     struct BandModel bands[NUM_BANDS];
     unsigned long long total_samples;
 };
-
-struct SystemModels {
-    struct TimingModel true_model_battery;
-    struct TimingModel true_model_ac;
-    struct TimingModel false_model_battery;
-    struct TimingModel false_model_ac;
-    struct TimingModel total_model_battery;
-    struct TimingModel total_model_ac;
-	time_t last_save_time;
-};
-
-static struct SystemModels system_models = {0};
 
 static void save_models(void) {
     FILE *f = fopen(MODELS_FILE, "wb");
@@ -159,7 +151,7 @@ static void save_models(void) {
     }
 
     // Write the models data
-    fwrite(&system_models, sizeof(struct SystemModels), 1, f);
+    fwrite(&all_models, sizeof(struct AllModels), 1, f);
 
     fclose(f);
 }
@@ -168,7 +160,7 @@ static bool load_models(void) {
     FILE *f = fopen(MODELS_FILE, "rb");
     if (!f) return false;
 
-    size_t read_count = fread(&system_models, sizeof(struct SystemModels), 1, f);
+    size_t read_count = fread(&all_models, sizeof(struct AllModels), 1, f);
     fclose(f);
 
     return (read_count == 1);
@@ -188,15 +180,13 @@ static bool is_on_battery(void) {
 }
 
 static void periodic_model_save(void) {
-	time_t current_time = time(NULL);
+    time_t current_time = time(NULL);
 
-	if (current_time - system_models.last_save_time >= 5) {
-		save_models();
-		system_models.last_save_time = current_time;
-	}
+    if (current_time - last_models_save_time >= 5) {
+        save_models();
+        last_models_save_time = current_time;
+    }
 }
-
-static struct SystemState system_state = {0};
 
 static bool band_changes_this_second = false;
 static char band_change_log[4096] = {0};
@@ -222,69 +212,69 @@ static void log_band_model_change(struct BandModel *band, int band_index,
     strncat(band_change_log, buffer, sizeof(band_change_log) - strlen(band_change_log) - 1);
 }
 
-static bool should_sleep(int result, long long interval, struct TimingSpectrum *spectrum) {
-	bool on_battery = is_on_battery();
-	struct TimingModel *model;
+static bool should_sleep(int result, long long interval) {
+    bool on_battery = is_on_battery();
+    struct TimingModel *model;
 
-	// Select appropriate model based on the type of interval and power state
-	if (result == 1) {
-		model = on_battery ? &system_models.true_model_battery : &system_models.true_model_ac;
-	} else if (result == 0) {
-		model = on_battery ? &system_models.false_model_battery : &system_models.false_model_ac;
-	} else {
-		model = on_battery ? &system_models.total_model_battery : &system_models.total_model_ac;
-	}
+    // Select appropriate model based on the type of interval and power state
+    if (result == 1) {
+        model = on_battery ? &all_models.true_model_battery : &all_models.true_model_ac;
+    } else if (result == 0) {
+        model = on_battery ? &all_models.false_model_battery : &all_models.false_model_ac;
+    } else {
+        model = on_battery ? &all_models.total_model_battery : &all_models.total_model_ac;
+    }
 
     // If the VM is busy, we're in learning mode. Update the model
-	if (system_state.vm_state == 1) {
-		for (int i = 0; i < NUM_BANDS; i++) {
-			if (spectrum->counts[i] > 0) {
-				unsigned long long value = spectrum->band_boundaries[i];
-				if (!model->bands[i].values_seen) {
-					log_band_model_change(&model->bands[i], i, value, "first_use");
-					model->bands[i].min_value = value;
-					model->bands[i].max_value = value;
-					model->bands[i].values_seen = true;
-				} else {
-					if (value < model->bands[i].min_value) {
-						log_band_model_change(&model->bands[i], i, value, "min_update");
-						model->bands[i].min_value = value;
-					}
-					if (value > model->bands[i].max_value) {
-						log_band_model_change(&model->bands[i], i, value, "max_update");
-						model->bands[i].max_value = value;
-					}
-				}
-			}
-		}
-		model->total_samples++;
-		periodic_model_save();
-		return false;  // Don't sleep since VM is busy
-	}
+    if (vm_state == 1) {
+        for (int i = 0; i < NUM_BANDS; i++) {
+            if (model->counts[i] > 0) {
+                unsigned long long value = model->band_boundaries[i];
+                if (!model->bands[i].values_seen) {
+                    log_band_model_change(&model->bands[i], i, value, "first_use");
+                    model->bands[i].min_value = value;
+                    model->bands[i].max_value = value;
+                    model->bands[i].values_seen = true;
+                } else {
+                    if (value < model->bands[i].min_value) {
+                        log_band_model_change(&model->bands[i], i, value, "min_update");
+                        model->bands[i].min_value = value;
+                    }
+                    if (value > model->bands[i].max_value) {
+                        log_band_model_change(&model->bands[i], i, value, "max_update");
+                        model->bands[i].max_value = value;
+                    }
+                }
+            }
+        }
+        model->total_samples++;
+        periodic_model_save();
+        return false;  // Don't sleep since VM is busy
+    }
 
     // During normal operation, check for deviations from busy pattern
     int outlier_count = 0, total_active_bands = 0;
 
-	for (int i = 0; i < NUM_BANDS; i++) {
-		if (spectrum->counts[i] > 0) {
-			total_active_bands++;
-			unsigned long long value = spectrum->band_boundaries[i];
+    for (int i = 0; i < NUM_BANDS; i++) {
+        if (model->counts[i] > 0) {
+            total_active_bands++;
+            unsigned long long value = model->band_boundaries[i];
 
-			// If we see values in bands that were never active during busy state,
-			// or values outside the ranges seen during busy state, count as outliers
-			if (!model->bands[i].values_seen ||
-				value < model->bands[i].min_value ||
-				value > model->bands[i].max_value) {
-				outlier_count++;
-			}
-		}
-	}
+            // If we see values in bands that were never active during busy state,
+            // or values outside the ranges seen during busy state, count as outliers
+            if (!model->bands[i].values_seen ||
+                value < model->bands[i].min_value ||
+                value > model->bands[i].max_value) {
+                outlier_count++;
+            }
+        }
+    }
 
-	// If we have enough outliers, suggest sleeping
-	return (total_active_bands > 0 &&
-			(double)outlier_count / total_active_bands > 0.3);
+    // If we have enough outliers, suggest sleeping
+    return (total_active_bands > 0 &&
+            (double)outlier_count / total_active_bands > 0.3);
 }
-    
+
 static void initialize_bands(unsigned long long *boundaries) {
     // Min timing: ~300ns, Max timing: ~100ms
     double min_log = log10(300.0);
@@ -312,77 +302,77 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         }
     }
 
-	static bool bands_initialized = false;
-	static bool models_loaded = false;
+    static bool bands_initialized = false;
+    static bool models_loaded = false;
     static time_t last_print_time = 0, last_measure_time = 0, last_vm_state_check = 0;
     static bool sleep_enabled = true, measuring_mode = false;
     static int true_count = 0, last_true_count = 0, false_count = 0;
-	static int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
+    static int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
     static long long true_interval_ns, min_true_interval, max_true_interval;
     static long long false_interval_ns, min_false_interval, max_false_interval;
-	static long long last_min_false_interval = 0;
+    static long long last_min_false_interval = 0;
     static long to_sleep = 19000, erm_sleep = 0; // microseconds
     static int current_true_streak = 0, current_false_streak = 0;
     static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
     static int min_false_streak = 0, last_min_false_streak = 0;
     static int max_false_streak = 0, last_max_false_streak = 0;
-	static int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
+    static int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
 
     // Load existing model data
-	if (!models_loaded) {
-	    load_models();
-		models_loaded = true;
-	}
+    if (!models_loaded) {
+        load_models();
+        models_loaded = true;
+    }
 
     // Initialize bands if needed
     if (!bands_initialized) {
-		memset(&system_state.true_intervals, 0, sizeof(struct TimingSpectrum));
-		memset(&system_state.false_intervals, 0, sizeof(struct TimingSpectrum));
-		memset(&system_state.total_intervals, 0, sizeof(struct TimingSpectrum));
-        initialize_bands(system_state.true_intervals.band_boundaries);
-        initialize_bands(system_state.false_intervals.band_boundaries);
-        initialize_bands(system_state.total_intervals.band_boundaries);
+        initialize_bands(all_models.true_model_battery.band_boundaries);
+        initialize_bands(all_models.true_model_ac.band_boundaries);
+        initialize_bands(all_models.false_model_battery.band_boundaries);
+        initialize_bands(all_models.false_model_ac.band_boundaries);
+        initialize_bands(all_models.total_model_battery.band_boundaries);
+        initialize_bands(all_models.total_model_ac.band_boundaries);
         bands_initialized = true;
     }
 
     time_t current_time = time(NULL);
 
-	// Check VM state every second
+    // Check VM state every second
     if (current_time != last_vm_state_check) {
         FILE *state_file = fopen("vm_state.txt", "r");
         if (state_file) {
             int new_state;
             if (fscanf(state_file, "%d", &new_state) == 1)
-                system_state.vm_state = new_state;
-			else // 2 is neither busy(1) or idle(0)
-                system_state.vm_state = 2;
+                vm_state = new_state;
+            else // 2 is neither busy(1) or idle(0)
+                vm_state = 2;
             fclose(state_file);
         }
         last_vm_state_check = current_time;
     }
 
     // Every 20 seconds
-	if (current_time - last_measure_time >= 20) {
-		measuring_mode = true;
-		last_measure_time = current_time;
-		sleep_enabled = false;
-	} else if (measuring_mode && current_time - last_measure_time >= 1) {
-		// Get true rate every 20 seconds
-		natural_true_rate = true_count;
-		measuring_mode = false;
+    if (current_time - last_measure_time >= 20) {
+        measuring_mode = true;
+        last_measure_time = current_time;
+        sleep_enabled = false;
+    } else if (measuring_mode && current_time - last_measure_time >= 1) {
+        // Get true rate every 20 seconds
+        natural_true_rate = true_count;
+        measuring_mode = false;
         sleep_enabled = true;
-	}
+    }
 
     struct timespec current_ts;
     clock_gettime(CLOCK_MONOTONIC, &current_ts);
 
     if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
-		struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
-		long long interval = timespec_diff_ns(last_time, &current_ts);
-		if (sleep_enabled && (should_sleep(2, interval, &system_state.total_intervals)))
-			total_sleeps++;
-	}
+        struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
+        long long interval = timespec_diff_ns(last_time, &current_ts);
+        if (sleep_enabled && (should_sleep(2, interval)))
+            total_sleeps++;
+    }
 
     if (result) {
         true_count++;
@@ -404,13 +394,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_true_interval = (interval > max_true_interval) ? interval : max_true_interval;
 
             erm_sleep = to_sleep;
-			if (sleep_enabled && (should_sleep(1, interval, &system_state.true_intervals) || erm_sleep > to_sleep)) {
+            if (sleep_enabled && (should_sleep(1, interval) || erm_sleep > to_sleep)) {
                 true_sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
                 usleep(erm_sleep);
-			}
+            }
         }
         memcpy(&last_true_time, &current_ts, sizeof(struct timespec));
     } else {
@@ -435,22 +425,22 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             erm_sleep = to_sleep;
             if (interval < 520) {
                 if (((last_max_false_streak >= 540 && last_true_count > 10 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && last_true_count > 15 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1) {
-					if (post_boot_indication < 200) post_boot_indication++;
-				} else {
-					post_boot_indication = 0;
-					if (last_max_true_streak == 2 && interval < 342 && last_max_false_streak < 41 && last_min_false_streak < 4)
-						idle_os = 1;
-				}
-			} else if (last_min_false_interval > 520) idle_os = 0;
-			if (post_boot_indication > 2)
-				erm_sleep = 100000;
-			if (sleep_enabled && (should_sleep(0, interval, &system_state.false_intervals) || erm_sleep > to_sleep)) {
+                    if (post_boot_indication < 200) post_boot_indication++;
+                } else {
+                    post_boot_indication = 0;
+                    if (last_max_true_streak == 2 && interval < 342 && last_max_false_streak < 41 && last_min_false_streak < 4)
+                        idle_os = 1;
+                }
+            } else if (last_min_false_interval > 520) idle_os = 0;
+            if (post_boot_indication > 2)
+                erm_sleep = 100000;
+            if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
                 usleep(erm_sleep);
-			}
+            }
         }
         memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }
@@ -458,21 +448,21 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     if (current_time != last_print_time) {
-		if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 4608 && min_false_interval < 6965 && (false_interval_ns / false_count) > 6644546 && (false_interval_ns / false_count) < 7111839 && (true_interval_ns / true_count) > 9999178 && (true_interval_ns / true_count) < 10099196 && min_false_streak == 1 && max_false_streak < 6 && min_true_streak == 1 && max_true_streak == 2) {
-			prom_boot++;
-			if (prom_boot == 2) {
-				printf("\nTRIGGER BOOT\n");
-				fopen(BOOTDISK_FILE, "w");
-			}
-		} else {
-			unlink(BOOTDISK_FILE);
-			prom_boot = 0;
-		}
+        if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 4608 && min_false_interval < 6965 && (false_interval_ns / false_count) > 6644546 && (false_interval_ns / false_count) < 7111839 && (true_interval_ns / true_count) > 9999178 && (true_interval_ns / true_count) < 10099196 && min_false_streak == 1 && max_false_streak < 6 && min_true_streak == 1 && max_true_streak == 2) {
+            prom_boot++;
+            if (prom_boot == 2) {
+                printf("\nTRIGGER BOOT\n");
+                fopen(BOOTDISK_FILE, "w");
+            }
+        } else {
+            unlink(BOOTDISK_FILE);
+            prom_boot = 0;
+        }
 
         if (band_changes_this_second) {
-			printf("Model Changes:\n%s\n", band_change_log);
-			band_changes_this_second = false;
-		}
+            printf("Model Changes:\n%s\n", band_change_log);
+            band_changes_this_second = false;
+        }
 
         printf("Interrupt Stats: %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
@@ -480,7 +470,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n"
                "  False Streaks: Min: %d, Max: %d\n",
-			   idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
+               idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,
@@ -496,12 +486,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         last_true_count = true_count;
         true_sleeps = 0; false_sleeps = 0; total_sleeps = 0;
-		true_count = 0; false_count = 0;
+        true_count = 0; false_count = 0;
         true_interval_ns = 0; false_interval_ns = 0;
         min_true_interval = 0; max_true_interval = 0;
-		last_min_false_interval = min_false_interval;
+        last_min_false_interval = min_false_interval;
         min_false_interval = 0; max_false_interval = 0;
-		last_max_true_streak = max_true_streak;
+        last_max_true_streak = max_true_streak;
         min_true_streak = 0; max_true_streak = 0;
         last_min_false_streak = min_false_streak;
         last_max_false_streak = max_false_streak;

@@ -93,7 +93,6 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 
 #ifndef CONFIG_USER_ONLY
 #define NUM_BANDS 256
-#define HISTORY_SECONDS 60
 
 static long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
     return (end->tv_sec - start->tv_sec) * 1000000000LL +
@@ -116,82 +115,16 @@ struct TimingSpectrum {
     // Use logarithmic bands to better capture the 300ns - 100ms range
     unsigned long long band_boundaries[NUM_BANDS + 1];
     unsigned int counts[NUM_BANDS];
-    unsigned int total_samples;
-    time_t timestamp;
 };
 
 struct SystemState {
-    struct TimingSpectrum false_intervals[HISTORY_SECONDS];
-    struct TimingSpectrum true_intervals[HISTORY_SECONDS];
-    struct TimingSpectrum total_intervals[HISTORY_SECONDS];
+    struct TimingSpectrum false_intervals;
+    struct TimingSpectrum true_intervals;
+    struct TimingSpectrum total_intervals;
     int current_vm_state;  // 0 for idle, 1 for busy
-    int current_index;     // Current position in circular buffer
 };
 
-struct TimingCorrelation {
-    double false_mean;
-    double true_mean;
-    double total_mean;
-    double false_variance;
-    double true_variance;
-    double total_variance;
-    int idle_sample_count;
-    int busy_sample_count;
-};
-
-static struct TimingCorrelation timing_correlation = {0};
-
-static void update_timing_correlation(struct TimingSpectrum *spectrum, bool is_idle) {
-    unsigned long long total = 0;
-    unsigned int count = 0;
-    
-    // Calculate mean
-    for (int i = 0; i < NUM_BANDS; i++) {
-        total += spectrum->band_boundaries[i] * spectrum->counts[i];
-        count += spectrum->counts[i];
-    }
-    
-    if (count == 0) return;
-    
-    double mean = (double)total / count;
-    
-    // Calculate variance
-    double variance = 0;
-    for (int i = 0; i < NUM_BANDS; i++) {
-        for (unsigned int j = 0; j < spectrum->counts[i]; j++) {
-            double diff = spectrum->band_boundaries[i] - mean;
-            variance += diff * diff;
-        }
-    }
-    variance /= count;
-    
-    // Update correlation data
-    if (is_idle) {
-        timing_correlation.idle_sample_count++;
-        
-        // Running average calculation
-        double idle_ratio = (double)timing_correlation.idle_sample_count / 
-                            (timing_correlation.idle_sample_count + timing_correlation.busy_sample_count);
-        
-        timing_correlation.false_mean = 
-            timing_correlation.false_mean * (1 - idle_ratio) + mean * idle_ratio;
-        timing_correlation.false_variance = 
-            timing_correlation.false_variance * (1 - idle_ratio) + variance * idle_ratio;
-    } else {
-        timing_correlation.busy_sample_count++;
-        
-        // Running average calculation
-        double busy_ratio = (double)timing_correlation.busy_sample_count / 
-                            (timing_correlation.idle_sample_count + timing_correlation.busy_sample_count);
-        
-        timing_correlation.true_mean = 
-            timing_correlation.true_mean * (1 - busy_ratio) + mean * busy_ratio;
-        timing_correlation.true_variance = 
-            timing_correlation.true_variance * (1 - busy_ratio) + variance * busy_ratio;
-    }
-}
-
-#define CORRELATION_FILE "timing_correlation.bin"
+#define MODELS_FILE "timing_models.bin"
 #define BOOTDISK_FILE ".go-boot"
 
 struct BandModel {
@@ -219,13 +152,13 @@ struct SystemModels {
 static struct SystemModels system_models = {0};
 
 static void save_models(void) {
-    FILE *f = fopen(CORRELATION_FILE, "wb");
+    FILE *f = fopen(MODELS_FILE, "wb");
     if (!f) {
-        perror("Failed to open correlation file for writing");
+        perror("Failed to open models file for writing");
         return;
     }
 
-    // Write the key correlation data
+    // Write the models data
     fwrite(&system_models, sizeof(struct SystemModels), 1, f);
 
     fclose(f);
@@ -283,6 +216,7 @@ static bool should_sleep(bool result, long long interval, struct TimingSpectrum 
 			}
 		}
 		model->learning_samples++;
+		// TODO - save the model when we have enough samples - but don't save too often (to reduce disk wear)
 		return false;  // Don't sleep since VM is busy
 	}
     
@@ -318,16 +252,6 @@ static void initialize_bands(unsigned long long *boundaries) {
     for (int i = 0; i <= NUM_BANDS; i++) {
         boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
     }
-}
-
-static void add_timing_sample(struct TimingSpectrum *spectrum, unsigned long long timing) {
-    for (int i = 0; i < NUM_BANDS; i++) {
-        if (timing < spectrum->band_boundaries[i + 1]) {
-            spectrum->counts[i]++;
-            break;
-        }
-    }
-    spectrum->total_samples++;
 }
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
@@ -370,11 +294,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Initialize bands if needed
     if (!bands_initialized) {
-        for (int i = 0; i < HISTORY_SECONDS; i++) {
-            initialize_bands(system_state.true_intervals[i].band_boundaries);
-            initialize_bands(system_state.false_intervals[i].band_boundaries);
-            initialize_bands(system_state.total_intervals[i].band_boundaries);
-        }
+		memset(&system_state.true_intervals, 0, sizeof(struct TimingSpectrum));
+		memset(&system_state.false_intervals, 0, sizeof(struct TimingSpectrum));
+		memset(&system_state.total_intervals, 0, sizeof(struct TimingSpectrum));
+        initialize_bands(system_state.true_intervals.band_boundaries);
+        initialize_bands(system_state.false_intervals.band_boundaries);
+        initialize_bands(system_state.total_intervals.band_boundaries);
         bands_initialized = true;
     }
 
@@ -411,10 +336,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
 		struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
 		long long interval = timespec_diff_ns(last_time, &current_ts);
-		if (system_state.current_vm_state < 2) {
-		    add_timing_sample(&system_state.total_intervals[system_state.current_index], interval);
-		    update_timing_correlation(&system_state.total_intervals[system_state.current_index], system_state.current_vm_state == 0);
-		}
 		if (sleep_enabled && (should_sleep(result, interval, &system_state.total_intervals[system_state.current_index])))
 			total_sleeps++;
 	}
@@ -433,10 +354,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         // True interval calculation
         if (last_true_time.tv_sec != 0) {
             long long interval = timespec_diff_ns(&last_true_time, &current_ts);
-			if (system_state.current_vm_state < 2) {
-				add_timing_sample(&system_state.true_intervals[system_state.current_index], interval);
-			    update_timing_correlation(&system_state.true_intervals[system_state.current_index], system_state.current_vm_state == 0);
-			}
             true_interval_ns += interval;
             min_true_interval = (min_true_interval == 0) ?
                 interval : (interval < min_true_interval ? interval : min_true_interval);
@@ -466,10 +383,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
             long long interval = timespec_diff_ns(&last_false_time, &current_ts);
-			if (system_state.current_vm_state < 2) {
-				add_timing_sample(&system_state.false_intervals[system_state.current_index], interval);
-			    update_timing_correlation(&system_state.false_intervals[system_state.current_index], system_state.current_vm_state == 0);
-			}
             false_interval_ns += interval;
             min_false_interval = (min_false_interval == 0) ?
                 interval : (interval < min_false_interval ? interval : min_false_interval);
@@ -501,24 +414,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     if (current_time != last_print_time) {
-		if (system_state.current_vm_state < 2) {
-			system_state.current_index = (system_state.current_index + 1) % HISTORY_SECONDS;
-			memset(&system_state.true_intervals[system_state.current_index], 0, sizeof(struct TimingSpectrum));
-			memset(&system_state.false_intervals[system_state.current_index], 0, sizeof(struct TimingSpectrum));
-			memset(&system_state.total_intervals[system_state.current_index], 0, sizeof(struct TimingSpectrum));
-			initialize_bands(system_state.true_intervals[system_state.current_index].band_boundaries);
-			initialize_bands(system_state.false_intervals[system_state.current_index].band_boundaries);
-			initialize_bands(system_state.total_intervals[system_state.current_index].band_boundaries);
-			system_state.true_intervals[system_state.current_index].timestamp = current_time;
-			system_state.false_intervals[system_state.current_index].timestamp = current_time;
-			system_state.total_intervals[system_state.current_index].timestamp = current_time;
-
-			if (timing_correlation.idle_sample_count >= 100 &&
-				timing_correlation.busy_sample_count >= 100) {
-				save_models();
-			}
-		}
-
 		if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 4608 && min_false_interval < 6965 && (false_interval_ns / false_count) > 6644546 && (false_interval_ns / false_count) < 7111839 && (true_interval_ns / true_count) > 9999178 && (true_interval_ns / true_count) < 10099196 && min_false_streak == 1 && max_false_streak < 6 && min_true_streak == 1 && max_true_streak == 2) {
 			prom_boot++;
 			if (prom_boot == 2) {

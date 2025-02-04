@@ -286,6 +286,25 @@ static void initialize_bands(struct TimingModel *model) {
     }
 }
 
+static void adjust_band_boundaries(struct TimingModel *model) {
+    for (int i = 0; i < NUM_BANDS - 1; i++) {
+        unsigned long long max_current_band = model->bands[i].max_value;
+        unsigned long long min_next_band = model->bands[i + 1].min_value;
+
+        // If there's a gap between the current band's max and the next band's min
+        if (max_current_band < min_next_band) {
+            // Calculate the logarithmic center of the gap
+            double log_max = log10(max_current_band);
+            double log_min = log10(min_next_band);
+            double log_center = (log_max + log_min) / 2;
+            unsigned long long new_boundary = (unsigned long long)pow(10, log_center);
+
+            // Adjust the boundary between the current and next band
+            model->boundaries[i + 1] = new_boundary;
+        }
+    }
+}
+
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     bool result = false;
@@ -357,6 +376,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         measuring_mode = true;
         last_measure_time = current_time;
         sleep_enabled = false;
+
+        adjust_band_boundaries(&all_models.true_model_battery);
+        adjust_band_boundaries(&all_models.true_model_ac);
+        adjust_band_boundaries(&all_models.false_model_battery);
+        adjust_band_boundaries(&all_models.false_model_ac);
+        adjust_band_boundaries(&all_models.total_model_battery);
+        adjust_band_boundaries(&all_models.total_model_ac);
     } else if (measuring_mode && current_time - last_measure_time >= 1) {
         // Get true rate every 20 seconds
         natural_true_rate = true_count;

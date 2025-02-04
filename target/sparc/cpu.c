@@ -129,16 +129,26 @@ struct TimingModel {
     unsigned long long total_samples;
 };
 
-struct AllModels {
-    struct TimingModel true_model_battery;
-    struct TimingModel true_model_ac;
-    struct TimingModel false_model_battery;
-    struct TimingModel false_model_ac;
-    struct TimingModel total_model_battery;
-    struct TimingModel total_model_ac;
+typedef enum {
+    MODEL_TRUE_BATTERY = 0,
+    MODEL_TRUE_AC,
+    MODEL_FALSE_BATTERY,
+    MODEL_FALSE_AC,
+    MODEL_TOTAL_BATTERY,
+    MODEL_TOTAL_AC,
+    NUM_MODELS // Total number of models
+} ModelType;
+
+static const char *model_names[NUM_MODELS] = {
+    "true_model_battery",
+    "true_model_ac",
+    "false_model_battery",
+    "false_model_ac",
+    "total_model_battery",
+    "total_model_ac"
 };
 
-static struct AllModels all_models = {0};
+static struct TimingModel all_models[NUM_MODELS];
 
 static void save_models(void) {
     FILE *f = fopen(MODELS_FILE, "wb");
@@ -148,7 +158,7 @@ static void save_models(void) {
     }
 
     // Write the models data
-    fwrite(&all_models, sizeof(struct AllModels), 1, f);
+    fwrite(&all_models, sizeof(all_models), 1, f);
 
     fclose(f);
 }
@@ -157,7 +167,7 @@ static bool load_models(void) {
     FILE *f = fopen(MODELS_FILE, "rb");
     if (!f) return false;
 
-    size_t read_count = fread(&all_models, sizeof(struct AllModels), 1, f);
+    size_t read_count = fread(&all_models, sizeof(all_models), 1, f);
     fclose(f);
 
     return (read_count == 1);
@@ -192,25 +202,6 @@ typedef enum {
     CHANGE_TYPE_MAX_UPDATE,
     CHANGE_TYPE_BOUNDARY_CHANGE
 } ChangeType;
-
-typedef enum {
-    MODEL_TRUE_BATTERY = 0,
-    MODEL_TRUE_AC,
-    MODEL_FALSE_BATTERY,
-    MODEL_FALSE_AC,
-    MODEL_TOTAL_BATTERY,
-    MODEL_TOTAL_AC,
-    NUM_MODELS // Total number of models
-} ModelType;
-
-static const char *model_names[NUM_MODELS] = {
-    "true_model_battery",
-    "true_model_ac",
-    "false_model_battery",
-    "false_model_ac",
-    "total_model_battery",
-    "total_model_ac"
-};
 
 struct BandChange {
     ChangeType change_type;
@@ -261,37 +252,35 @@ static void log_band_model_change(struct BandModel *band, int band_index,
 
 static bool should_sleep(int result, long long value) {
     bool on_battery = is_on_battery();
-    struct TimingModel *model;
-    const char *model_name;
+    ModelType model_type;
 
     // Select appropriate model based on the type of interval and power state
     if (result == 1) {
-        model = on_battery ? &all_models.true_model_battery : &all_models.true_model_ac;
-        model_name = on_battery ? "true_model_battery" : "true_model_ac";
+        model_type = on_battery ? MODEL_TRUE_BATTERY : MODEL_TRUE_AC;
     } else if (result == 0) {
-        model = on_battery ? &all_models.false_model_battery : &all_models.false_model_ac;
-        model_name = on_battery ? "false_model_battery" : "false_model_ac";
+        model_type = on_battery ? MODEL_FALSE_BATTERY : MODEL_FALSE_AC;
     } else {
-        model = on_battery ? &all_models.total_model_battery : &all_models.total_model_ac;
-        model_name = on_battery ? "total_model_battery" : "total_model_ac";
+        model_type = on_battery ? MODEL_TOTAL_BATTERY : MODEL_TOTAL_AC;
     }
+
+    struct TimingModel *model = &all_models[model_type];
 
     // If the VM is busy, we're in learning mode. Update the model
     if (vm_state == 1 || model->total_samples < 1000000) {
         for (int i = 0; i < NUM_BANDS; i++) {
             if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
                 if (!model->bands[i].values_seen) {
-                    log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_FIRST_USE, model_name);
+                    log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_FIRST_USE, model_type);
                     model->bands[i].min_value = value;
                     model->bands[i].max_value = value;
                     model->bands[i].values_seen = true;
                 } else {
                     if (value < model->bands[i].min_value) {
-                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MIN_UPDATE, model_name);
+                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MIN_UPDATE, model_type);
                         model->bands[i].min_value = value;
                     }
                     if (value > model->bands[i].max_value) {
-                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MAX_UPDATE, model_name);
+                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MAX_UPDATE, model_type);
                         model->bands[i].max_value = value;
                     }
                 }
@@ -331,34 +320,40 @@ static bool should_sleep(int result, long long value) {
             (double)outlier_count / total_active_bands > 0.3);
 }
 
-static void initialize_bands(struct TimingModel *model) {
-    // Min timing: ~300ns, Max timing: ~100ms
-    double min_log = log10(300.0);
-    double max_log = log10(100000000.0);
-    double step = (max_log - min_log) / NUM_BANDS;
+static void initialize_bands(void) {
+    for (ModelType model_type = 0; model_type < NUM_MODELS; model_type++) {
+        struct TimingModel *model = &all_models[model_type];
+        // Min timing: ~300ns, Max timing: ~100ms
+        double min_log = log10(300.0);
+        double max_log = log10(100000000.0);
+        double step = (max_log - min_log) / NUM_BANDS;
 
-    for (int i = 0; i <= NUM_BANDS; i++) {
-        model->boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
+        for (int i = 0; i <= NUM_BANDS; i++) {
+            model->boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
+        }
     }
 }
 
-static void adjust_band_boundaries(struct TimingModel *model, const char* model_name) {
-    printf("%s: samples=%lld\n", __func__, model->total_samples);
-    for (int i = 0; i < NUM_BANDS - 1; i++) {
-        unsigned long long max_current_band = model->bands[i].max_value;
-        unsigned long long min_next_band = model->bands[i + 1].min_value;
+static void adjust_band_boundaries(void) {
+    for (ModelType model_type = 0; model_type < NUM_MODELS; model_type++) {
+        struct TimingModel *model = &all_models[model_type];
+        printf("%s: samples=%lld\n", model_names[model_type], model->total_samples);
+        for (int i = 0; i < NUM_BANDS - 1; i++) {
+            unsigned long long max_current_band = model->bands[i].max_value;
+            unsigned long long min_next_band = model->bands[i + 1].min_value;
 
-        // If there's a gap between the current band's max and the next band's min
-        if (max_current_band < min_next_band) {
-            // Calculate the logarithmic center of the gap
-            double log_max = log10(max_current_band);
-            double log_min = log10(min_next_band);
-            double log_center = (log_max + log_min) / 2;
-            unsigned long long new_boundary = (unsigned long long)pow(10, log_center);
+            // If there's a gap between the current band's max and the next band's min
+            if (max_current_band < min_next_band) {
+                // Calculate the logarithmic center of the gap
+                double log_max = log10(max_current_band);
+                double log_min = log10(min_next_band);
+                double log_center = (log_max + log_min) / 2;
+                unsigned long long new_boundary = (unsigned long long)pow(10, log_center);
 
-            // Adjust the boundary between the current and next band
-            model->boundaries[i + 1] = new_boundary;
-            log_band_model_change(&model->bands[i], i, 0, CHANGE_TYPE_BOUNDARY_CHANGE, model_name);
+                // Adjust the boundary between the current and next band
+                model->boundaries[i + 1] = new_boundary;
+                log_band_model_change(&model->bands[i], i, 0, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
+            }
         }
     }
 }
@@ -388,7 +383,7 @@ static void log_band_changes(void) {
             char line[256];
             snprintf(line, sizeof(line),
                      "Model: %s, Band %d %s: value=%llu\n",
-                     model_names[band_changes[i].model_type].
+                     model_names[band_changes[i].model_type],
                      i, change_type_str,
                      band_changes[i].value);
 
@@ -447,12 +442,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Initialize bands if needed
     if (!bands_initialized) {
-        initialize_bands(&all_models.true_model_battery);
-        initialize_bands(&all_models.true_model_ac);
-        initialize_bands(&all_models.false_model_battery);
-        initialize_bands(&all_models.false_model_ac);
-        initialize_bands(&all_models.total_model_battery);
-        initialize_bands(&all_models.total_model_ac);
+        initialize_bands();
         bands_initialized = true;
     }
 
@@ -478,12 +468,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         last_measure_time = current_time;
         sleep_enabled = false;
 
-        adjust_band_boundaries(&all_models.true_model_battery, "true_model_battery");
-        adjust_band_boundaries(&all_models.true_model_ac, "true_model_ac");
-        adjust_band_boundaries(&all_models.false_model_battery, "false_model_battery");
-        adjust_band_boundaries(&all_models.false_model_ac, "false_model_ac");
-        adjust_band_boundaries(&all_models.total_model_battery, "total_model_battery");
-        adjust_band_boundaries(&all_models.total_model_ac, "total_model_ac");
+        adjust_band_boundaries();
     } else if (measuring_mode && current_time - last_measure_time >= 1) {
         // Get true rate every 20 seconds
         natural_true_rate = true_count;

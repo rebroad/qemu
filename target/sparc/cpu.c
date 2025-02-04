@@ -193,10 +193,29 @@ typedef enum {
     CHANGE_TYPE_BOUNDARY_CHANGE
 } ChangeType;
 
+typedef enum {
+    MODEL_TRUE_BATTERY = 0,
+    MODEL_TRUE_AC,
+    MODEL_FALSE_BATTERY,
+    MODEL_FALSE_AC,
+    MODEL_TOTAL_BATTERY,
+    MODEL_TOTAL_AC,
+    NUM_MODELS // Total number of models
+} ModelType;
+
+static const char *model_names[NUM_MODELS] = {
+    "true_model_battery",
+    "true_model_ac",
+    "false_model_battery",
+    "false_model_ac",
+    "total_model_battery",
+    "total_model_ac"
+};
+
 struct BandChange {
     ChangeType change_type;
     unsigned long long value; // The value associated with the change
-    const char *model_name;
+    ModelType model_type;
     bool has_change;          // Whether a change has been recorded for this band
 };
 
@@ -205,7 +224,7 @@ static struct BandChange band_changes[NUM_BANDS]; // Array to track changes per 
 static void log_band_model_change(struct BandModel *band, int band_index,
                                   unsigned long long new_value,
                                   ChangeType change_type,
-                                  const char *model_name) {
+                                  ModelType model_type) {
     // Ignore if no change type is provided
     if (change_type == CHANGE_TYPE_NONE) return;
 
@@ -214,7 +233,7 @@ static void log_band_model_change(struct BandModel *band, int band_index,
         // No change recorded yet for this band
         band_changes[band_index].change_type = change_type;
         band_changes[band_index].value = new_value;
-        band_changes[band_index].model_name = model_name;
+        band_changes[band_index].model_type = model_type;
         band_changes[band_index].has_change = true;
     } else {
         // If this change is more significant, overwrite the previous one
@@ -222,20 +241,20 @@ static void log_band_model_change(struct BandModel *band, int band_index,
             // "first_use" is the most significant change
             band_changes[band_index].change_type = change_type;
             band_changes[band_index].value = new_value;
-            band_changes[band_index].model_name = model_name;
+            band_changes[band_index].model_type = model_type;
         } else if (change_type == CHANGE_TYPE_BOUNDARY_CHANGE &&
                    band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE) {
             // "boundary_change" is more significant than "min_update" or "max_update"
             band_changes[band_index].change_type = change_type;
             band_changes[band_index].value = new_value;
-            band_changes[band_index].model_name = model_name;
+            band_changes[band_index].model_type = model_type;
         } else if (change_type == CHANGE_TYPE_MAX_UPDATE &&
                    band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE &&
                    band_changes[band_index].change_type != CHANGE_TYPE_BOUNDARY_CHANGE) {
             // "max_update" is more significant than "min_update"
             band_changes[band_index].change_type = change_type;
             band_changes[band_index].value = new_value;
-            band_changes[band_index].model_name = model_name;
+            band_changes[band_index].model_type = model_type;
         }
     }
 }
@@ -369,7 +388,7 @@ static void log_band_changes(void) {
             char line[256];
             snprintf(line, sizeof(line),
                      "Model: %s, Band %d %s: value=%llu\n",
-                     band_changes[i].model_name,
+                     model_names[band_changes[i].model_type].
                      i, change_type_str,
                      band_changes[i].value);
 

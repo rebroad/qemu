@@ -111,17 +111,6 @@ static void timespecadd(struct timespec *a, const struct timespec *b)
     }
 }
 
-struct AllModels {
-    struct TimingModel true_model_battery;
-    struct TimingModel true_model_ac;
-    struct TimingModel false_model_battery;
-    struct TimingModel false_model_ac;
-    struct TimingModel total_model_battery;
-    struct TimingModel total_model_ac;
-};
-
-static struct AllModels all_models = {0};
-
 static int vm_state = 0;
 static time_t last_models_save_time;
 
@@ -137,11 +126,22 @@ struct BandModel {
 
 struct TimingModel {
     // Use logarithmic bands to better capture the 300ns - 100ms range
-    unsigned long long band_boundaries[NUM_BANDS + 1];
+    unsigned long long boundaries[NUM_BANDS + 1];
     unsigned int counts[NUM_BANDS];
     struct BandModel bands[NUM_BANDS];
     unsigned long long total_samples;
 };
+
+struct AllModels {
+    struct TimingModel true_model_battery;
+    struct TimingModel true_model_ac;
+    struct TimingModel false_model_battery;
+    struct TimingModel false_model_ac;
+    struct TimingModel total_model_battery;
+    struct TimingModel total_model_ac;
+};
+
+static struct AllModels all_models = {0};
 
 static void save_models(void) {
     FILE *f = fopen(MODELS_FILE, "wb");
@@ -229,7 +229,7 @@ static bool should_sleep(int result, long long interval) {
     if (vm_state == 1) {
         for (int i = 0; i < NUM_BANDS; i++) {
             if (model->counts[i] > 0) {
-                unsigned long long value = model->band_boundaries[i];
+                unsigned long long value = model->boundaries[i];
                 if (!model->bands[i].values_seen) {
                     log_band_model_change(&model->bands[i], i, value, "first_use");
                     model->bands[i].min_value = value;
@@ -258,7 +258,7 @@ static bool should_sleep(int result, long long interval) {
     for (int i = 0; i < NUM_BANDS; i++) {
         if (model->counts[i] > 0) {
             total_active_bands++;
-            unsigned long long value = model->band_boundaries[i];
+            unsigned long long value = model->boundaries[i];
 
             // If we see values in bands that were never active during busy state,
             // or values outside the ranges seen during busy state, count as outliers
@@ -275,14 +275,14 @@ static bool should_sleep(int result, long long interval) {
             (double)outlier_count / total_active_bands > 0.3);
 }
 
-static void initialize_bands(unsigned long long *boundaries) {
+static void initialize_bands(struct TimingModel *model) {
     // Min timing: ~300ns, Max timing: ~100ms
     double min_log = log10(300.0);
     double max_log = log10(100000000.0);
     double step = (max_log - min_log) / NUM_BANDS;
 
     for (int i = 0; i <= NUM_BANDS; i++) {
-        boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
+        model->boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
     }
 }
 
@@ -327,12 +327,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Initialize bands if needed
     if (!bands_initialized) {
-        initialize_bands(all_models.true_model_battery.band_boundaries);
-        initialize_bands(all_models.true_model_ac.band_boundaries);
-        initialize_bands(all_models.false_model_battery.band_boundaries);
-        initialize_bands(all_models.false_model_ac.band_boundaries);
-        initialize_bands(all_models.total_model_battery.band_boundaries);
-        initialize_bands(all_models.total_model_ac.band_boundaries);
+        initialize_bands(&all_models.true_model_battery);
+        initialize_bands(&all_models.true_model_ac);
+        initialize_bands(&all_models.false_model_battery);
+        initialize_bands(&all_models.false_model_ac);
+        initialize_bands(&all_models.total_model_battery);
+        initialize_bands(&all_models.total_model_ac);
         bands_initialized = true;
     }
 

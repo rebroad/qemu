@@ -448,12 +448,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     if (current_time != last_print_time) {
-        if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 4608 && min_false_interval < 6965 && (false_interval_ns / false_count) > 6644546 && (false_interval_ns / false_count) < 7111839 && (true_interval_ns / true_count) > 9999178 && (true_interval_ns / true_count) < 10099196 && min_false_streak == 1 && max_false_streak < 6 && min_true_streak == 1 && max_true_streak == 2) {
+        if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 4608 && min_false_interval < 107062 && (false_interval_ns / false_count) > 5881554 && (false_interval_ns / false_count) < 7111839 && (true_interval_ns / true_count) > 9997714 && (true_interval_ns / true_count) < 10099196 && min_false_streak == 1 && max_false_streak < 6 && min_true_streak == 1 && max_true_streak == 2) {
             prom_boot++;
-            if (prom_boot == 2) {
-                printf("\nTRIGGER BOOT\n");
-                fopen(BOOTDISK_FILE, "w");
-            }
+            printf("\nPROM_BOOT=%d\n", prom_boot);
+            if (prom_boot == 2) fopen(BOOTDISK_FILE, "w");
         } else {
             unlink(BOOTDISK_FILE);
             prom_boot = 0;

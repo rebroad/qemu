@@ -362,12 +362,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         last_vm_state_check = current_time;
     }
 
-    // Every 20 seconds, disable sleep for a 1 second to measure
+    // Every 20 seconds
 	if (current_time - last_measure_time >= 20) {
 		measuring_mode = true;
 		last_measure_time = current_time;
 		sleep_enabled = false;
 	} else if (measuring_mode && current_time - last_measure_time >= 1) {
+		// Get true rate every 20 seconds
 		natural_true_rate = true_count;
 		measuring_mode = false;
         sleep_enabled = true;

@@ -125,8 +125,7 @@ struct BandModel {
 };
 
 struct TimingModel {
-    // Use logarithmic bands to better capture the 300ns - 100ms range
-    unsigned long long boundaries[NUM_BANDS + 1];
+	unsigned long long boundaries[NUM_BANDS + 1];
     struct BandModel bands[NUM_BANDS];
     unsigned long long total_samples;
 };
@@ -244,31 +243,36 @@ static bool should_sleep(int result, long long interval) {
     }
 
     // If the VM is busy, we're in learning mode. Update the model
-    if (vm_state == 1) {
-        for (int i = 0; i < NUM_BANDS; i++) {
-            if (interval >= model->boundaries[i] && interval < model->boundaries[i + 1]) {
-                if (!model->bands[i].values_seen) {
-                    log_band_model_change(&model->bands[i], i, interval, "first_use");
-                    model->bands[i].min_value = interval;
-                    model->bands[i].max_value = interval;
-                    model->bands[i].values_seen = true;
-                } else {
-                    if (interval < model->bands[i].min_value) {
-                        log_band_model_change(&model->bands[i], i, interval, "min_update");
-                        model->bands[i].min_value = interval;
-                    }
-                    if (interval > model->bands[i].max_value) {
-                        log_band_model_change(&model->bands[i], i, interval, "max_update");
-                        model->bands[i].max_value = interval;
-                    }
-                }
-                break;
-            }
-        }
-        model->total_samples++;
-        periodic_model_save();
-        return false;  // Don't sleep since VM is busy
-    }
+	if (vm_state == 1 || model->total_samples < 100000) {
+		for (int i = 0; i < NUM_BANDS; i++) {
+			if (interval >= model->boundaries[i] && interval < model->boundaries[i + 1]) {
+				if (!model->bands[i].values_seen) {
+					log_band_model_change(&model->bands[i], i, interval, "first_use");
+					model->bands[i].min_value = interval;
+					model->bands[i].max_value = interval;
+					model->bands[i].values_seen = true;
+				} else {
+					if (interval < model->bands[i].min_value) {
+						log_band_model_change(&model->bands[i], i, interval, "min_update");
+						model->bands[i].min_value = interval;
+					}
+					if (interval > model->bands[i].max_value) {
+						log_band_model_change(&model->bands[i], i, interval, "max_update");
+						model->bands[i].max_value = interval;
+					}
+				}
+				break;
+			}
+		}
+		model->total_samples++;
+	}
+	if (vm_state == 1) {
+		periodic_model_save();
+		return false;  // Don't sleep since VM is busy
+	}
+
+	// Exit if we have a lack of samples
+	if (model->total_samples < 100) return false;
 
     // During normal operation, check for deviations from busy pattern
     int outlier_count = 0, total_active_bands = 0;
@@ -305,6 +309,7 @@ static void initialize_bands(struct TimingModel *model) {
 }
 
 static void adjust_band_boundaries(struct TimingModel *model) {
+	printf("%s: samples=%lld\n", __func__, model->total_samples);
     for (int i = 0; i < NUM_BANDS - 1; i++) {
         unsigned long long max_current_band = model->bands[i].max_value;
         unsigned long long min_next_band = model->bands[i + 1].min_value;

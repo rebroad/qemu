@@ -128,25 +128,26 @@ struct SystemState {
 #define BOOTDISK_FILE ".go-boot"
 
 struct BandModel {
-    unsigned long long min_value;  // Minimum value seen in this band during busy state
-    unsigned long long max_value;  // Maximum value seen in this band during busy state
-    bool values_seen;             // Whether we've seen any values in this band during busy state
+    unsigned long long min_value;
+    unsigned long long max_value;
+    bool values_seen;
+	double mean, variance, entropy;
 };
 
 struct TimingModel {
     struct BandModel bands[NUM_BANDS];
-    bool is_learning;             // Whether we're currently in learning mode
-    int learning_samples;         // Number of samples collected during learning
-    bool is_battery_mode;         // Whether these measurements are for battery operation
+    unsigned long long total_samples;
+    bool is_learning; // TODO - we need to set this to true somewhere!
 };
 
 struct SystemModels {
-    struct TimingModel true_model_battery;    // For intervals between true readings on battery
-    struct TimingModel true_model_ac;         // For intervals between true readings on AC power
-    struct TimingModel false_model_battery;   // For intervals between false readings on battery
-    struct TimingModel false_model_ac;        // For intervals between false readings on AC power
-    struct TimingModel total_model_battery;   // For intervals between all calls on battery
-    struct TimingModel total_model_ac;        // For intervals between all calls on AC power
+    struct TimingModel true_model_battery;
+    struct TimingModel true_model_ac;
+    struct TimingModel false_model_battery;
+    struct TimingModel false_model_ac;
+    struct TimingModel total_model_battery;
+    struct TimingModel total_model_ac;
+	time_t last_save_time;
 };
 
 static struct SystemModels system_models = {0};
@@ -187,6 +188,15 @@ static bool is_on_battery(void) {
     return on_battery;
 }
 
+static void periodic_model_save(void) {
+	time_t current_time = time(NULL);
+
+	if (current_time - system_models.last_save_time >= 5) {
+		save_models();
+		system_models.last_save_time = current_time;
+	}
+}
+
 static struct SystemState system_state = {0};
 
 static bool should_sleep(bool result, long long interval, struct TimingSpectrum *spectrum) {
@@ -215,8 +225,8 @@ static bool should_sleep(bool result, long long interval, struct TimingSpectrum 
 				}
 			}
 		}
-		model->learning_samples++;
-		// TODO - save the model when we have enough samples - but don't save too often (to reduce disk wear)
+		model->total_samples++;
+		periodic_model_save()_;
 		return false;  // Don't sleep since VM is busy
 	}
     
@@ -289,7 +299,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Load existing model data
 	if (!models_loaded) {
-		models_loaded = load_models();
+	    load_models();
+		models_loaded = true;
 	}
 
     // Initialize bands if needed

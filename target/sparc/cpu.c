@@ -121,7 +121,7 @@ struct SystemState {
     struct TimingSpectrum false_intervals;
     struct TimingSpectrum true_intervals;
     struct TimingSpectrum total_intervals;
-    int current_vm_state;  // 0 for idle, 1 for busy
+    int vm_state;  // 0 for idle, 1 for busy
 };
 
 #define MODELS_FILE "timing_models.bin"
@@ -211,8 +211,8 @@ static bool should_sleep(int result, long long interval, struct TimingSpectrum *
 		model = on_battery ? &system_models.total_model_battery : &system_models.total_model_ac;
 	}
 
-    // If we're in learning mode and the VM is busy, update the model
-	if (system_state.current_vm_state == 1) {
+    // If the VM is busy, we're in learning mode. Update the model
+	if (system_state.vm_state == 1) {
 		for (int i = 0; i < NUM_BANDS; i++) {
 			if (spectrum->counts[i] > 0) {
 				unsigned long long value = spectrum->band_boundaries[i];
@@ -323,9 +323,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         if (state_file) {
             int new_state;
             if (fscanf(state_file, "%d", &new_state) == 1)
-                system_state.current_vm_state = new_state;
+                system_state.vm_state = new_state;
 			else // 2 is neither busy(1) or idle(0)
-                system_state.current_vm_state = 2;
+                system_state.vm_state = 2;
             fclose(state_file);
         }
         last_vm_state_check = current_time;

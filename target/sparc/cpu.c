@@ -137,7 +137,6 @@ struct BandModel {
 struct TimingModel {
     struct BandModel bands[NUM_BANDS];
     unsigned long long total_samples;
-    bool is_learning; // TODO - we need to set this to true somewhere!
 };
 
 struct SystemModels {
@@ -166,7 +165,7 @@ static void save_models(void) {
 }
 
 static bool load_models(void) {
-    FILE *f = fopen(CORRELATION_FILE, "rb");
+    FILE *f = fopen(MODELS_FILE, "rb");
     if (!f) return false;
 
     size_t read_count = fread(&system_models, sizeof(struct SystemModels), 1, f);
@@ -199,19 +198,21 @@ static void periodic_model_save(void) {
 
 static struct SystemState system_state = {0};
 
-static bool should_sleep(bool result, long long interval, struct TimingSpectrum *spectrum) {
+static bool should_sleep(int result, long long interval, struct TimingSpectrum *spectrum) {
 	bool on_battery = is_on_battery();
 	struct TimingModel *model;
 
 	// Select appropriate model based on the type of interval and power state
-	if (result) {
+	if (result == 1) {
 		model = on_battery ? &system_models.true_model_battery : &system_models.true_model_ac;
-	} else {
+	} else if (result == 0) {
 		model = on_battery ? &system_models.false_model_battery : &system_models.false_model_ac;
+	} else {
+		model = on_battery ? &system_models.total_model_battery : &system_models.total_model_ac;
 	}
 
     // If we're in learning mode and the VM is busy, update the model
-	if (model->is_learning && system_state.current_vm_state == 1) {
+	if (system_state.current_vm_state == 1) {
 		for (int i = 0; i < NUM_BANDS; i++) {
 			if (spectrum->counts[i] > 0) {
 				unsigned long long value = spectrum->band_boundaries[i];
@@ -226,10 +227,10 @@ static bool should_sleep(bool result, long long interval, struct TimingSpectrum 
 			}
 		}
 		model->total_samples++;
-		periodic_model_save()_;
+		periodic_model_save();
 		return false;  // Don't sleep since VM is busy
 	}
-    
+
     // During normal operation, check for deviations from busy pattern
     int outlier_count = 0, total_active_bands = 0;
 
@@ -347,7 +348,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
 		struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
 		long long interval = timespec_diff_ns(last_time, &current_ts);
-		if (sleep_enabled && (should_sleep(result, interval, &system_state.total_intervals[system_state.current_index])))
+		if (sleep_enabled && (should_sleep(2, interval, &system_state.total_intervals)))
 			total_sleeps++;
 	}
 
@@ -371,7 +372,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_true_interval = (interval > max_true_interval) ? interval : max_true_interval;
 
             erm_sleep = to_sleep;
-			if (sleep_enabled && (should_sleep(true, interval, &system_state.true_intervals[system_state.current_index]) || erm_sleep > to_sleep)) {
+			if (sleep_enabled && (should_sleep(1, interval, &system_state.true_intervals) || erm_sleep > to_sleep)) {
                 true_sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);
@@ -411,7 +412,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 			} else if (last_min_false_interval > 520) idle_os = 0;
 			if (post_boot_indication > 2)
 				erm_sleep = 100000;
-			if (sleep_enabled && (should_sleep(false, interval, &system_state.false_intervals[system_state.current_index]) || erm_sleep > to_sleep)) {
+			if (sleep_enabled && (should_sleep(0, interval, &system_state.false_intervals) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
                 timespecadd(&last_false_time, &sleep_duration);

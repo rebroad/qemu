@@ -187,28 +187,47 @@ static void periodic_model_save(void) {
     }
 }
 
-static bool band_changes_this_second = false;
 static char band_change_log[4096] = {0};
+
+struct BandChange {
+    const char *change_type;  // Type of change: "min_update", "max_update", "first_use", "boundary_change"
+    unsigned long long value; // The value associated with the change
+    bool has_change;          // Whether a change has been recorded for this band
+};
+
+static struct BandChange band_changes[NUM_BANDS]; // Array to track changes per band
 
 static void log_band_model_change(struct BandModel *band, int band_index,
                                   unsigned long long new_value,
                                   const char *change_type) {
-    if (!band_changes_this_second) {
-        memset(band_change_log, 0, sizeof(band_change_log));
-        band_changes_this_second = true;
+    // Ignore if no change type is provided
+    if (!change_type) return;
+
+    // Track the most significant change for this band
+    if (!band_changes[band_index].has_change) {
+        // No change recorded yet for this band
+        band_changes[band_index].change_type = change_type;
+        band_changes[band_index].value = new_value;
+        band_changes[band_index].has_change = true;
+    } else {
+        // If this change is more significant, overwrite the previous one
+        if (strcmp(change_type, "first_use") == 0) {
+            // "first_use" is the most significant change
+            band_changes[band_index].change_type = change_type;
+            band_changes[band_index].value = new_value;
+        } else if (strcmp(change_type, "boundary_change") == 0 &&
+                   strcmp(band_changes[band_index].change_type, "first_use") != 0) {
+            // "boundary_change" is more significant than "min_update" or "max_update"
+            band_changes[band_index].change_type = change_type;
+            band_changes[band_index].value = new_value;
+        } else if (strcmp(change_type, "max_update") == 0 &&
+                   strcmp(band_changes[band_index].change_type, "first_use") != 0 &&
+                   strcmp(band_changes[band_index].change_type, "boundary_change") != 0) {
+            // "max_update" is more significant than "min_update"
+            band_changes[band_index].change_type = change_type;
+            band_changes[band_index].value = new_value;
+        }
     }
-
-    char buffer[256];
-    snprintf(buffer, sizeof(buffer),
-             "Band %d %s: value=%llu (min=%llu, max=%llu) ",
-             band_index,
-             change_type,
-             new_value,
-             band->min_value,
-             band->max_value);
-
-    // Append to existing log
-    strncat(band_change_log, buffer, sizeof(band_change_log) - strlen(band_change_log) - 1);
 }
 
 static bool should_sleep(int result, long long interval) {
@@ -302,6 +321,31 @@ static void adjust_band_boundaries(struct TimingModel *model) {
             model->boundaries[i + 1] = new_boundary;
         }
     }
+}
+
+static void log_band_changes(void) {
+    for (int i = 0; i < NUM_BANDS; i++) {
+        if (band_changes[i].has_change) {
+            char buffer[256];
+            snprintf(buffer, sizeof(buffer),
+                     "Band %d %s: value=%llu\n",
+                     i,
+                     band_changes[i].change_type,
+                     band_changes[i].value);
+
+            // Append to the log
+            strncat(band_change_log, buffer, sizeof(band_change_log) - strlen(band_change_log) - 1);
+        }
+    }
+
+    // Print the log if there are any changes
+    if (strlen(band_change_log) > 0) {
+        printf("Model Changes:\n%s\n", band_change_log);
+    }
+
+    // Reset the log and the changes array for the next second
+    memset(band_change_log, 0, sizeof(band_change_log));
+    memset(band_changes, 0, sizeof(band_changes));
 }
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
@@ -482,10 +526,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             prom_boot = 0;
         }
 
-        if (band_changes_this_second) {
-            printf("Model Changes:\n%s\n", band_change_log);
-            band_changes_this_second = false;
-        }
+        log_band_changes();
 
         printf("Interrupt Stats: %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"

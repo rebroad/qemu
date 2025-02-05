@@ -397,10 +397,13 @@ static void display_band_changes(void) {
     memset(band_changes, 0, sizeof(band_changes));
 }
 
-static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
-    struct timespec start_ts, end_ts;
-    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+static unsigned long long get_cpu_cycles(void) {
+    unsigned int low, high;
+    asm volatile("rdtsc" : "=a" (low), "=d" (high));
+    return ((unsigned long long)high << 32) | low;
+}
 
+static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
@@ -415,6 +418,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
         }
     }
 
+    struct timespec start_ts, end_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
+    static unsigned long long last_cycles = 0;
+    unsigned long long current_cycles = get_cpu_cycles();
+    unsigned long long cycle_delta = current_cycles - last_cycles;
+
     static bool bands_initialized = false;
     static bool models_loaded = false;
     static time_t last_print_time = 0, last_measure_time = 0, last_vm_state_check = 0;
@@ -422,7 +432,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
     static unsigned int true_count = 0, false_count = 0;
     static unsigned int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
-    static unsigned long long tot_overhead_ns = 0, count = 0;
+    static unsigned long long tot_overhead_ns = 0, tot_cycle_delta = 0, count = 0;
     static unsigned long long true_interval_ns = 0, min_true_interval = 0, max_true_interval = 0;
     static unsigned long long false_interval_ns = 0, min_false_interval = 0, max_false_interval = 0;
     static unsigned long to_sleep = 19000, erm_sleep = 0; // microseconds
@@ -479,7 +489,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
         if (sleep_enabled && (should_sleep(2, interval)))
             total_sleeps++;
     }
-    count++; tot_overhead_ns += overhead_ns;
+    count++; tot_overhead_ns += overhead_ns; tot_cycle_delta += cycle_delta;
 
     if (result) {
         true_count++;
@@ -557,12 +567,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
 
         display_band_changes();
 
-        printf("Interrupt Stats: VM=%d Avg_overhead: %llu ns %s%s\n"
+        printf("Interrupt Stats: VM=%d Avg_overhead: %llu ns Avg_cycle_delta: %llu %s%s\n"
                "  Counts - True: %u (%u), False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
-               vm_state, count ? tot_overhead_ns / count : 0,
+               vm_state, count ? tot_overhead_ns / count : 0, count ? tot_cycle_delta / count : 0,
                idle_os ? "idle_os " : "",
                shutdown_indication > 2 ? "shutdown" : "",
                true_count, natural_true_rate, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,

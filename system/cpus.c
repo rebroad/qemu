@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 
+#include <time.h>
 #include "qemu/osdep.h"
 #include "monitor/monitor.h"
 #include "qemu/coroutine-tls.h"
@@ -75,6 +76,10 @@ static const AccelOpsClass *cpus_accel;
 
 bool cpu_is_stopped(CPUState *cpu)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     return cpu->stopped || !runstate_is_running();
 }
 
@@ -85,6 +90,10 @@ bool cpu_work_list_empty(CPUState *cpu)
 
 bool cpu_thread_is_idle(CPUState *cpu)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     if (cpu->stop || !cpu_work_list_empty(cpu)) {
         return false;
     }
@@ -264,6 +273,10 @@ static void generic_handle_interrupt(CPUState *cpu, int mask)
 
 void cpu_interrupt(CPUState *cpu, int mask)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     if (cpus_accel->handle_interrupt) {
         cpus_accel->handle_interrupt(cpu, mask);
     } else {
@@ -321,6 +334,10 @@ int vm_shutdown(void)
 
 bool cpu_can_run(CPUState *cpu)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     if (cpu->stop) {
         return false;
     }
@@ -332,6 +349,10 @@ bool cpu_can_run(CPUState *cpu)
 
 void cpu_handle_guest_debug(CPUState *cpu)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     if (replay_running_debug()) {
         if (!cpu->singlestep_enabled) {
             /*
@@ -427,11 +448,19 @@ void qemu_init_cpu_loop(void)
 
 void run_on_cpu(CPUState *cpu, run_on_cpu_func func, run_on_cpu_data data)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     do_run_on_cpu(cpu, func, data, &bql);
 }
 
 static void qemu_cpu_stop(CPUState *cpu, bool exit)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     g_assert(qemu_cpu_is_self(cpu));
     cpu->stop = false;
     cpu->stopped = true;
@@ -591,6 +620,10 @@ void cpu_thread_signal_destroyed(CPUState *cpu)
 
 void cpu_pause(CPUState *cpu)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     if (qemu_cpu_is_self(cpu)) {
         qemu_cpu_stop(cpu, true);
     } else {
@@ -601,6 +634,10 @@ void cpu_pause(CPUState *cpu)
 
 void cpu_resume(CPUState *cpu)
 {
+	time_t current_time = time(NULL);
+	static time_t last_print_time = 0;
+	if (current_time != last_print_time) printf("%s\n", __func__);
+
     cpu->stop = false;
     cpu->stopped = false;
     qemu_cpu_kick(cpu);

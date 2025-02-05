@@ -358,8 +358,8 @@ static void adjust_band_boundaries(void) {
 
                 // Adjust the boundary between the current and next band
                 unsigned long long old_boundary = model->boundaries[i + 1];
-                model->boundaries[i + 1] = new_boundary;
-                if (old_boundary != new_boundary)
+                if (new_boundary) model->boundaries[i + 1] = new_boundary;
+                if (new_boundary && old_boundary != new_boundary)
                     log_band_change(&model->bands[i], i, old_boundary, new_boundary, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
             }
         }
@@ -372,14 +372,16 @@ static void display_band_changes(void) {
     char *current = buffer;
 
     for (int i = 0; i < NUM_BANDS; i++) if (band_changes[i].has_change) {
+        struct TimingModel *model = &all_models[band_changes[i].model_type];
         int written = snprintf(current, remaining,
-            "Model: %s, Band %d %s: value=%llu->%llu\n",
-            model_names[band_changes[i].model_type], i,
-            band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "first_use" :
-            band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min_update" :
-            band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max_update" :
-            band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary_change" : "",
-            band_changes[i].old_value, band_changes[i].new_value);
+                "%s, band %d (%lld-%lld) %s: value=%llu->%llu\n",
+                model_names[band_changes[i].model_type], i,
+                model->boundaries[i], model->boundaries[i+1],
+                band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "new" :
+                band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min" :
+                band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max" :
+                band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary" : "",
+                band_changes[i].old_value, band_changes[i].new_value);
 
         if (written < 0 || (size_t)written >= remaining) break;
 
@@ -590,7 +592,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                min_true_streak, max_true_streak,
                min_false_streak, max_false_streak);
 
-        if (erm_sleep)
+        if (erm_sleep) {
             if (true_count < natural_true_rate / 2) to_sleep = to_sleep * 99 / 100;
             else if (true_count >= natural_true_rate) to_sleep = to_sleep * 100 / 99;
         }

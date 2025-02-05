@@ -78,7 +78,10 @@ bool cpu_is_stopped(CPUState *cpu)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     return cpu->stopped || !runstate_is_running();
 }
@@ -92,7 +95,10 @@ bool cpu_thread_is_idle(CPUState *cpu)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     if (cpu->stop || !cpu_work_list_empty(cpu)) {
         return false;
@@ -275,7 +281,10 @@ void cpu_interrupt(CPUState *cpu, int mask)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     if (cpus_accel->handle_interrupt) {
         cpus_accel->handle_interrupt(cpu, mask);
@@ -336,7 +345,10 @@ bool cpu_can_run(CPUState *cpu)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     if (cpu->stop) {
         return false;
@@ -351,7 +363,10 @@ void cpu_handle_guest_debug(CPUState *cpu)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     if (replay_running_debug()) {
         if (!cpu->singlestep_enabled) {
@@ -450,7 +465,10 @@ void run_on_cpu(CPUState *cpu, run_on_cpu_func func, run_on_cpu_data data)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     do_run_on_cpu(cpu, func, data, &bql);
 }
@@ -459,7 +477,10 @@ static void qemu_cpu_stop(CPUState *cpu, bool exit)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     g_assert(qemu_cpu_is_self(cpu));
     cpu->stop = false;
@@ -622,7 +643,10 @@ void cpu_pause(CPUState *cpu)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     if (qemu_cpu_is_self(cpu)) {
         qemu_cpu_stop(cpu, true);
@@ -636,7 +660,10 @@ void cpu_resume(CPUState *cpu)
 {
 	time_t current_time = time(NULL);
 	static time_t last_print_time = 0;
-	if (current_time != last_print_time) printf("%s\n", __func__);
+	if (current_time != last_print_time) {
+		printf("%s\n", __func__);
+		last_print_time = current_time;
+	}
 
     cpu->stop = false;
     cpu->stopped = false;

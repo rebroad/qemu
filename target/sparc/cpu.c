@@ -20,6 +20,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -94,21 +95,11 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #ifndef CONFIG_USER_ONLY
 #define NUM_BANDS 256
 
-static inline unsigned long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
-    return (end->tv_sec - start->tv_sec) * 1000000000LL +
-           (end->tv_nsec - start->tv_nsec);
-}
-
-static inline void timespecadd(struct timespec *a, const struct timespec *b)
-{
-    a->tv_sec += b->tv_sec;
-    a->tv_nsec += b->tv_nsec;
-
-    // Normalize to ensure tv_nsec is between 0 and 999,999,999
-    while (a->tv_nsec >= 1000000000) {
-        a->tv_sec++;
-        a->tv_nsec -= 1000000000;
-    }
+static inline unsigned long long get_cpu_time(void) {
+    struct rusage usage;
+    getrusage(RUSAGE_SELF, &usage);
+    return usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec +
+           usage.ru_stime.tv_sec * 1000000 + usage.ru_stime.tv_usec;
 }
 
 static int vm_state = 2;
@@ -329,9 +320,8 @@ static bool should_sleep(int result, unsigned long long value) {
 static void initialize_bands(void) {
     for (ModelType model_type = 0; model_type < NUM_MODELS; model_type++) {
         struct TimingModel *model = &all_models[model_type];
-        // Min timing: ~300ns, Max timing: ~100ms
-        double min_log = log10(300.0);
-        double max_log = log10(100000000.0);
+        double min_log = log10(0.0);
+        double max_log = log10(1000000.0);
         double step = (max_log - min_log) / NUM_BANDS;
 
         for (int i = 0; i <= NUM_BANDS; i++) {
@@ -418,8 +408,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
         }
     }
 
-    struct timespec start_ts, end_ts;
-    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    unsigned long long start_ts, end_ts;
+    start_ts = get_cpu_time();
 
     static unsigned long long last_cycles = 0;
     unsigned long long current_cycles = get_cpu_cycles();
@@ -431,16 +421,16 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
     static bool sleep_enabled = true, measuring_mode = false;
     static unsigned int true_count = 0, false_count = 0;
     static unsigned int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
-    static struct timespec last_true_time, last_false_time;
-    static unsigned long long tot_overhead_ns = 0, tot_cycle_delta = 0, count = 0;
-    static unsigned long long true_interval_ns = 0, min_true_interval = 0, max_true_interval = 0;
-    static unsigned long long false_interval_ns = 0, min_false_interval = 0, max_false_interval = 0;
+    static unsigned long long last_true_time = 0, last_false_time = 0;
+    static unsigned long long tot_overhead_us = 0, tot_cycle_delta = 0, count = 0;
+    static unsigned long long true_interval_us = 0, min_true_interval = 0, max_true_interval = 0;
+    static unsigned long long false_interval_us = 0, min_false_interval = 0, max_false_interval = 0;
     static unsigned long to_sleep = 19000, erm_sleep = 0; // microseconds
     static unsigned int current_true_streak = 0, current_false_streak = 0;
     static unsigned int min_true_streak = 0, max_true_streak = 0;
     static unsigned int min_false_streak = 0, max_false_streak = 0;
     static unsigned int shutdown_indication = 0, prom_boot = 0; static bool idle_os = 0;
-    static unsigned long long overhead_ns = 0;
+    static unsigned long long overhead_us = 0;
 
     // Load existing model data
     if (!models_loaded) { load_models(); models_loaded = true; }
@@ -479,17 +469,17 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
     }
 
     // TODO - remove this and use start_ts ?
-    struct timespec current_ts;
-    clock_gettime(CLOCK_MONOTONIC, &current_ts);
+    unsigned long long current_ts;
+    current_ts = get_cpu_time();
 
-    if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
-        struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
-        unsigned long long interval = timespec_diff_ns(last_time, &current_ts);
-        interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
+    if (last_true_time != 0 || last_false_time != 0) {
+        unsigned long long last_time = (last_true_time > last_false_time) ? last_true_time : last_false_time;
+        unsigned long long interval = current_ts - last_time;
+        interval = (interval > overhead_us) ? (interval - overhead_us) : 0;
         if (sleep_enabled && (should_sleep(2, interval)))
             total_sleeps++;
     }
-    count++; tot_overhead_ns += overhead_ns; tot_cycle_delta += cycle_delta;
+    count++; tot_overhead_us += overhead_us; tot_cycle_delta += cycle_delta;
 
     if (result) {
         true_count++;
@@ -501,10 +491,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
         if (current_true_streak > max_true_streak) max_true_streak = current_true_streak;
 
         // True interval calculation
-        if (last_true_time.tv_sec != 0) {
-            unsigned long long interval = timespec_diff_ns(&last_true_time, &current_ts);
-            interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
-            true_interval_ns += interval;
+        if (last_true_time != 0) {
+            unsigned long long interval = current_ts - last_true_time;
+            interval = (interval > overhead_us) ? (interval - overhead_us) : 0;
+            true_interval_us += interval;
             min_true_interval = (min_true_interval == 0) ?
                 interval : (interval < min_true_interval ? interval : min_true_interval);
             max_true_interval = (interval > max_true_interval) ? interval : max_true_interval;
@@ -513,14 +503,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
             if (sleep_enabled && (should_sleep(1, interval) || erm_sleep > to_sleep)) {
                 true_sleeps++;
                 if (vm_state == 2) {
-                    struct timespec sleep_duration = {0, erm_sleep * 1000};
-                    timespecadd(&last_false_time, &sleep_duration);
-                    timespecadd(&last_true_time, &sleep_duration);
+                    last_false_time += erm_sleep;
+                    last_true_time += erm_sleep;
                     usleep(erm_sleep);
                 } else erm_sleep = 0;
             } else erm_sleep = 0;
         }
-        memcpy(&last_true_time, &current_ts, sizeof(struct timespec));
+        last_true_time = current_ts;
     } else {
         false_count++;
         current_false_streak++;
@@ -531,10 +520,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
         if (current_false_streak > max_false_streak) max_false_streak = current_false_streak;
 
         // False interval calculation
-        if (last_false_time.tv_sec != 0) {
-            unsigned long long interval = timespec_diff_ns(&last_false_time, &current_ts);
-            interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
-            false_interval_ns += interval;
+        if (last_false_time != 0) {
+            unsigned long long interval = current_ts - last_false_time;
+            interval = (interval > overhead_us) ? (interval - overhead_us) : 0;
+            false_interval_us += interval;
             min_false_interval = (min_false_interval == 0) ?
                 interval : (interval < min_false_interval ? interval : min_false_interval);
             max_false_interval = (interval > max_false_interval) ? interval : max_false_interval;
@@ -544,20 +533,19 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 if (vm_state == 2) {
-                    struct timespec sleep_duration = {0, erm_sleep * 1000};
-                    timespecadd(&last_false_time, &sleep_duration);
-                    timespecadd(&last_true_time, &sleep_duration);
+                    last_false_time += erm_sleep;
+                    last_true_time += erm_sleep;
                     usleep(erm_sleep);
                 } else erm_sleep = 0;
             } else erm_sleep = 0;
         }
-        memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
+        last_false_time = current_ts;
     }
 
     // Print stats every second
     if (current_time != last_print_time) {
         // Detect pre-boot
-        if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 1011 && min_false_interval < 1354 && (false_interval_ns / false_count) > 5770000 && (false_interval_ns / false_count) < 7050000 && (true_interval_ns / true_count) > 9900000 && (true_interval_ns / true_count) < 9911200 && min_false_streak == 1 && max_false_streak < 4 && min_true_streak == 1 && max_true_streak == 2) {
+        if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 1011 && min_false_interval < 1354 && (false_interval_us / false_count) > 5770000 && (false_interval_us / false_count) < 7050000 && (true_interval_us / true_count) > 9900000 && (true_interval_us / true_count) < 9911200 && min_false_streak == 1 && max_false_streak < 4 && min_true_streak == 1 && max_true_streak == 2) {
             prom_boot++;
             printf("\nPROM_BOOT=%d\n", prom_boot);
             if (prom_boot == 2) fopen(BOOTDISK_FILE, "w");
@@ -567,18 +555,18 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
 
         display_band_changes();
 
-        printf("Interrupt Stats: VM=%d Avg_overhead: %llu ns Avg_cycle_delta: %llu %s%s\n"
+        printf("Interrupt Stats: VM=%d Avg_overhead: %llu us Avg_cycle_delta: %llu %s%s\n"
                "  Counts - True: %u (%u), False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
-               "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
-               "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
+               "  Avg True Interval: %llu us (Min/Max: %llu/%llu)\n"
+               "  Avg False Interval: %llu us (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
-               vm_state, count ? tot_overhead_ns / count : 0, count ? tot_cycle_delta / count : 0,
+               vm_state, count ? tot_overhead_us / count : 0, count ? tot_cycle_delta / count : 0,
                idle_os ? "idle_os " : "",
                shutdown_indication > 2 ? "shutdown" : "",
                true_count, natural_true_rate, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
-               true_count ? true_interval_ns / true_count : 0,
+               true_count ? true_interval_us / true_count : 0,
                min_true_interval, max_true_interval,
-               false_count ? false_interval_ns / false_count : 0,
+               false_count ? false_interval_us / false_count : 0,
                min_false_interval, max_false_interval,
                min_true_streak, max_true_streak,
                min_false_streak, max_false_streak);
@@ -590,7 +578,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
 
         true_sleeps = 0; false_sleeps = 0; total_sleeps = 0;
         count = 0; true_count = 0; false_count = 0;
-        tot_overhead_ns = 0; true_interval_ns = 0; false_interval_ns = 0;
+        tot_overhead_us = 0; true_interval_us = 0; false_interval_us = 0;
         min_true_interval = 0; max_true_interval = 0;
         min_false_interval = 0; max_false_interval = 0;
         min_true_streak = 0; max_true_streak = 0;
@@ -599,8 +587,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
         last_print_time = current_time;
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &end_ts);
-    overhead_ns = timespec_diff_ns(&start_ts, &end_ts) - erm_sleep * 1000;
+    end_ts = get_cpu_time();
+    overhead_us = end_ts - start_ts - erm_sleep;
 
     return result;
 }

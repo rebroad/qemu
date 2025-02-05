@@ -343,7 +343,8 @@ static void initialize_bands(void) {
 static void adjust_band_boundaries(void) {
     for (ModelType model_type = 0; model_type < NUM_MODELS; model_type++) {
         struct TimingModel *model = &all_models[model_type];
-        printf("%s: samples=%lld\n", model_names[model_type], model->total_samples);
+        if (model->total_samples)
+            printf("%s: samples=%llu\n", model_names[model_type], model->total_samples);
         for (int i = 0; i < NUM_BANDS - 1; i++) {
             unsigned long long max_current_band = model->bands[i].max_value;
             unsigned long long min_next_band = model->bands[i + 1].min_value;
@@ -374,7 +375,7 @@ static void display_band_changes(void) {
     for (int i = 0; i < NUM_BANDS; i++) if (band_changes[i].has_change) {
         struct TimingModel *model = &all_models[band_changes[i].model_type];
         int written = snprintf(current, remaining,
-                "%s, band %d (%lld-%lld) %s: value=%llu->%llu\n",
+                "%s, band %d (%llu-%llu) %s: value=%llu->%llu\n",
                 model_names[band_changes[i].model_type], i,
                 model->boundaries[i], model->boundaries[i+1],
                 band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "new" :
@@ -382,8 +383,6 @@ static void display_band_changes(void) {
                 band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max" :
                 band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary" : "",
                 band_changes[i].old_value, band_changes[i].new_value);
-
-        if (written < 0 || (size_t)written >= remaining) break;
 
         current += written;
         remaining -= written;
@@ -529,7 +528,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
             unsigned long long interval = timespec_diff_ns(&last_false_time, &current_ts);
+            unsigned long long old_interval = interval;
             interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
+            if (interval > 1000000000 && old_interval < 1000000000)
+                printf("interval = %llu old_interval = %llu overhead_ns = %llu\n", interval, old_interval, overhead_ns);
             false_interval_ns += interval;
             min_false_interval = (min_false_interval == 0) ?
                 interval : (interval < min_false_interval ? interval : min_false_interval);
@@ -544,10 +546,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                     timespecadd(&last_false_time, &sleep_duration);
                     timespecadd(&last_true_time, &sleep_duration);
                     usleep(erm_sleep);
-                } else
-                    erm_sleep = 0;
-            } else
-                erm_sleep = 0;
+                } else erm_sleep = 0;
+            } else erm_sleep = 0;
         }
         memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }

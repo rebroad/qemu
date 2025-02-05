@@ -427,7 +427,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static unsigned int current_true_streak = 0, current_false_streak = 0;
     static unsigned int min_true_streak = 0, max_true_streak = 0;
     static unsigned int min_false_streak = 0, max_false_streak = 0;
-    static unsigned int shutdown_indication = 0, prom_boot = 0; static bool idle_os = 0;
+    static unsigned int shutdown_indicated = 0, prom_boot = 0; static bool idle_os = 0;
     static unsigned long long overhead_ns = 0;
 
     // Load existing model data
@@ -536,7 +536,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval = (interval > max_false_interval) ? interval : max_false_interval;
 
             erm_sleep = to_sleep;
-            if (shutdown_indication > 2) erm_sleep = 100000;
+            if (shutdown_indicated > 2) erm_sleep = 100000;
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 if (vm_state == 2) {
@@ -566,7 +566,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             prom_boot = 0;
         }
         // Detect post-shutdown (on-battery - sleep_enabled)
-        // TODO
+        if (natural_true_rate == 100 && vm_state == 0 && min_false_streak > 54 && max_false_streak < 95 && false_count > 8240 && false_count < 8477 && (false_interval_ns / false_count) > 22500 && (false_interval_ns / false_count) < 24979 && ((!is_on_battery() && min_false_interval > 1060 && min_false_interval < 2726 && (true_interval_ns / true_count) > 10600000 && (true_interval_ns / true_count) < 10750000) || (is_on_battery() && min_false_interval > 530 && min_false_interval < 1114))) {
+            shutdown_indicated++;
+            printf("\nSHUTDOWN=%d\n", shutdown_indicated);
+        } else {
+            shutdown_indicated = 0;
+        }
 
         display_band_changes();
 
@@ -577,7 +582,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
                vm_state, count ? tot_overhead_ns / count : 0,
                idle_os ? "idle_os " : "",
-               shutdown_indication > 2 ? "shutdown" : "",
+               shutdown_indicated > 2 ? "shutdown" : "",
                true_count, natural_true_rate, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,

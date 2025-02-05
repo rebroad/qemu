@@ -397,7 +397,7 @@ static void display_band_changes(void) {
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     struct timespec start_ts, end_ts;
-    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_ts);
 
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
@@ -475,7 +475,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // TODO - remove this and use start_ts ?
     struct timespec current_ts;
-    clock_gettime(CLOCK_MONOTONIC, &current_ts);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &current_ts);
 
     if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
         struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
@@ -600,7 +600,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         last_print_time = current_time;
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &end_ts);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end_ts);
     overhead_ns = timespec_diff_ns(&start_ts, &end_ts) - erm_sleep * 1000;
 
     return result;

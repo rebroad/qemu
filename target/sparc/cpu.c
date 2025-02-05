@@ -94,7 +94,7 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #ifndef CONFIG_USER_ONLY
 #define NUM_BANDS 256
 
-static long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
+static unsigned long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
     return (end->tv_sec - start->tv_sec) * 1000000000LL +
            (end->tv_nsec - start->tv_nsec);
 }
@@ -205,14 +205,16 @@ typedef enum {
 
 struct BandChange {
     ChangeType change_type;
-    unsigned long long value; // The value associated with the change
+    unsigned long long old_value;
+    unsigned long long new_value;
     ModelType model_type;
-    bool has_change;          // Whether a change has been recorded for this band
+    bool has_change;
 };
 
 static struct BandChange band_changes[NUM_BANDS]; // Array to track changes per band
 
-static void log_band_model_change(struct BandModel *band, int band_index,
+static void log_band_change(struct BandModel *band, int band_index,
+                                  unsigned long long old_value,
                                   unsigned long long new_value,
                                   ChangeType change_type,
                                   ModelType model_type) {
@@ -223,7 +225,8 @@ static void log_band_model_change(struct BandModel *band, int band_index,
     if (!band_changes[band_index].has_change) {
         // No change recorded yet for this band
         band_changes[band_index].change_type = change_type;
-        band_changes[band_index].value = new_value;
+        band_changes[band_index].old_value = new_value;
+        band_changes[band_index].new_value = new_value;
         band_changes[band_index].model_type = model_type;
         band_changes[band_index].has_change = true;
     } else {
@@ -231,26 +234,29 @@ static void log_band_model_change(struct BandModel *band, int band_index,
         if (change_type == CHANGE_TYPE_FIRST_USE) {
             // "first_use" is the most significant change
             band_changes[band_index].change_type = change_type;
-            band_changes[band_index].value = new_value;
+            band_changes[band_index].old_value = old_value;
+            band_changes[band_index].new_value = new_value;
             band_changes[band_index].model_type = model_type;
         } else if (change_type == CHANGE_TYPE_BOUNDARY_CHANGE &&
                    band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE) {
             // "boundary_change" is more significant than "min_update" or "max_update"
             band_changes[band_index].change_type = change_type;
-            band_changes[band_index].value = new_value;
+            band_changes[band_index].old_value = old_value;
+            band_changes[band_index].new_value = new_value;
             band_changes[band_index].model_type = model_type;
         } else if (change_type == CHANGE_TYPE_MAX_UPDATE &&
                    band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE &&
                    band_changes[band_index].change_type != CHANGE_TYPE_BOUNDARY_CHANGE) {
             // "max_update" is more significant than "min_update"
             band_changes[band_index].change_type = change_type;
-            band_changes[band_index].value = new_value;
+            band_changes[band_index].old_value = old_value;
+            band_changes[band_index].new_value = new_value;
             band_changes[band_index].model_type = model_type;
         }
     }
 }
 
-static bool should_sleep(int result, long long value) {
+static bool should_sleep(int result, unsigned long long value) {
     bool on_battery = is_on_battery();
     ModelType model_type;
 
@@ -270,17 +276,17 @@ static bool should_sleep(int result, long long value) {
         for (int i = 0; i < NUM_BANDS; i++) {
             if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
                 if (!model->bands[i].values_seen) {
-                    log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_FIRST_USE, model_type);
+                    log_band_change(&model->bands[i], i, 0, value, CHANGE_TYPE_FIRST_USE, model_type);
                     model->bands[i].min_value = value;
                     model->bands[i].max_value = value;
                     model->bands[i].values_seen = true;
                 } else {
                     if (value < model->bands[i].min_value) {
-                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MIN_UPDATE, model_type);
+                        log_band_change(&model->bands[i], i, model->bands[i].min_value, value, CHANGE_TYPE_MIN_UPDATE, model_type);
                         model->bands[i].min_value = value;
                     }
                     if (value > model->bands[i].max_value) {
-                        log_band_model_change(&model->bands[i], i, value, CHANGE_TYPE_MAX_UPDATE, model_type);
+                        log_band_change(&model->bands[i], i, model->bands[i].max_value, value, CHANGE_TYPE_MAX_UPDATE, model_type);
                         model->bands[i].max_value = value;
                     }
                 }
@@ -351,14 +357,15 @@ static void adjust_band_boundaries(void) {
                 unsigned long long new_boundary = (unsigned long long)pow(10, log_center);
 
                 // Adjust the boundary between the current and next band
+                unsigned long long old_boundary = model->boundaries[i + 1];
                 model->boundaries[i + 1] = new_boundary;
-                log_band_model_change(&model->bands[i], i, 0, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
+                log_band_change(&model->bands[i], i, old_boundary, new_boundary, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
             }
         }
     }
 }
 
-static void log_band_changes(void) {
+static void display_band_changes(void) {
     char buffer[4096] = {0};
 
     for (int i = 0; i < NUM_BANDS; i++) {
@@ -382,10 +389,11 @@ static void log_band_changes(void) {
             }
             char line[256];
             snprintf(line, sizeof(line),
-                     "Model: %s, Band %d %s: value=%llu\n",
+                     "Model: %s, Band %d %s: value=%llu->%llu\n",
                      model_names[band_changes[i].model_type],
                      i, change_type_str,
-                     band_changes[i].value);
+                     band_changes[i].old_value,
+                     band_changes[i].new_value);
 
             // Append to the log
             strncat(buffer, line, sizeof(buffer) - strlen(buffer) - 1);
@@ -393,9 +401,8 @@ static void log_band_changes(void) {
     }
 
     // Print the log if there are any changes
-    if (strlen(buffer) > 0) {
-        printf("Model Changes:\n%s\n", buffer);
-    }
+    if (strlen(buffer) > 0)
+        printf("%s", buffer);
 
     // Reset the log and the changes array for the next second
     memset(band_changes, 0, sizeof(band_changes));
@@ -421,18 +428,18 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static bool models_loaded = false;
     static time_t last_print_time = 0, last_measure_time = 0, last_vm_state_check = 0;
     static bool sleep_enabled = true, measuring_mode = false;
-    static int true_count = 0, last_true_count = 0, false_count = 0;
-    static int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
+    static unsigned int true_count = 0, last_true_count = 0, false_count = 0;
+    static unsigned int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
-    static long long true_interval_ns, min_true_interval, max_true_interval;
-    static long long false_interval_ns, min_false_interval, max_false_interval;
-    static long long last_min_false_interval = 0;
-    static long to_sleep = 19000, erm_sleep = 0; // microseconds
-    static int current_true_streak = 0, current_false_streak = 0;
-    static int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
-    static int min_false_streak = 0, last_min_false_streak = 0;
-    static int max_false_streak = 0, last_max_false_streak = 0;
-    static int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
+    static unsigned long long true_interval_ns, min_true_interval, max_true_interval;
+    static unsigned long long false_interval_ns, min_false_interval, max_false_interval;
+    static unsigned long long last_min_false_interval = 0;
+    static unsigned long to_sleep = 19000, erm_sleep = 0; // microseconds
+    static unsigned int current_true_streak = 0, current_false_streak = 0;
+    static unsigned int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
+    static unsigned int min_false_streak = 0, last_min_false_streak = 0;
+    static unsigned int max_false_streak = 0, last_max_false_streak = 0;
+    static unsigned int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
 
     // Load existing model data
     if (!models_loaded) {
@@ -481,7 +488,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
         struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
-        long long interval = timespec_diff_ns(last_time, &current_ts);
+        unsigned long long interval = timespec_diff_ns(last_time, &current_ts);
         if (sleep_enabled && (should_sleep(2, interval)))
             total_sleeps++;
     }
@@ -499,7 +506,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         // True interval calculation
         if (last_true_time.tv_sec != 0) {
-            long long interval = timespec_diff_ns(&last_true_time, &current_ts);
+            unsigned long long interval = timespec_diff_ns(&last_true_time, &current_ts);
             true_interval_ns += interval;
             min_true_interval = (min_true_interval == 0) ?
                 interval : (interval < min_true_interval ? interval : min_true_interval);
@@ -528,7 +535,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
-            long long interval = timespec_diff_ns(&last_false_time, &current_ts);
+            unsigned long long interval = timespec_diff_ns(&last_false_time, &current_ts);
             false_interval_ns += interval;
             min_false_interval = (min_false_interval == 0) ?
                 interval : (interval < min_false_interval ? interval : min_false_interval);
@@ -569,7 +576,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             prom_boot = 0;
         }
 
-        log_band_changes();
+        display_band_changes();
 
         printf("Interrupt Stats: VM=%d %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"

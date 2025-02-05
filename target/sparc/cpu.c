@@ -272,7 +272,7 @@ static bool should_sleep(int result, unsigned long long value) {
     struct TimingModel *model = &all_models[model_type];
 
     // If the VM is busy, we're in learning mode. Update the model
-    if (vm_state == 1 && model->total_samples < 1000000) {
+    if (vm_state == 1) {
         for (int i = 0; i < NUM_BANDS; i++) {
             if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
                 if (!model->bands[i].values_seen) {
@@ -358,8 +358,8 @@ static void adjust_band_boundaries(void) {
 
                 // Adjust the boundary between the current and next band
                 unsigned long long old_boundary = model->boundaries[i + 1];
-                model->boundaries[i + 1] = new_boundary;
-                if (old_boundary != new_boundary)
+                if (new_boundary) model->boundaries[i + 1] = new_boundary;
+                if (new_boundary && old_boundary != new_boundary)
                     log_band_change(&model->bands[i], i, old_boundary, new_boundary, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
             }
         }
@@ -373,15 +373,17 @@ static void display_band_changes(void) {
 
     for (int i = 0; i < NUM_BANDS; i++) {
         if (band_changes[i].has_change) {
+            struct TimingModel *model = &all_models[band_changes[i].model_type];
             int written = snprintf(current, remaining,
-                "Model: %s, Band %d %s: value=%llu->%llu\n",
-                model_names[band_changes[i].model_type], i,
-                band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "first_use" :
-                band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min_update" :
-                band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max_update" :
-                band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary_change" : "",
-                band_changes[i].old_value,
-                band_changes[i].new_value);
+                    "%s, band %d (%lld-%lld) %s: value=%llu->%llu\n",
+                    model_names[band_changes[i].model_type], i,
+                    model->boundaries[i], model->boundaries[i+1],
+
+                    band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "new" :
+                    band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min" :
+                    band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max" :
+                    band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary" : "",
+                    band_changes[i].old_value, band_changes[i].new_value);
 
             if (written < 0 || (size_t)written >= remaining) break;
 
@@ -432,15 +434,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
     static unsigned int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
     static unsigned long long overhead_ns = 0;
 
-
     // Load existing model data
     if (!models_loaded) { load_models(); models_loaded = true; }
 
     // Initialize bands if needed
-    if (!bands_initialized) {
-        initialize_bands();
-        bands_initialized = true;
-    }
+    if (!bands_initialized) { initialize_bands(); bands_initialized = true; }
 
     time_t current_time = time(NULL);
 
@@ -583,7 +581,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
                min_true_streak, max_true_streak,
                min_false_streak, max_false_streak);
 
-        if (true_sleeps || false_sleeps) {
+        if (erm_sleep) {
             if (true_count < natural_true_rate / 2) to_sleep = to_sleep * 99 / 100;
             else if (true_count >= natural_true_rate) to_sleep = to_sleep * 100 / 99;
         }

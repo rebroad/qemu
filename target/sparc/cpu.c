@@ -608,7 +608,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     }
 
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end_ts);
-    overhead_ns = timespec_diff_ns(&start_ts, &end_ts) - erm_sleep * 1000;
+    //overhead_ns = timespec_diff_ns(&start_ts, &end_ts) - erm_sleep * 1000;
+    overhead_ns = timespec_diff_ns(&start_ts, &end_ts);
 
     return result;
 }

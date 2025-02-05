@@ -566,7 +566,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             prom_boot = 0;
         }
         // Detect post-shutdown (on-battery - sleep_enabled)
-        if (natural_true_rate == 100 && vm_state == 0 && min_false_streak > 54 && max_false_streak < 95 && false_count > 8240 && false_count < 8477 && (false_interval_ns / false_count) > 22500 && (false_interval_ns / false_count) < 24979 && ((!is_on_battery() && min_false_interval > 1060 && min_false_interval < 2726 && (true_interval_ns / true_count) > 10600000 && (true_interval_ns / true_count) < 10750000) || (is_on_battery() && min_false_interval > 530 && min_false_interval < 1114))) {
+        if (natural_true_rate == 100 && vm_state == 0 && min_false_streak > 54 && max_false_streak < 97 && false_count > 8240 && false_count < 8477 && (false_interval_ns / false_count) > 22500 && (false_interval_ns / false_count) < 24979 && ((!is_on_battery() && min_false_interval > 802 && min_false_interval < 2726 && (true_interval_ns / true_count) > 10600000 && (true_interval_ns / true_count) < 10750000) || (is_on_battery() && min_false_interval > 530 && min_false_interval < 1114))) {
             shutdown_indicated++;
             printf("\nSHUTDOWN=%d\n", shutdown_indicated);
         } else {

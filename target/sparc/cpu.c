@@ -272,7 +272,7 @@ static bool should_sleep(int result, unsigned long long value) {
     struct TimingModel *model = &all_models[model_type];
 
     // If the VM is busy, we're in learning mode. Update the model
-    if (vm_state == 1 || model->total_samples < 1000000) {
+    if (vm_state == 1 && model->total_samples < 1000000) {
         for (int i = 0; i < NUM_BANDS; i++) {
             if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
                 if (!model->bands[i].values_seen) {

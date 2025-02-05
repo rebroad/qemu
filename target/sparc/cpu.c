@@ -410,6 +410,9 @@ static void display_band_changes(void) {
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
+    struct timespec start_ts, end_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
@@ -564,6 +567,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }
 
+    static unsigned long long overhead_ns = 0;
 
     // Print stats every second
     if (current_time != last_print_time) {
@@ -578,12 +582,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         display_band_changes();
 
-        printf("Interrupt Stats: VM=%d %s%s\n"
+        printf("Interrupt Stats: VM=%d Overhead: %llu ns %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
-               vm_state, idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
+               vm_state, overhead_ns, idle_os ? "idle_os " : "",
+               post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,
@@ -612,6 +617,15 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         last_print_time = current_time;
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &end_ts);
+    overhead_ns = timespec_diff_ns(&start_ts, &end_ts);
+
+    struct timespec overhead_ts = {0, overhead_ns};
+    if (last_true_time.tv_sec != 0)
+        timespecadd(&last_true_time, &overhead_ts);
+    if (last_false_time.tv_sec != 0)
+        timespecadd(&last_false_time, &overhead_ts);
 
     return result;
 }

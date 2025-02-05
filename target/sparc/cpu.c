@@ -94,12 +94,12 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #ifndef CONFIG_USER_ONLY
 #define NUM_BANDS 256
 
-static unsigned long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
+static inline unsigned long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
     return (end->tv_sec - start->tv_sec) * 1000000000LL +
            (end->tv_nsec - start->tv_nsec);
 }
 
-static void timespecadd(struct timespec *a, const struct timespec *b)
+static inline void timespecadd(struct timespec *a, const struct timespec *b)
 {
     a->tv_sec += b->tv_sec;
     a->tv_nsec += b->tv_nsec;
@@ -367,44 +367,31 @@ static void adjust_band_boundaries(void) {
 
 static void display_band_changes(void) {
     char buffer[4096] = {0};
+    size_t remaining = sizeof(buffer);
+    char *current = buffer;
 
     for (int i = 0; i < NUM_BANDS; i++) {
         if (band_changes[i].has_change) {
-            const char *change_type_str = "";
-            switch (band_changes[i].change_type) {
-                case CHANGE_TYPE_FIRST_USE:
-                    change_type_str = "first_use";
-                    break;
-                case CHANGE_TYPE_MIN_UPDATE:
-                    change_type_str = "min_update";
-                    break;
-                case CHANGE_TYPE_MAX_UPDATE:
-                    change_type_str = "max_update";
-                    break;
-                case CHANGE_TYPE_BOUNDARY_CHANGE:
-                    change_type_str = "boundary_change";
-                    break;
-                default:
-                    break;
-            }
-            char line[256];
-            snprintf(line, sizeof(line),
-                     "Model: %s, Band %d %s: value=%llu->%llu\n",
-                     model_names[band_changes[i].model_type],
-                     i, change_type_str,
-                     band_changes[i].old_value,
-                     band_changes[i].new_value);
+            int written = snprintf(current, remaining,
+                "Model: %s, Band %d %s: value=%llu->%llu\n",
+                model_names[band_changes[i].model_type], i,
+                band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "first_use" :
+                band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min_update" :
+                band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max_update" :
+                band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary_change" : "",
+                band_changes[i].old_value,
+                band_changes[i].new_value);
 
-            // Append to the log
-            strncat(buffer, line, sizeof(buffer) - strlen(buffer) - 1);
+            if (written < 0 || (size_t)written >= remaining) break;
+
+            current += written;
+            remaining -= written;
         }
     }
 
-    // Print the log if there are any changes
     if (strlen(buffer) > 0)
         printf("%s", buffer);
 
-    // Reset the log and the changes array for the next second
     memset(band_changes, 0, sizeof(band_changes));
 }
 
@@ -622,10 +609,16 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     overhead_ns = timespec_diff_ns(&start_ts, &end_ts);
 
     struct timespec overhead_ts = {0, overhead_ns};
-    if (last_true_time.tv_sec != 0)
-        timespecadd(&last_true_time, &overhead_ts);
-    if (last_false_time.tv_sec != 0)
-        timespecadd(&last_false_time, &overhead_ts);
+    if (last_true_time.tv_sec != 0) {
+        unsigned long long true_interval = timespec_diff_ns(&last_true_time, &current_ts);
+        if (overhead_ns < true_interval)
+            timespecadd(&last_true_time, &overhead_ts);
+    }
+    if (last_false_time.tv_sec != 0) {
+        unsigned long long false_interval = timespec_diff_ns(&last_false_time, &current_ts);
+        if (overhead_ns < false_interval)
+            timespecadd(&last_false_time, &overhead_ts);
+    }
 
     return result;
 }

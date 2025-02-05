@@ -590,7 +590,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                min_true_streak, max_true_streak,
                min_false_streak, max_false_streak);
 
-        if (true_sleeps || false_sleeps) {
+        if (erm_sleep)
             if (true_count < natural_true_rate / 2) to_sleep = to_sleep * 99 / 100;
             else if (true_count >= natural_true_rate) to_sleep = to_sleep * 100 / 99;
         }

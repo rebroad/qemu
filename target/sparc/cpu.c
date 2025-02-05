@@ -111,7 +111,7 @@ static inline void timespecadd(struct timespec *a, const struct timespec *b)
     }
 }
 
-static int vm_state = 0;
+static int vm_state = 2;
 static time_t last_models_save_time;
 
 #define MODELS_FILE "timing_models.bin"
@@ -454,7 +454,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             else // 2 is neither busy(1) or idle(0)
                 vm_state = 2;
             fclose(state_file);
-        }
+        } else
+            vm_state = 2;
         last_vm_state_check = current_time;
     }
 
@@ -505,10 +506,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             erm_sleep = to_sleep;
             if (sleep_enabled && (should_sleep(1, interval) || erm_sleep > to_sleep)) {
                 true_sleeps++;
-                struct timespec sleep_duration = {0, erm_sleep * 1000};
-                timespecadd(&last_false_time, &sleep_duration);
-                timespecadd(&last_true_time, &sleep_duration);
-                usleep(erm_sleep);
+                if (vm_state == 2) {
+                    struct timespec sleep_duration = {0, erm_sleep * 1000};
+                    timespecadd(&last_false_time, &sleep_duration);
+                    timespecadd(&last_true_time, &sleep_duration);
+                    usleep(erm_sleep);
+                } else
+                    erm_sleep = 0;
             } else
                 erm_sleep = 0;
         }
@@ -544,10 +548,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (post_boot_indication > 2) erm_sleep = 100000;
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
-                struct timespec sleep_duration = {0, erm_sleep * 1000};
-                timespecadd(&last_false_time, &sleep_duration);
-                timespecadd(&last_true_time, &sleep_duration);
-                usleep(erm_sleep);
+                if (vm_state == 2) {
+                    struct timespec sleep_duration = {0, erm_sleep * 1000};
+                    timespecadd(&last_false_time, &sleep_duration);
+                    timespecadd(&last_true_time, &sleep_duration);
+                    usleep(erm_sleep);
+                } else
+                    erm_sleep = 0;
             } else
                 erm_sleep = 0;
         }

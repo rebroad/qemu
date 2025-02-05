@@ -417,19 +417,17 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static bool models_loaded = false;
     static time_t last_print_time = 0, last_measure_time = 0, last_vm_state_check = 0;
     static bool sleep_enabled = true, measuring_mode = false;
-    static unsigned int true_count = 0, last_true_count = 0, false_count = 0;
+    static unsigned int true_count = 0, false_count = 0;
     static unsigned int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
     static unsigned long long tot_overhead_ns = 0, count = 0;
     static unsigned long long true_interval_ns = 0, min_true_interval = 0, max_true_interval = 0;
     static unsigned long long false_interval_ns = 0, min_false_interval = 0, max_false_interval = 0;
-    static unsigned long long last_min_false_interval = 0;
     static unsigned long to_sleep = 19000, erm_sleep = 0; // microseconds
     static unsigned int current_true_streak = 0, current_false_streak = 0;
-    static unsigned int min_true_streak = 0, max_true_streak = 0, last_max_true_streak = 0;
-    static unsigned int min_false_streak = 0, last_min_false_streak = 0;
-    static unsigned int max_false_streak = 0, last_max_false_streak = 0;
-    static unsigned int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
+    static unsigned int min_true_streak = 0, max_true_streak = 0;
+    static unsigned int min_false_streak = 0, max_false_streak = 0;
+    static unsigned int shutdown_indication = 0, prom_boot = 0; static bool idle_os = 0;
     static unsigned long long overhead_ns = 0;
 
     // Load existing model data
@@ -538,16 +536,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             max_false_interval = (interval > max_false_interval) ? interval : max_false_interval;
 
             erm_sleep = to_sleep;
-            if (interval < 520) {
-                if (((last_max_false_streak >= 540 && last_true_count > 10 && post_boot_indication <= 2) || (last_max_false_streak >= 450 && last_true_count > 15 && post_boot_indication > 2)) && last_max_false_streak <= 600 && last_max_true_streak == 1) {
-                    if (post_boot_indication < 200) post_boot_indication++;
-                } else {
-                    post_boot_indication = 0;
-                    if (last_max_true_streak == 2 && interval < 342 && last_max_false_streak < 41 && last_min_false_streak < 4)
-                        idle_os = 1;
-                }
-            } else if (last_min_false_interval > 520) idle_os = 0;
-            if (post_boot_indication > 2) erm_sleep = 100000;
+            if (shutdown_indication > 2) erm_sleep = 100000;
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 if (vm_state == 2) {
@@ -565,6 +554,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     if (current_time != last_print_time) {
+        // Detect pre-boot
         if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_false_interval > 1011 && min_false_interval < 1354 && (false_interval_ns / false_count) > 5770000 && (false_interval_ns / false_count) < 7050000 && (true_interval_ns / true_count) > 9900000 && (true_interval_ns / true_count) < 9911200 && min_false_streak == 1 && max_false_streak < 4 && min_true_streak == 1 && max_true_streak == 2) {
             prom_boot++;
             printf("\nPROM_BOOT=%d\n", prom_boot);
@@ -573,6 +563,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             unlink(BOOTDISK_FILE);
             prom_boot = 0;
         }
+        // Detect post-shutdown (on-battery - sleep_enabled)
+        // TODO
 
         display_band_changes();
 
@@ -583,7 +575,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
                vm_state, count ? tot_overhead_ns / count : 0,
                idle_os ? "idle_os " : "",
-               post_boot_indication > 2 ? "post-boot" : "",
+               shutdown_indication > 2 ? "shutdown" : "",
                true_count, natural_true_rate, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,
@@ -597,17 +589,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             else if (true_count >= natural_true_rate) to_sleep = to_sleep * 100 / 99;
         }
 
-        last_true_count = true_count;
         true_sleeps = 0; false_sleeps = 0; total_sleeps = 0;
         count = 0; true_count = 0; false_count = 0;
         tot_overhead_ns = 0; true_interval_ns = 0; false_interval_ns = 0;
         min_true_interval = 0; max_true_interval = 0;
-        last_min_false_interval = min_false_interval;
         min_false_interval = 0; max_false_interval = 0;
-        last_max_true_streak = max_true_streak;
         min_true_streak = 0; max_true_streak = 0;
-        last_min_false_streak = min_false_streak;
-        last_max_false_streak = max_false_streak;
         min_false_streak = 0; max_false_streak = 0;
 
         last_print_time = current_time;

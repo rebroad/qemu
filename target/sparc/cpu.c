@@ -20,6 +20,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -95,14 +96,12 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #define NUM_BANDS 256
 
 static inline unsigned long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
-    return (end->tv_sec - start->tv_sec) * 1000000000LL +
-           (end->tv_nsec - start->tv_nsec);
+    return (end->tv_sec - start->tv_sec) * 1000000000LL + (end->tv_nsec - start->tv_nsec);
 }
 
 static inline void timespecadd(struct timespec *a, const struct timespec *b)
 {
-    a->tv_sec += b->tv_sec;
-    a->tv_nsec += b->tv_nsec;
+    a->tv_sec += b->tv_sec; a->tv_nsec += b->tv_nsec;
 
     // Normalize to ensure tv_nsec is between 0 and 999,999,999
     while (a->tv_nsec >= 1000000000) {
@@ -329,14 +328,14 @@ static bool should_sleep(int result, unsigned long long value) {
 static void initialize_bands(void) {
     for (ModelType model_type = 0; model_type < NUM_MODELS; model_type++) {
         struct TimingModel *model = &all_models[model_type];
-        // Min timing: ~300ns, Max timing: ~100ms
-        double min_log = log10(300.0);
-        double max_log = log10(100000000.0);
+        double min_log = log10(1.0);
+        double max_log = log10(1000000.0);
         double step = (max_log - min_log) / NUM_BANDS;
 
         for (int i = 0; i <= NUM_BANDS; i++) {
             model->boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
         }
+        model->boundaries[0] = 0;
     }
 }
 
@@ -395,9 +394,6 @@ static void display_band_changes(void) {
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    struct timespec start_ts, end_ts;
-    clock_gettime(CLOCK_MONOTONIC, &start_ts);
-
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
@@ -510,14 +506,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (sleep_enabled && (should_sleep(1, interval) || erm_sleep > to_sleep)) {
                 true_sleeps++;
                 if (vm_state == 2) {
-                    struct timespec sleep_duration = {0, erm_sleep * 1000};
-                    timespecadd(&last_false_time, &sleep_duration);
-                    timespecadd(&last_true_time, &sleep_duration);
+					struct timespec erm_ts = {0, erm_sleep * 1000};
+                    timespecadd(&last_false_time, &erm_ts);
+					timespecadd(&last_true_time, &erm_ts);
                     usleep(erm_sleep);
-                } else
-                    erm_sleep = 0;
-            } else
-                erm_sleep = 0;
+                } else erm_sleep = 0;
+            } else erm_sleep = 0;
         }
         memcpy(&last_true_time, &current_ts, sizeof(struct timespec));
     } else {
@@ -546,14 +540,14 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 if (vm_state == 2) {
-                    struct timespec sleep_duration = {0, erm_sleep * 1000};
-                    timespecadd(&last_false_time, &sleep_duration);
-                    timespecadd(&last_true_time, &sleep_duration);
+					struct timespec erm_ts = {0, erm_sleep * 1000};
+					timespecadd(&last_false_time, &erm_ts);
+					timespecadd(&last_true_time, &erm_ts);
                     usleep(erm_sleep);
                 } else erm_sleep = 0;
             } else erm_sleep = 0;
         }
-        memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
+		memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }
 
     // Print stats every second

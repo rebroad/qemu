@@ -389,7 +389,7 @@ static void display_band_changes(void) {
         remaining -= written;
     }
 
-    if (strlen(buffer) > 0) printf("%s", buffer);
+    if (strlen(buffer) > 0) printf("%s\n", buffer);
 
     memset(band_changes, 0, sizeof(band_changes));
 }

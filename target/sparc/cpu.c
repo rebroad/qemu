@@ -421,8 +421,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static unsigned int true_count = 0, last_true_count = 0, false_count = 0;
     static unsigned int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
-    static unsigned long long true_interval_ns, min_true_interval, max_true_interval;
-    static unsigned long long false_interval_ns, min_false_interval, max_false_interval;
+    static unsigned long long tot_overhead_ns = 0, count = 0;
+    static unsigned long long true_interval_ns = 0, min_true_interval = 0, max_true_interval = 0;
+    static unsigned long long false_interval_ns = 0, min_false_interval = 0, max_false_interval = 0;
     static unsigned long long last_min_false_interval = 0;
     static unsigned long to_sleep = 19000, erm_sleep = 0; // microseconds
     static unsigned int current_true_streak = 0, current_false_streak = 0;
@@ -474,6 +475,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         sleep_enabled = true;
     }
 
+    // TODO - remove this and use start_ts ?
     struct timespec current_ts;
     clock_gettime(CLOCK_MONOTONIC, &current_ts);
 
@@ -483,6 +485,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
         if (sleep_enabled && (should_sleep(2, interval))) total_sleeps++;
     }
+    count++; tot_overhead_ns += overhead_ns;
 
     if (result) {
         true_count++;
@@ -509,7 +512,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
                 usleep(erm_sleep);
-            }
+            } else
+                erm_sleep = 0;
         }
         memcpy(&last_true_time, &current_ts, sizeof(struct timespec));
     } else {
@@ -547,7 +551,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 timespecadd(&last_false_time, &sleep_duration);
                 timespecadd(&last_true_time, &sleep_duration);
                 usleep(erm_sleep);
-            }
+            } else
+                erm_sleep = 0;
         }
         memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }
@@ -565,12 +570,13 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         display_band_changes();
 
-        printf("Interrupt Stats: VM=%d Overhead: %llu ns %s%s\n"
+        printf("Interrupt Stats: VM=%d Avg_overhead: %llu ns %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
-               vm_state, overhead_ns, idle_os ? "idle_os " : "",
+               vm_state, count ? tot_overhead_ns / count : 0,
+               idle_os ? "idle_os " : "",
                post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
                true_count ? true_interval_ns / true_count : 0,
@@ -587,8 +593,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         last_true_count = true_count;
         true_sleeps = 0; false_sleeps = 0; total_sleeps = 0;
-        true_count = 0; false_count = 0;
-        true_interval_ns = 0; false_interval_ns = 0;
+        count = 0; true_count = 0; false_count = 0;
+        tot_overhead_ns = 0; true_interval_ns = 0; false_interval_ns = 0;
         min_true_interval = 0; max_true_interval = 0;
         last_min_false_interval = min_false_interval;
         min_false_interval = 0; max_false_interval = 0;
@@ -602,7 +608,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     }
 
     clock_gettime(CLOCK_MONOTONIC, &end_ts);
-    overhead_ns = timespec_diff_ns(&start_ts, &end_ts);
+    overhead_ns = timespec_diff_ns(&start_ts, &end_ts) - erm_sleep * 1000;
 
     return result;
 }

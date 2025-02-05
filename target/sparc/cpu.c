@@ -225,7 +225,7 @@ static void log_band_change(struct BandModel *band, int band_index,
     if (!band_changes[band_index].has_change) {
         // No change recorded yet for this band
         band_changes[band_index].change_type = change_type;
-        band_changes[band_index].old_value = new_value;
+        band_changes[band_index].old_value = old_value;
         band_changes[band_index].new_value = new_value;
         band_changes[band_index].model_type = model_type;
         band_changes[band_index].has_change = true;
@@ -359,7 +359,8 @@ static void adjust_band_boundaries(void) {
                 // Adjust the boundary between the current and next band
                 unsigned long long old_boundary = model->boundaries[i + 1];
                 model->boundaries[i + 1] = new_boundary;
-                log_band_change(&model->bands[i], i, old_boundary, new_boundary, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
+                if (old_boundary != new_boundary)
+                    log_band_change(&model->bands[i], i, old_boundary, new_boundary, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
             }
         }
     }
@@ -370,27 +371,23 @@ static void display_band_changes(void) {
     size_t remaining = sizeof(buffer);
     char *current = buffer;
 
-    for (int i = 0; i < NUM_BANDS; i++) {
-        if (band_changes[i].has_change) {
-            int written = snprintf(current, remaining,
-                "Model: %s, Band %d %s: value=%llu->%llu\n",
-                model_names[band_changes[i].model_type], i,
-                band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "first_use" :
-                band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min_update" :
-                band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max_update" :
-                band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary_change" : "",
-                band_changes[i].old_value,
-                band_changes[i].new_value);
+    for (int i = 0; i < NUM_BANDS; i++) if (band_changes[i].has_change) {
+        int written = snprintf(current, remaining,
+            "Model: %s, Band %d %s: value=%llu->%llu\n",
+            model_names[band_changes[i].model_type], i,
+            band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "first_use" :
+            band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min_update" :
+            band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max_update" :
+            band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary_change" : "",
+            band_changes[i].old_value, band_changes[i].new_value);
 
-            if (written < 0 || (size_t)written >= remaining) break;
+        if (written < 0 || (size_t)written >= remaining) break;
 
-            current += written;
-            remaining -= written;
-        }
+        current += written;
+        remaining -= written;
     }
 
-    if (strlen(buffer) > 0)
-        printf("%s", buffer);
+    if (strlen(buffer) > 0) printf("%s", buffer);
 
     memset(band_changes, 0, sizeof(band_changes));
 }

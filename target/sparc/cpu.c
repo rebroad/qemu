@@ -571,13 +571,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         log_band_changes();
 
-        printf("Interrupt Stats: %s%s\n"
+        printf("Interrupt Stats: VM=%d %s%s\n"
                "  Counts - True: %u, False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
-               "  True Streaks: Min: %d, Max: %d\n"
-               "  False Streaks: Min: %d, Max: %d\n",
-               idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
+               "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
+               vm_state, idle_os ? "idle_os " : "", post_boot_indication > 2 ? "post-boot" : "",
                true_count, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
                true_count ? true_interval_ns / true_count : 0,
                min_true_interval, max_true_interval,

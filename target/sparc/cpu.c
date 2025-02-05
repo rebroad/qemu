@@ -557,7 +557,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         // Detect pre-boot
         if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_true_streak == 1 && max_true_streak == 2 && min_false_streak == 1 && max_false_streak < 4
                 && ((is_on_battery() && min_false_interval > 1011 && min_false_interval < 3567 && (false_interval_ns / false_count) > 5680000 && (false_interval_ns / false_count) < 6550000 && (true_interval_ns / true_count) > 9900000 && (true_interval_ns / true_count) < 9911200)
-                || (!is_on_battery() && min_false_interval > 1422 && min_false_interval < 4910 && (false_interval_ns / false_count) > 5970000 && (false_interval_ns / false_count) < 6770000 && (true_interval_ns / true_count) > 10044000 && (true_interval_ns / true_count) < 10100000))) {
+                || (!is_on_battery() && min_false_interval > 1422 && min_false_interval < 4910 && (false_interval_ns / false_count) > 5970000 && (false_interval_ns / false_count) < 6770000 && (true_interval_ns / true_count) > 10044000 && (true_interval_ns / true_count) < 10110000))) {
             prom_boot++;
             printf("\nPROM_BOOT=%d\n", prom_boot);
             if (prom_boot == 2) fopen(BOOTDISK_FILE, "w");

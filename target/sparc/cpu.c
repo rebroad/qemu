@@ -430,6 +430,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static unsigned int min_false_streak = 0, last_min_false_streak = 0;
     static unsigned int max_false_streak = 0, last_max_false_streak = 0;
     static unsigned int post_boot_indication = 0, prom_boot = 0; static bool idle_os = 0;
+    static unsigned long long overhead_ns = 0;
 
     // Load existing model data
     if (!models_loaded) {
@@ -479,24 +480,23 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
         struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
         unsigned long long interval = timespec_diff_ns(last_time, &current_ts);
-        if (sleep_enabled && (should_sleep(2, interval)))
-            total_sleeps++;
+        interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
+        if (sleep_enabled && (should_sleep(2, interval))) total_sleeps++;
     }
 
     if (result) {
         true_count++;
         current_true_streak++;
-        if (current_false_streak)
-            if (!min_false_streak || current_false_streak < min_false_streak)
-                min_false_streak = current_false_streak;
+        if (current_false_streak && (!min_false_streak || current_false_streak < min_false_streak))
+            min_false_streak = current_false_streak;
         current_false_streak = 0; // Reset false streak
 
-        if (current_true_streak > max_true_streak)
-            max_true_streak = current_true_streak;
+        if (current_true_streak > max_true_streak) max_true_streak = current_true_streak;
 
         // True interval calculation
         if (last_true_time.tv_sec != 0) {
             unsigned long long interval = timespec_diff_ns(&last_true_time, &current_ts);
+            interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
             true_interval_ns += interval;
             min_true_interval = (min_true_interval == 0) ?
                 interval : (interval < min_true_interval ? interval : min_true_interval);
@@ -515,17 +515,16 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     } else {
         false_count++;
         current_false_streak++;
-        if (current_true_streak)
-            if (!min_true_streak || current_true_streak < min_true_streak)
-                min_true_streak = current_true_streak;
+        if (current_true_streak && (!min_true_streak || current_true_streak < min_true_streak))
+            min_true_streak = current_true_streak;
         current_true_streak = 0; // Reset true streak
 
-        if (current_false_streak > max_false_streak)
-            max_false_streak = current_false_streak;
+        if (current_false_streak > max_false_streak) max_false_streak = current_false_streak;
 
         // False interval calculation
         if (last_false_time.tv_sec != 0) {
             unsigned long long interval = timespec_diff_ns(&last_false_time, &current_ts);
+            interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
             false_interval_ns += interval;
             min_false_interval = (min_false_interval == 0) ?
                 interval : (interval < min_false_interval ? interval : min_false_interval);
@@ -541,8 +540,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                         idle_os = 1;
                 }
             } else if (last_min_false_interval > 520) idle_os = 0;
-            if (post_boot_indication > 2)
-                erm_sleep = 100000;
+            if (post_boot_indication > 2) erm_sleep = 100000;
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 struct timespec sleep_duration = {0, erm_sleep * 1000};
@@ -553,8 +551,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         }
         memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }
-
-    static unsigned long long overhead_ns = 0;
 
     // Print stats every second
     if (current_time != last_print_time) {
@@ -608,24 +604,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     clock_gettime(CLOCK_MONOTONIC, &end_ts);
     overhead_ns = timespec_diff_ns(&start_ts, &end_ts);
 
-    struct timespec overhead_ts = {0, overhead_ns};
-    if (last_true_time.tv_sec != 0) {
-        unsigned long long true_interval = timespec_diff_ns(&last_true_time, &current_ts);
-        if (overhead_ns < true_interval)
-            timespecadd(&last_true_time, &overhead_ts);
-    }
-    if (last_false_time.tv_sec != 0) {
-        unsigned long long false_interval = timespec_diff_ns(&last_false_time, &current_ts);
-        if (overhead_ns < false_interval)
-            timespecadd(&last_false_time, &overhead_ts);
-    }
-
     return result;
 }
 #endif /* !CONFIG_USER_ONLY */
 
-static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info)
-{
+static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info) {
     info->print_insn = print_insn_sparc;
 #ifdef TARGET_SPARC64
     info->mach = bfd_mach_sparc_v9b;
@@ -633,8 +616,7 @@ static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info)
 }
 
 static void
-cpu_add_feat_as_prop(const char *typename, const char *name, const char *val)
-{
+cpu_add_feat_as_prop(const char *typename, const char *name, const char *val) {
     GlobalProperty *prop = g_new0(typeof(*prop), 1);
     prop->driver = typename;
     prop->property = g_strdup(name);
@@ -644,24 +626,19 @@ cpu_add_feat_as_prop(const char *typename, const char *name, const char *val)
 
 /* Parse "+feature,-feature,feature=foo" CPU feature string */
 static void sparc_cpu_parse_features(const char *typename, char *features,
-                                     Error **errp)
-{
+                                     Error **errp) {
     GList *l, *plus_features = NULL, *minus_features = NULL;
     char *featurestr; /* Single 'key=value" string being parsed */
     static bool cpu_globals_initialized;
 
-    if (cpu_globals_initialized) {
-        return;
-    }
+    if (cpu_globals_initialized) return;
     cpu_globals_initialized = true;
 
-    if (!features) {
-        return;
-    }
+    if (!features) return;
 
     for (featurestr = strtok(features, ",");
-         featurestr;
-         featurestr = strtok(NULL, ",")) {
+        featurestr;
+        featurestr = strtok(NULL, ",")) {
         const char *name;
         const char *val = NULL;
         char *eq = NULL;
@@ -721,8 +698,7 @@ static void sparc_cpu_parse_features(const char *typename, char *features,
     g_list_free_full(minus_features, g_free);
 }
 
-void cpu_sparc_set_id(CPUSPARCState *env, unsigned int cpu)
-{
+void cpu_sparc_set_id(CPUSPARCState *env, unsigned int cpu) {
 #if !defined(TARGET_SPARC64)
     env->mxccregs[7] = ((cpu + 8) & 0xf) << 24;
 #endif

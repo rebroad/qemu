@@ -395,9 +395,6 @@ static void display_band_changes(void) {
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    struct timespec start_ts, end_ts;
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_ts);
-
     bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
@@ -411,6 +408,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             }
         }
     }
+
+    struct timespec start_ts, end_ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_ts);
 
     static bool bands_initialized = false;
     static bool models_loaded = false;

@@ -506,9 +506,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (sleep_enabled && (should_sleep(1, interval) || erm_sleep > to_sleep)) {
                 true_sleeps++;
                 if (vm_state == 2) {
-					struct timespec erm_ts = {0, erm_sleep * 1000};
+					/*struct timespec erm_ts = {0, erm_sleep * 1000};
                     timespecadd(&last_false_time, &erm_ts);
-					timespecadd(&last_true_time, &erm_ts);
+					timespecadd(&last_true_time, &erm_ts);*/
                     usleep(erm_sleep);
                 } else erm_sleep = 0;
             } else erm_sleep = 0;
@@ -540,9 +540,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 if (vm_state == 2) {
-					struct timespec erm_ts = {0, erm_sleep * 1000};
+					/*struct timespec erm_ts = {0, erm_sleep * 1000};
 					timespecadd(&last_false_time, &erm_ts);
-					timespecadd(&last_true_time, &erm_ts);
+					timespecadd(&last_true_time, &erm_ts);*/
                     usleep(erm_sleep);
                 } else erm_sleep = 0;
             } else erm_sleep = 0;

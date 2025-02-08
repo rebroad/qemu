@@ -420,8 +420,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static unsigned int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
     static struct timespec last_true_time, last_false_time;
     static unsigned long long tot_overhead_ns = 0, count = 0;
-    static unsigned long long true_interval_ns = 0, min_true_interval = 0, max_true_interval = 0;
-    static unsigned long long false_interval_ns = 0, min_false_interval = 0, max_false_interval = 0;
+    static unsigned long long true_interval_ns = 0, min_true_ns = 0, max_true_ns = 0;
+    static unsigned long long false_interval_ns = 0, min_false_ns = 0, max_false_ns = 0;
     static unsigned long to_sleep = 19000, erm_sleep = 0; // microseconds
     static unsigned int current_true_streak = 0, current_false_streak = 0;
     static unsigned int min_true_streak = 0, max_true_streak = 0;
@@ -498,9 +498,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             unsigned long long interval = timespec_diff_ns(&last_true_time, &current_ts);
             interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
             true_interval_ns += interval;
-            min_true_interval = (min_true_interval == 0) ?
-                interval : (interval < min_true_interval ? interval : min_true_interval);
-            max_true_interval = (interval > max_true_interval) ? interval : max_true_interval;
+            min_true_ns = (min_true_ns == 0) ?
+                interval : (interval < min_true_ns ? interval : min_true_ns);
+            max_true_ns = (interval > max_true_ns) ? interval : max_true_ns;
 
             erm_sleep = to_sleep;
             if (sleep_enabled && (should_sleep(1, interval) || erm_sleep > to_sleep)) {
@@ -531,9 +531,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (interval > 1000000000 && old_interval < 1000000000)
                 printf("interval = %llu old_interval = %llu overhead_ns = %llu\n", interval, old_interval, overhead_ns);
             false_interval_ns += interval;
-            min_false_interval = (min_false_interval == 0) ?
-                interval : (interval < min_false_interval ? interval : min_false_interval);
-            max_false_interval = (interval > max_false_interval) ? interval : max_false_interval;
+            min_false_ns = (min_false_ns == 0) ?
+                interval : (interval < min_false_ns ? interval : min_false_ns);
+            max_false_ns = (interval > max_false_ns) ? interval : max_false_ns;
 
             erm_sleep = to_sleep;
             if (shutdown_indicated > 2) erm_sleep = 100000;
@@ -554,8 +554,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (current_time != last_print_time) {
         // Detect pre-boot
         if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_true_streak == 1 && max_true_streak == 2 && min_false_streak == 1 && max_false_streak < 4
-                && ((is_on_battery() && min_false_interval > 1011 && min_false_interval < 3567 && (false_interval_ns / false_count) > 5680000 && (false_interval_ns / false_count) < 6550000 && (true_interval_ns / true_count) > 9900000 && (true_interval_ns / true_count) < 9911200)
-                || (!is_on_battery() && min_false_interval > 1422 && min_false_interval < 4910 && (false_interval_ns / false_count) > 5970000 && (false_interval_ns / false_count) < 6770000 && (true_interval_ns / true_count) > 10044000 && (true_interval_ns / true_count) < 10110000))) {
+                && ((is_on_battery() && min_false_ns > 1011 && min_false_ns < 3567 && (false_interval_ns / false_count) > 5680000 && (false_interval_ns / false_count) < 6550000 && (true_interval_ns / true_count) > 9900000 && (true_interval_ns / true_count) < 9911200)
+                || (!is_on_battery() && min_false_ns > 1422 && min_false_ns < 4910 && (false_interval_ns / false_count) > 5970000 && (false_interval_ns / false_count) < 6770000 && (true_interval_ns / true_count) > 10044000 && (true_interval_ns / true_count) < 10110000))) {
             prom_boot++;
             printf("\nPROM_BOOT=%d\n", prom_boot);
             if (prom_boot == 2) {
@@ -567,7 +567,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             prom_boot = 0;
         }
         // Detect post-shutdown (on-battery - sleep_enabled)
-        if (natural_true_rate == 100 && vm_state == 0 && min_false_streak > 54 && max_false_streak < 97 && false_count > 8240 && false_count < 8477 && (false_interval_ns / false_count) > 22500 && (false_interval_ns / false_count) < 24979 && ((!is_on_battery() && min_false_interval > 802 && min_false_interval < 2726 && (true_interval_ns / true_count) > 10600000 && (true_interval_ns / true_count) < 10750000) || (is_on_battery() && min_false_interval > 530 && min_false_interval < 1114))) {
+        if (natural_true_rate == 100 && vm_state == 0 && min_false_streak > 54 && max_false_streak < 97 && false_count > 8240 && false_count < 8477 && (false_interval_ns / false_count) > 22500 && (false_interval_ns / false_count) < 24979 && ((!is_on_battery() && min_false_ns > 802 && min_false_ns < 2726 && (true_interval_ns / true_count) > 10600000 && (true_interval_ns / true_count) < 10750000) || (is_on_battery() && min_false_ns > 530 && min_false_ns < 1114))) {
             shutdown_indicated++;
             printf("\nSHUTDOWN=%d\n", shutdown_indicated);
         } else shutdown_indicated = 0;
@@ -584,9 +584,9 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                shutdown_indicated > 2 ? "shutdown" : "",
                true_count, natural_true_rate, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
                true_count ? true_interval_ns / true_count : 0,
-               min_true_interval, max_true_interval,
+               min_true_ns, max_true_ns,
                false_count ? false_interval_ns / false_count : 0,
-               min_false_interval, max_false_interval,
+               min_false_ns, max_false_ns,
                min_true_streak, max_true_streak,
                min_false_streak, max_false_streak);
 
@@ -598,8 +598,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         true_sleeps = 0; false_sleeps = 0; total_sleeps = 0;
         count = 0; true_count = 0; false_count = 0;
         tot_overhead_ns = 0; true_interval_ns = 0; false_interval_ns = 0;
-        min_true_interval = 0; max_true_interval = 0;
-        min_false_interval = 0; max_false_interval = 0;
+        min_true_ns = 0; max_true_ns = 0;
+        min_false_ns = 0; max_false_ns = 0;
         min_true_streak = 0; max_true_streak = 0;
         min_false_streak = 0; max_false_streak = 0;
 

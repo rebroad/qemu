@@ -272,8 +272,15 @@ static bool should_sleep(int result, unsigned long long value) {
 
     // If the VM is busy, we're in learning mode. Update the model
     if (vm_state == 1) {
+        bool found_band = false;
         for (int i = 0; i < NUM_BANDS; i++) {
             if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
+                found_band = true;
+                printf("Debug: value %llu falls in band %d (bounds: %llu=%llu), seen=%d, min=%llu, max=%llu\n",
+                    value, i, model->boundaries[i], model->boundaries[i+1],
+                    model->bands[i].values_seen,
+                    model->bands[i].min_value,
+                    model->bands[i].max_value);
                 if (!model->bands[i].values_seen) {
                     log_band_change(&model->bands[i], i, 0, value, CHANGE_TYPE_FIRST_USE, model_type);
                     model->bands[i].min_value = value;
@@ -292,6 +299,8 @@ static bool should_sleep(int result, unsigned long long value) {
                 break;
             }
         }
+        if (!found_band)
+            printf("Debug: value %llu didn't fall into any band!\n", value);
         model->total_samples++;
     }
     if (vm_state == 1) {

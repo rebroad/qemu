@@ -1,4 +1,4 @@
-What is g_usleep() ?
+- What is g_usleep() ?
 - target/sparc/translate.c - check values of dc->pc and dc->npc for looping without increasing (to detect idle)
 - target/sparc/int32_helper.c - here also but env->pc and env->npc
 - target/sparc/helper.c - here also env->pc and env->npc

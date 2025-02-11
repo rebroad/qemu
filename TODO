@@ -1,5 +1,0 @@
-- target/sparc/translate.c - check values of dc->pc and dc->npc for looping without increasing (to detect idle)
-- target/sparc/int32_helper.c - here also but env->pc and env->npc
-- target/sparc/helper.c - here also env->pc and env->npc
-- target/sparc/win_helper.c - here also same vars
-- target/sparc/cpu.c - here also - and was already going to measure true/false

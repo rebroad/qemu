@@ -1293,7 +1293,11 @@ static bool sparc_cpu_has_work(CPUState *cs) {
     static target_ulong last_npc = 0;
     static int idle_count = 0;
     static const int IDLE_THRESHOLD = 1000; // Adjust based on testing
-    static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseonds
+    static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
+    static time_t last_debug_time = 0;
+    static int max_idle_count = 0;  // Track maximum idle count reached
+    static int total_sleeps = 0;    // Track total number of sleeps
+    static int total_sleep_us = 0;  // Track total sleep time
 
     // Check for interrupt requests
     bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(cpu_env(cs));
@@ -1301,20 +1305,39 @@ static bool sparc_cpu_has_work(CPUState *cs) {
     // Check for power down state
     if (cs->halted) {
         g_usleep(MAX_SLEEP_US); // Sleep longer when halted
+        total_sleeps++;
+        total_sleep_us += MAX_SLEEP_US;
         return false;
     }
 
     // Check for idle loop by monitoring both pc and npc
     if (env->pc == last_pc && env->npc == last_npc) {
         idle_count++;
+        if (idle_count > max_idle_count) max_idle_count = idle_count;
         if (idle_count > IDLE_THRESHOLD) {
             // We're in an idle loop, sleep to reduce CPU usage
             // Sleep time increases with idle duration, up to MAX_SLEEP_US
             int sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
             g_usleep(sleep_us);
+            total_sleeps++;
+            total_sleep_us += sleep_us;
             return false;
         }
     } else idle_count = 0;
+
+    // Print debug info at most once per second
+    time_t current_time = time(NULL);
+    if (current_time != last_debug_time) {
+        if (max_idle_count > 0 || total_sleeps > 0) {
+            printf("SPARC Idle Stats: max_idle=%d, total_sleeps=%d, avg_sleep_us=%d\n",
+                   max_idle_count, total_sleeps, 
+                   total_sleeps > 0 ? total_sleep_us / total_sleeps : 0);
+        }
+        last_debug_time = current_time;
+        max_idle_count = 0;
+        total_sleeps = 0;
+        total_sleep_us = 0;
+    }
 
     last_pc = env->pc;
     last_npc = env->npc;

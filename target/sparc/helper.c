@@ -212,9 +212,6 @@ void helper_power_down(CPUSPARCState *env) {
     env->pc = env->npc;
     env->npc = env->pc + 4;
 
-	// Sleep for a longer period since we're in power down
-	g_usleep(10000); // Sleep for 10ms
-
     cpu_loop_exit(cs);
 }
 

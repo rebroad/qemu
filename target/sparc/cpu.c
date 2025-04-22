@@ -1290,23 +1290,34 @@ static void sparc_restore_state_to_opc(CPUState *cs,
 static bool sparc_cpu_has_work(CPUState *cs) {
     CPUSPARCState *env = cpu_env(cs);
     static target_ulong last_pc = 0;
+    static target_ulong last_npc = 0;
     static int idle_count = 0;
     static const int IDLE_THRESHOLD = 1000; // Adjust based on testing
+    static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseonds
 
     // Check for interrupt requests
     bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(cpu_env(cs));
 
-    // Check for idle loop
-    if (env->pc == last_pc) {
+    // Check for power down state
+    if (cs->halted) {
+        g_usleep(MAX_SLEEP_US); // Sleep longer when halted
+        return false;
+    }
+
+    // Check for idle loop by monitoring both pc and npc
+    if (env->pc == last_pc && env->npc == last_npc) {
         idle_count++;
         if (idle_count > IDLE_THRESHOLD) {
             // We're in an idle loop, sleep to reduce CPU usage
-            g_usleep(1000); // Sleep for 1ms
+            // Sleep time increases with idle duration, up to MAX_SLEEP_US
+            int sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
+            g_usleep(sleep_us);
             return false;
         }
     } else idle_count = 0;
 
     last_pc = env->pc;
+    last_npc = env->npc;
     return has_interrupt;
 }
 

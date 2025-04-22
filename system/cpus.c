@@ -73,9 +73,53 @@ static QemuMutex bql;
  */
 static const AccelOpsClass *cpus_accel;
 
+/* Debug function macro to print function name, call count, and return value counts */
+#define DEBUG_FUNC() do { \
+    static time_t last_print_time = 0; \
+    static int call_count = 0; \
+    time_t current_time = time(NULL); \
+    call_count++; \
+    if (current_time != last_print_time) { \
+        printf("%s: called %d times\n", __func__, call_count); \
+        call_count = 0; \
+        last_print_time = current_time; \
+    } \
+} while (0)
+
+/* Helper macros to track return values */
+#define DEBUG_RETURN_TRUE() do { \
+    static int true_count = 0; \
+    static time_t last_print_time = 0; \
+    time_t current_time = time(NULL); \
+    true_count++; \
+    if (current_time != last_print_time) { \
+        printf("%s: returned true %d times\n", __func__, true_count); \
+        true_count = 0; \
+        last_print_time = current_time; \
+    } \
+    return true; \
+} while (0)
+
+#define DEBUG_RETURN_FALSE() do { \
+    static int false_count = 0; \
+    static time_t last_print_time = 0; \
+    time_t current_time = time(NULL); \
+    false_count++; \
+    if (current_time != last_print_time) { \
+        printf("%s: returned false %d times\n", __func__, false_count); \
+        false_count = 0; \
+        last_print_time = current_time; \
+    } \
+    return false; \
+} while (0)
+
 bool cpu_is_stopped(CPUState *cpu)
 {
-    return cpu->stopped || !runstate_is_running();
+    DEBUG_FUNC();
+    if (cpu->stopped || !runstate_is_running()) {
+        DEBUG_RETURN_TRUE();
+    }
+    DEBUG_RETURN_FALSE();
 }
 
 bool cpu_work_list_empty(CPUState *cpu)
@@ -85,19 +129,22 @@ bool cpu_work_list_empty(CPUState *cpu)
 
 bool cpu_thread_is_idle(CPUState *cpu)
 {
+    DEBUG_FUNC();
     if (cpu->stop || !cpu_work_list_empty(cpu)) {
-        return false;
+        DEBUG_RETURN_FALSE();
     }
     if (cpu_is_stopped(cpu)) {
-        return true;
+        DEBUG_RETURN_TRUE();
     }
     if (!cpu->halted || cpu_has_work(cpu)) {
-        return false;
+        DEBUG_RETURN_FALSE();
     }
     if (cpus_accel->cpu_thread_is_idle) {
-        return cpus_accel->cpu_thread_is_idle(cpu);
+        bool is_idle = cpus_accel->cpu_thread_is_idle(cpu);
+        if (is_idle) DEBUG_RETURN_TRUE();
+        DEBUG_RETURN_FALSE();
     }
-    return true;
+    DEBUG_RETURN_TRUE();
 }
 
 bool all_cpu_threads_idle(void)
@@ -264,6 +311,7 @@ static void generic_handle_interrupt(CPUState *cpu, int mask)
 
 void cpu_interrupt(CPUState *cpu, int mask)
 {
+    DEBUG_FUNC();
     if (cpus_accel->handle_interrupt) {
         cpus_accel->handle_interrupt(cpu, mask);
     } else {
@@ -321,17 +369,19 @@ int vm_shutdown(void)
 
 bool cpu_can_run(CPUState *cpu)
 {
+    DEBUG_FUNC();
     if (cpu->stop) {
-        return false;
+        DEBUG_RETURN_FALSE();
     }
     if (cpu_is_stopped(cpu)) {
-        return false;
+        DEBUG_RETURN_FALSE();
     }
-    return true;
+    DEBUG_RETURN_TRUE();
 }
 
 void cpu_handle_guest_debug(CPUState *cpu)
 {
+    DEBUG_FUNC();
     if (replay_running_debug()) {
         if (!cpu->singlestep_enabled) {
             /*
@@ -427,11 +477,13 @@ void qemu_init_cpu_loop(void)
 
 void run_on_cpu(CPUState *cpu, run_on_cpu_func func, run_on_cpu_data data)
 {
+    DEBUG_FUNC();
     do_run_on_cpu(cpu, func, data, &bql);
 }
 
 static void qemu_cpu_stop(CPUState *cpu, bool exit)
 {
+    DEBUG_FUNC();
     g_assert(qemu_cpu_is_self(cpu));
     cpu->stop = false;
     cpu->stopped = true;
@@ -591,6 +643,7 @@ void cpu_thread_signal_destroyed(CPUState *cpu)
 
 void cpu_pause(CPUState *cpu)
 {
+    DEBUG_FUNC();
     if (qemu_cpu_is_self(cpu)) {
         qemu_cpu_stop(cpu, true);
     } else {
@@ -601,6 +654,7 @@ void cpu_pause(CPUState *cpu)
 
 void cpu_resume(CPUState *cpu)
 {
+    DEBUG_FUNC();
     cpu->stop = false;
     cpu->stopped = false;
     qemu_cpu_kick(cpu);

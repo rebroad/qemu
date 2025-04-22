@@ -1287,22 +1287,27 @@ static void sparc_restore_state_to_opc(CPUState *cs,
     }
 }
 
-static bool sparc_cpu_has_work(CPUState *cs)
-{
-    static unsigned long long true_count = 0, false_count = 0;
-    static time_t last_print_time = 0;
-    bool result = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(cpu_env(cs));
+static bool sparc_cpu_has_work(CPUState *cs) {
+    CPUSPARCState *env = cpu_env(cs);
+    static target_ulong last_pc = 0;
+    static int idle_count = 0;
+    static const int IDLE_THRESHOLD = 1000; // Adjust based on testing
 
-    if (result) true_count++;
-    else false_count++;
+    // Check for interrupt requests
+    bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(cpu_env(cs));
 
-    time_t current_time = time(NULL);
-    if (current_time != last_print_time) {
-        fprintf(stderr, "REB has_work stats - True: %llu, False: %llu\n", true_count, false_count);
-        last_print_time = current_time;
-    }
+    // Check for idle loop
+    if (env->pc == last_pc) {
+        idle_count++;
+        if (idle_count > IDLE_THRESHOLD) {
+            // We're in an idle loop, sleep to reduce CPU usage
+            g_usleep(1000); // Sleep for 1ms
+            return false;
+        }
+    } else idle_count = 0;
 
-    return result;
+    last_pc = env->pc;
+    return has_interrupt;
 }
 
 static int sparc_cpu_mmu_index(CPUState *cs, bool ifetch)

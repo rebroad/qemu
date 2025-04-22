@@ -203,8 +203,7 @@ target_ulong helper_tsubcctv(CPUSPARCState *env, target_ulong src1,
 }
 
 #ifndef TARGET_SPARC64
-void helper_power_down(CPUSPARCState *env)
-{
+void helper_power_down(CPUSPARCState *env) {
     qemu_log("%s\n", __func__);
     CPUState *cs = env_cpu(env);
 
@@ -212,6 +211,10 @@ void helper_power_down(CPUSPARCState *env)
     cs->exception_index = EXCP_HLT;
     env->pc = env->npc;
     env->npc = env->pc + 4;
+
+	// Sleep for a longer period since we're in power down
+	g_usleep(10000); // Sleep for 10ms
+
     cpu_loop_exit(cs);
 }
 

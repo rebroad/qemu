@@ -73,43 +73,45 @@ static QemuMutex bql;
  */
 static const AccelOpsClass *cpus_accel;
 
+/* Structure to hold debug counters for each function */
+struct debug_counters {
+    int call_count;
+    int true_count;
+    int false_count;
+    time_t last_print_time;
+};
+
+/* Function to get the debug counters for a function */
+static inline struct debug_counters *get_debug_counters(const char *func_name) {
+    static struct debug_counters counters = {0};
+    return &counters;
+}
+
 /* Debug function macro to print function name, call count, and return value counts */
 #define DEBUG_FUNC() do { \
-    static time_t last_print_time = 0; \
-    static int call_count = 0; \
+    struct debug_counters *counters = get_debug_counters(__func__); \
     time_t current_time = time(NULL); \
-    call_count++; \
-    if (current_time != last_print_time) { \
-        printf("%s: called %d times\n", __func__, call_count); \
-        call_count = 0; \
-        last_print_time = current_time; \
+    counters->call_count++; \
+    if (current_time != counters->last_print_time) { \
+        printf("%s: called %d times (true: %d, false: %d)\n", \
+               __func__, counters->call_count, counters->true_count, counters->false_count); \
+        counters->call_count = 0; \
+        counters->true_count = 0; \
+        counters->false_count = 0; \
+        counters->last_print_time = current_time; \
     } \
 } while (0)
 
 /* Helper macros to track return values */
 #define DEBUG_RETURN_TRUE() do { \
-    static int true_count = 0; \
-    static time_t last_print_time = 0; \
-    time_t current_time = time(NULL); \
-    true_count++; \
-    if (current_time != last_print_time) { \
-        printf("%s: returned true %d times\n", __func__, true_count); \
-        true_count = 0; \
-        last_print_time = current_time; \
-    } \
+    struct debug_counters *counters = get_debug_counters(__func__); \
+    counters->true_count++; \
     return true; \
 } while (0)
 
 #define DEBUG_RETURN_FALSE() do { \
-    static int false_count = 0; \
-    static time_t last_print_time = 0; \
-    time_t current_time = time(NULL); \
-    false_count++; \
-    if (current_time != last_print_time) { \
-        printf("%s: returned false %d times\n", __func__, false_count); \
-        false_count = 0; \
-        last_print_time = current_time; \
-    } \
+    struct debug_counters *counters = get_debug_counters(__func__); \
+    counters->false_count++; \
     return false; \
 } while (0)
 

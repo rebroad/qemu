@@ -560,7 +560,10 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 || (!is_on_battery() && min_false_interval > 1422 && min_false_interval < 4910 && (false_interval_ns / false_count) > 5970000 && (false_interval_ns / false_count) < 6770000 && (true_interval_ns / true_count) > 10044000 && (true_interval_ns / true_count) < 10110000))) {
             prom_boot++;
             printf("\nPROM_BOOT=%d\n", prom_boot);
-            if (prom_boot == 2) fopen(BOOTDISK_FILE, "w");
+            if (prom_boot == 2) {
+                FILE *fp = fopen(BOOTDISK_FILE, "w");
+                if (fp) fclose(fp);
+            }
         } else {
             unlink(BOOTDISK_FILE);
             prom_boot = 0;

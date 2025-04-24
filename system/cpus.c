@@ -81,37 +81,29 @@ struct debug_counters {
     time_t last_print_time;
 };
 
-/* Function to get the debug counters for a function */
-static inline struct debug_counters *get_debug_counters(const char *func_name) {
-    static struct debug_counters counters = {0};
-    return &counters;
-}
-
 /* Debug function macro to print function name, call count, and return value counts */
 #define DEBUG_FUNC() do { \
-    struct debug_counters *counters = get_debug_counters(__func__); \
+    struct debug_counters counters = {0}; \
     time_t current_time = time(NULL); \
-    counters->call_count++; \
+    counters.call_count++; \
     if (current_time != counters->last_print_time) { \
         printf("%s: called %d times (true: %d, false: %d)\n", \
-               __func__, counters->call_count, counters->true_count, counters->false_count); \
-        counters->call_count = 0; \
-        counters->true_count = 0; \
-        counters->false_count = 0; \
-        counters->last_print_time = current_time; \
+               __func__, counters.call_count, counters.true_count, counters.false_count); \
+        counters.call_count = 0; \
+        counters.true_count = 0; \
+        counters.false_count = 0; \
+        counters.last_print_time = current_time; \
     } \
 } while (0)
 
 /* Helper macros to track return values */
 #define DEBUG_RETURN_TRUE() do { \
-    struct debug_counters *counters = get_debug_counters(__func__); \
-    counters->true_count++; \
+    counters.true_count++; \
     return true; \
 } while (0)
 
 #define DEBUG_RETURN_FALSE() do { \
-    struct debug_counters *counters = get_debug_counters(__func__); \
-    counters->false_count++; \
+    counters.false_count++; \
     return false; \
 } while (0)
 

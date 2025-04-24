@@ -81,29 +81,50 @@ struct debug_counters {
     time_t last_print_time;
 };
 
+/* Array to store counters, with a reasonable initial size */
+#define MAX_FUNCS 128
+static struct debug_counters *counters_array = NULL;
+static int next_func_id = 1;  /* Start at 1 since 0 means uninitialized */
+
 /* Debug function macro to print function name, call count, and return value counts */
-#define DEBUG_FUNC() do { \
-    struct debug_counters counters = {0}; \
-    time_t current_time = time(NULL); \
-    counters.call_count++; \
-    if (current_time != counters->last_print_time) { \
-        printf("%s: called %d times (true: %d, false: %d)\n", \
-               __func__, counters.call_count, counters.true_count, counters.false_count); \
-        counters.call_count = 0; \
-        counters.true_count = 0; \
-        counters.false_count = 0; \
-        counters.last_print_time = current_time; \
-    } \
-} while (0)
+#define DEBUG_FUNC() \
+    static int func_id = 0; \
+    static struct debug_counters *counters = NULL; \
+    do { \
+        if (func_id == 0) { \
+            func_id = next_func_id++; \
+            if (func_id > MAX_FUNCS) { \
+                fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_FUNCS); \
+                func_id = -1; \
+            } else { \
+                if (counters_array == NULL) { \
+                    counters_array = g_new0(struct debug_counters, MAX_FUNCS); \
+                } \
+                counters = &counters_array[func_id - 1]; \
+            } \
+        } \
+        if (counters) { \
+            time_t current_time = time(NULL); \
+            counters->call_count++; \
+            if (current_time != counters->last_print_time) { \
+                printf("%s: called %d times (true: %d, false: %d)\n", \
+                       __func__, counters->call_count, counters->true_count, counters->false_count); \
+                counters->call_count = 0; \
+                counters->true_count = 0; \
+                counters->false_count = 0; \
+                counters->last_print_time = current_time; \
+            } \
+        } \
+    } while (0)
 
 /* Helper macros to track return values */
 #define DEBUG_RETURN_TRUE() do { \
-    counters.true_count++; \
+    if (counters) counters->true_count++; \
     return true; \
 } while (0)
 
 #define DEBUG_RETURN_FALSE() do { \
-    counters.false_count++; \
+    if (counters) counters->false_count++; \
     return false; \
 } while (0)
 

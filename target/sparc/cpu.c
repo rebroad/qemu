@@ -418,17 +418,16 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         }
     }
 
-    struct timespec start_ts, end_ts;
+    struct timespec start_ts, end_ts, current_ts;
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_ts);
 
-    static bool bands_initialized = false;
-    static bool models_loaded = false;
+    static bool bands_initialized = false, models_loaded = false;
     static time_t last_print_time = 0, last_measure_time = 0, last_vm_state_check = 0;
     static bool sleep_enabled = true, measuring_mode = false;
     static unsigned int true_count = 0, false_count = 0;
     static unsigned int true_sleeps = 0, false_sleeps = 0, total_sleeps = 0, natural_true_rate = 100;
-    static struct timespec last_true_time, last_false_time;
-    static unsigned long long tot_overhead_ns = 0, count = 0;
+    static struct timespec last_true_time = {0}, last_false_time = {0};
+    static unsigned long long overhead_ns = 0, tot_overhead_ns = 0, count = 0;
     static unsigned long long true_interval_ns = 0, min_true_ns = 0, max_true_ns = 0;
     static unsigned long long false_interval_ns = 0, min_false_ns = 0, max_false_ns = 0;
     static unsigned long to_sleep = 19000, erm_sleep = 0; // microseconds
@@ -436,7 +435,6 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     static unsigned int min_true_streak = 0, max_true_streak = 0;
     static unsigned int min_false_streak = 0, max_false_streak = 0;
     static unsigned int shutdown_indicated = 0, prom_boot = 0; static bool idle_os = 0;
-    static unsigned long long overhead_ns = 0;
 
     // Load existing model data
     if (!models_loaded) {
@@ -482,11 +480,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     }
 
     // TODO - remove this and use start_ts ?
-    struct timespec current_ts;
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &current_ts);
 
     if (last_true_time.tv_sec != 0 || last_false_time.tv_sec != 0) {
-        struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ? &last_true_time : &last_false_time;
+        struct timespec *last_time = (last_true_time.tv_sec > last_false_time.tv_sec) ?
+            &last_true_time : &last_false_time;
         unsigned long long interval = timespec_diff_ns(last_time, &current_ts);
         interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
         if (sleep_enabled && (should_sleep(2, interval))) total_sleeps++;
@@ -507,17 +505,17 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             unsigned long long interval = timespec_diff_ns(&last_true_time, &current_ts);
             interval = (interval > overhead_ns) ? (interval - overhead_ns) : 0;
             true_interval_ns += interval;
-            min_true_ns = (min_true_ns == 0) ?
-                interval : (interval < min_true_ns ? interval : min_true_ns);
+            min_true_ns = (min_true_ns == 0) ?  interval :
+                (interval < min_true_ns ? interval : min_true_ns);
             max_true_ns = (interval > max_true_ns) ? interval : max_true_ns;
 
             erm_sleep = to_sleep;
             if (sleep_enabled && (should_sleep(1, interval) || erm_sleep > to_sleep)) {
                 true_sleeps++;
                 if (vm_state == 2) {
-					/*struct timespec erm_ts = {0, erm_sleep * 1000};
+                    /*struct timespec erm_ts = {0, erm_sleep * 1000};
                     timespecadd(&last_false_time, &erm_ts);
-					timespecadd(&last_true_time, &erm_ts);*/
+                    timespecadd(&last_true_time, &erm_ts);*/
                     usleep(erm_sleep);
                 } else erm_sleep = 0;
             } else erm_sleep = 0;
@@ -540,8 +538,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (interval > 1000000000 && old_interval < 1000000000)
                 printf("interval = %llu old_interval = %llu overhead_ns = %llu\n", interval, old_interval, overhead_ns);
             false_interval_ns += interval;
-            min_false_ns = (min_false_ns == 0) ?
-                interval : (interval < min_false_ns ? interval : min_false_ns);
+            min_false_ns = (min_false_ns == 0) ?  interval :
+                (interval < min_false_ns ? interval : min_false_ns);
             max_false_ns = (interval > max_false_ns) ? interval : max_false_ns;
 
             erm_sleep = to_sleep;
@@ -549,14 +547,14 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (sleep_enabled && (should_sleep(0, interval) || erm_sleep > to_sleep)) {
                 false_sleeps++;
                 if (vm_state == 2) {
-					/*struct timespec erm_ts = {0, erm_sleep * 1000};
-					timespecadd(&last_false_time, &erm_ts);
-					timespecadd(&last_true_time, &erm_ts);*/
+                    /*struct timespec erm_ts = {0, erm_sleep * 1000};
+                    timespecadd(&last_false_time, &erm_ts);
+                    timespecadd(&last_true_time, &erm_ts);*/
                     usleep(erm_sleep);
                 } else erm_sleep = 0;
             } else erm_sleep = 0;
         }
-		memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
+        memcpy(&last_false_time, &current_ts, sizeof(struct timespec));
     }
 
     // Print stats every second
@@ -583,7 +581,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         display_band_changes();
 
-        printf("Interrupt Stats: VM=%d Avg_overhead: %llu ns %s%s\n"
+        printf("Interrupt Stats: VM=%d Avg_overhead: %llu us %s%s\n"
                "  Counts - True: %u (%u), False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
                "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
                "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
@@ -1330,7 +1328,7 @@ static bool sparc_cpu_has_work(CPUState *cs) {
     if (current_time != last_debug_time) {
         if (max_idle_count > 0 || total_sleeps > 0) {
             printf("SPARC Idle Stats: max_idle=%d, total_sleeps=%d, avg_sleep_us=%d\n",
-                   max_idle_count, total_sleeps, 
+                   max_idle_count, total_sleeps,
                    total_sleeps > 0 ? total_sleep_us / total_sleeps : 0);
         }
         last_debug_time = current_time;

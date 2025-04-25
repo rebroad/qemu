@@ -78,7 +78,6 @@ struct debug_counters {
     int call_count;
     int true_count;
     int false_count;
-    time_t last_print_time;
 };
 
 /* Array to store counters, with a reasonable initial size */
@@ -90,6 +89,7 @@ static int next_func_id = 1;  /* Start at 1 since 0 means uninitialized */
 #define DEBUG_FUNC() \
     static int func_id = 0; \
     static struct debug_counters *counters = NULL; \
+    static time_t last_print_time; \
     do { \
         if (func_id == 0) { \
             func_id = next_func_id++; \
@@ -97,22 +97,24 @@ static int next_func_id = 1;  /* Start at 1 since 0 means uninitialized */
                 fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_FUNCS); \
                 func_id = -1; \
             } else { \
-                if (counters_array == NULL) { \
+                if (counters_array == NULL) \
                     counters_array = g_new0(struct debug_counters, MAX_FUNCS); \
-                } \
                 counters = &counters_array[func_id - 1]; \
             } \
         } \
         if (counters) { \
-            time_t current_time = time(NULL); \
             counters->call_count++; \
-            if (current_time != counters->last_print_time) { \
-                printf("%s: called %d times (true: %d, false: %d)\n", \
-                       __func__, counters->call_count, counters->true_count, counters->false_count); \
+            time_t current_time = time(NULL); \
+            if (current_time != last_print_time) { \
+				if (counters->call_count && !counters->true_count && !counters->false_count) \
+                    printf("%s: called %d times\n", __func__, counters->call_count); \
+				else \
+                    printf("%s: true: %d, false: %d\n", \
+                           __func__, counters->true_count, counters->false_count); \
                 counters->call_count = 0; \
                 counters->true_count = 0; \
                 counters->false_count = 0; \
-                counters->last_print_time = current_time; \
+                last_print_time = current_time; \
             } \
         } \
     } while (0)
@@ -128,12 +130,10 @@ static int next_func_id = 1;  /* Start at 1 since 0 means uninitialized */
     return false; \
 } while (0)
 
-bool cpu_is_stopped(CPUState *cpu)
-{
+bool cpu_is_stopped(CPUState *cpu) {
     DEBUG_FUNC();
-    if (cpu->stopped || !runstate_is_running()) {
+    if (cpu->stopped || !runstate_is_running())
         DEBUG_RETURN_TRUE();
-    }
     DEBUG_RETURN_FALSE();
 }
 
@@ -145,15 +145,12 @@ bool cpu_work_list_empty(CPUState *cpu)
 bool cpu_thread_is_idle(CPUState *cpu)
 {
     DEBUG_FUNC();
-    if (cpu->stop || !cpu_work_list_empty(cpu)) {
+    if (cpu->stop || !cpu_work_list_empty(cpu))
         DEBUG_RETURN_FALSE();
-    }
-    if (cpu_is_stopped(cpu)) {
+    if (cpu_is_stopped(cpu))
         DEBUG_RETURN_TRUE();
-    }
-    if (!cpu->halted || cpu_has_work(cpu)) {
+    if (!cpu->halted || cpu_has_work(cpu))
         DEBUG_RETURN_FALSE();
-    }
     if (cpus_accel->cpu_thread_is_idle) {
         bool is_idle = cpus_accel->cpu_thread_is_idle(cpu);
         if (is_idle) DEBUG_RETURN_TRUE();
@@ -164,14 +161,13 @@ bool cpu_thread_is_idle(CPUState *cpu)
 
 bool all_cpu_threads_idle(void)
 {
+    DEBUG_FUNC();
     CPUState *cpu;
 
     CPU_FOREACH(cpu) {
-        if (!cpu_thread_is_idle(cpu)) {
-            return false;
-        }
+        if (!cpu_thread_is_idle(cpu)) DEBUG_RETURN_FALSE();
     }
-    return true;
+    DEBUG_RETURN_TRUE();
 }
 
 /***********************************************************/
@@ -256,12 +252,10 @@ void cpu_synchronize_pre_loadvm(CPUState *cpu)
     }
 }
 
-bool cpus_are_resettable(void)
-{
-    if (cpus_accel->cpus_are_resettable) {
-        return cpus_accel->cpus_are_resettable();
-    }
-    return true;
+bool cpus_are_resettable(void) {
+    DEBUG_FUNC();
+    if (!cpus_accel->cpus_are_resettable) DEBUG_RETURN_FALSE();
+    DEBUG_RETURN_TRUE();
 }
 
 void cpu_exec_reset_hold(CPUState *cpu)
@@ -271,8 +265,7 @@ void cpu_exec_reset_hold(CPUState *cpu)
     }
 }
 
-int64_t cpus_get_virtual_clock(void)
-{
+int64_t cpus_get_virtual_clock(void) {
     /*
      * XXX
      *
@@ -285,9 +278,9 @@ int64_t cpus_get_virtual_clock(void)
      *
      * XXX
      */
-    if (cpus_accel && cpus_accel->get_virtual_clock) {
+	DEBUG_FUNC();
+    if (cpus_accel && cpus_accel->get_virtual_clock)
         return cpus_accel->get_virtual_clock();
-    }
     return cpu_get_clock();
 }
 
@@ -295,11 +288,10 @@ int64_t cpus_get_virtual_clock(void)
  * Signal the new virtual time to the accelerator. This is only needed
  * by accelerators that need to track the changes as we warp time.
  */
-void cpus_set_virtual_clock(int64_t new_time)
-{
-    if (cpus_accel && cpus_accel->set_virtual_clock) {
+void cpus_set_virtual_clock(int64_t new_time) {
+	DEBUG_FUNC();
+    if (cpus_accel && cpus_accel->set_virtual_clock)
         cpus_accel->set_virtual_clock(new_time);
-    }
 }
 
 /*
@@ -307,31 +299,24 @@ void cpus_set_virtual_clock(int64_t new_time)
  * icount is active, cpus_get_elapsed_ticks() uses units of the host CPU cycle
  * counter.
  */
-int64_t cpus_get_elapsed_ticks(void)
-{
-    if (cpus_accel->get_elapsed_ticks) {
+int64_t cpus_get_elapsed_ticks(void) {
+	DEBUG_FUNC();
+    if (cpus_accel->get_elapsed_ticks)
         return cpus_accel->get_elapsed_ticks();
-    }
     return cpu_get_ticks();
 }
 
-static void generic_handle_interrupt(CPUState *cpu, int mask)
-{
+static void generic_handle_interrupt(CPUState *cpu, int mask) {
     cpu->interrupt_request |= mask;
 
-    if (!qemu_cpu_is_self(cpu)) {
-        qemu_cpu_kick(cpu);
-    }
+    if (!qemu_cpu_is_self(cpu)) qemu_cpu_kick(cpu);
 }
 
-void cpu_interrupt(CPUState *cpu, int mask)
-{
+void cpu_interrupt(CPUState *cpu, int mask) {
     DEBUG_FUNC();
     if (cpus_accel->handle_interrupt) {
         cpus_accel->handle_interrupt(cpu, mask);
-    } else {
-        generic_handle_interrupt(cpu, mask);
-    }
+    } else generic_handle_interrupt(cpu, mask);
 }
 
 /*
@@ -339,18 +324,11 @@ void cpu_interrupt(CPUState *cpu, int mask)
  */
 static int vm_was_suspended;
 
-void vm_set_suspended(bool suspended)
-{
-    vm_was_suspended = suspended;
-}
+void vm_set_suspended(bool suspended) { vm_was_suspended = suspended; }
 
-bool vm_get_suspended(void)
-{
-    return vm_was_suspended;
-}
+bool vm_get_suspended(void) { return vm_was_suspended; }
 
-static int do_vm_stop(RunState state, bool send_stop)
-{
+static int do_vm_stop(RunState state, bool send_stop) {
     int ret = 0;
     RunState oldstate = runstate_get();
 
@@ -358,13 +336,9 @@ static int do_vm_stop(RunState state, bool send_stop)
         vm_was_suspended = (oldstate == RUN_STATE_SUSPENDED);
         runstate_set(state);
         cpu_disable_ticks();
-        if (oldstate == RUN_STATE_RUNNING) {
-            pause_all_vcpus();
-        }
+        if (oldstate == RUN_STATE_RUNNING) pause_all_vcpus();
         vm_state_notify(0, state);
-        if (send_stop) {
-            qapi_event_send_stop();
-        }
+        if (send_stop) qapi_event_send_stop();
     }
 
     bdrv_drain_all();
@@ -377,25 +351,17 @@ static int do_vm_stop(RunState state, bool send_stop)
 /* Special vm_stop() variant for terminating the process.  Historically clients
  * did not expect a QMP STOP event and so we need to retain compatibility.
  */
-int vm_shutdown(void)
-{
-    return do_vm_stop(RUN_STATE_SHUTDOWN, false);
-}
+int vm_shutdown(void) { return do_vm_stop(RUN_STATE_SHUTDOWN, false); }
 
 bool cpu_can_run(CPUState *cpu)
 {
     DEBUG_FUNC();
-    if (cpu->stop) {
-        DEBUG_RETURN_FALSE();
-    }
-    if (cpu_is_stopped(cpu)) {
-        DEBUG_RETURN_FALSE();
-    }
+    if (cpu->stop) DEBUG_RETURN_FALSE();
+    if (cpu_is_stopped(cpu)) DEBUG_RETURN_FALSE();
     DEBUG_RETURN_TRUE();
 }
 
-void cpu_handle_guest_debug(CPUState *cpu)
-{
+void cpu_handle_guest_debug(CPUState *cpu) {
     DEBUG_FUNC();
     if (replay_running_debug()) {
         if (!cpu->singlestep_enabled) {
@@ -405,9 +371,7 @@ void cpu_handle_guest_debug(CPUState *cpu)
              */
             replay_breakpoint();
             cpu_single_step(cpu, SSTEP_ENABLE);
-        } else {
-            cpu_single_step(cpu, 0);
-        }
+        } else cpu_single_step(cpu, 0);
     } else {
         gdb_set_stop_cpu(cpu);
         qemu_system_debug_request();
@@ -468,9 +432,7 @@ static void qemu_init_sigbus(void)
     prctl(PR_MCE_KILL, PR_MCE_KILL_SET, PR_MCE_KILL_EARLY, 0, 0);
 }
 #else /* !CONFIG_LINUX */
-static void qemu_init_sigbus(void)
-{
-}
+static void qemu_init_sigbus(void) { }
 #endif /* !CONFIG_LINUX */
 
 static QemuThread io_thread;
@@ -490,21 +452,17 @@ void qemu_init_cpu_loop(void)
     qemu_thread_get_self(&io_thread);
 }
 
-void run_on_cpu(CPUState *cpu, run_on_cpu_func func, run_on_cpu_data data)
-{
+void run_on_cpu(CPUState *cpu, run_on_cpu_func func, run_on_cpu_data data) {
     DEBUG_FUNC();
     do_run_on_cpu(cpu, func, data, &bql);
 }
 
-static void qemu_cpu_stop(CPUState *cpu, bool exit)
-{
+static void qemu_cpu_stop(CPUState *cpu, bool exit) {
     DEBUG_FUNC();
     g_assert(qemu_cpu_is_self(cpu));
     cpu->stop = false;
     cpu->stopped = true;
-    if (exit) {
-        cpu_exit(cpu);
-    }
+    if (exit) cpu_exit(cpu);
     qemu_cond_broadcast(&qemu_pause_cond);
 }
 
@@ -535,11 +493,9 @@ void qemu_wait_io_event(CPUState *cpu)
     qemu_wait_io_event_common(cpu);
 }
 
-void cpus_kick_thread(CPUState *cpu)
-{
-    if (cpu->thread_kicked) {
-        return;
-    }
+void cpus_kick_thread(CPUState *cpu) {
+    DEBUG_FUNC();
+    if (cpu->thread_kicked) return;
     cpu->thread_kicked = true;
 
 #ifndef _WIN32
@@ -595,15 +551,9 @@ void bql_block_unlock(bool increase)
     bql_unlock_blocked = new_value;
 }
 
-bool bql_locked(void)
-{
-    return get_bql_locked();
-}
+bool bql_locked(void) { return get_bql_locked(); }
 
-bool qemu_in_main_thread(void)
-{
-    return bql_locked();
-}
+bool qemu_in_main_thread(void) { return bql_locked(); }
 
 void rust_bql_mock_lock(void)
 {
@@ -656,19 +606,13 @@ void cpu_thread_signal_destroyed(CPUState *cpu)
     qemu_cond_signal(&qemu_cpu_cond);
 }
 
-void cpu_pause(CPUState *cpu)
-{
+void cpu_pause(CPUState *cpu) {
     DEBUG_FUNC();
-    if (qemu_cpu_is_self(cpu)) {
-        qemu_cpu_stop(cpu, true);
-    } else {
-        cpu->stop = true;
-        qemu_cpu_kick(cpu);
-    }
+    if (qemu_cpu_is_self(cpu)) qemu_cpu_stop(cpu, true);
+    else { cpu->stop = true; qemu_cpu_kick(cpu); }
 }
 
-void cpu_resume(CPUState *cpu)
-{
+void cpu_resume(CPUState *cpu) {
     DEBUG_FUNC();
     cpu->stop = false;
     cpu->stopped = false;
@@ -680,9 +624,7 @@ static bool all_vcpus_paused(void)
     CPUState *cpu;
 
     CPU_FOREACH(cpu) {
-        if (!cpu->stopped) {
-            return false;
-        }
+        if (!cpu->stopped) return false;
     }
 
     return true;
@@ -718,9 +660,7 @@ void resume_all_vcpus(void)
 {
     CPUState *cpu;
 
-    if (!runstate_is_running()) {
-        return;
-    }
+    if (!runstate_is_running()) return;
 
     qemu_clock_enable(QEMU_CLOCK_VIRTUAL, true);
     CPU_FOREACH(cpu) {

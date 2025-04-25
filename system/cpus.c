@@ -46,6 +46,7 @@
 #include "hw/boards.h"
 #include "hw/hw.h"
 #include "trace.h"
+#include "cpu-stats.h"
 
 #ifdef CONFIG_LINUX
 
@@ -73,62 +74,9 @@ static QemuMutex bql;
  */
 static const AccelOpsClass *cpus_accel;
 
-/* Structure to hold debug counters for each function */
-struct debug_counters {
-    int call_count;
-    int true_count;
-    int false_count;
-};
-
-/* Array to store counters, with a reasonable initial size */
-#define MAX_FUNCS 128
-static struct debug_counters *counters_array = NULL;
-static int next_func_id = 1;  /* Start at 1 since 0 means uninitialized */
-
-/* Debug function macro to print function name, call count, and return value counts */
-#define DEBUG_FUNC() \
-    static int func_id = 0; \
-    static struct debug_counters *counters = NULL; \
-    static time_t last_print_time; \
-    do { \
-        if (func_id == 0) { \
-            func_id = next_func_id++; \
-            if (func_id > MAX_FUNCS) { \
-                fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_FUNCS); \
-                func_id = -1; \
-            } else { \
-                if (counters_array == NULL) \
-                    counters_array = g_new0(struct debug_counters, MAX_FUNCS); \
-                counters = &counters_array[func_id - 1]; \
-            } \
-        } \
-        if (counters) { \
-            counters->call_count++; \
-            time_t current_time = time(NULL); \
-            if (current_time != last_print_time) { \
-				if (counters->call_count && !counters->true_count && !counters->false_count) \
-                    printf("%s: called %d times\n", __func__, counters->call_count); \
-				else \
-                    printf("%s: true: %d, false: %d\n", \
-                           __func__, counters->true_count, counters->false_count); \
-                counters->call_count = 0; \
-                counters->true_count = 0; \
-                counters->false_count = 0; \
-                last_print_time = current_time; \
-            } \
-        } \
-    } while (0)
-
-/* Helper macros to track return values */
-#define DEBUG_RETURN_TRUE() do { \
-    if (counters) counters->true_count++; \
-    return true; \
-} while (0)
-
-#define DEBUG_RETURN_FALSE() do { \
-    if (counters) counters->false_count++; \
-    return false; \
-} while (0)
+/* Global variables for debug counters */
+struct debug_counters *counters_array = NULL;
+int next_func_id = 1;  /* Start at 1 since 0 means uninitialized */
 
 bool cpu_is_stopped(CPUState *cpu) {
     DEBUG_FUNC();
@@ -903,5 +851,20 @@ exit:
 void qmp_inject_nmi(Error **errp)
 {
     nmi_monitor_handle(monitor_get_cpu_index(monitor_cur()), errp);
+}
+
+void cpu_stats_print_all(void) {
+    if (!counters_array) return;
+
+    printf("\nDebug Statistics Summary:\n");
+    printf("======================\n");
+
+    for (int i = 0; i < next_func_id - 1; i++) {
+        struct debug_counters *counters = &counters_array[i];
+        if (counters->true_count == 0 && counters->false_count == 0)
+            printf("%s: called %d times\n", counters->func_name, counters->call_count);
+        else printf("%s: true=%d, false=%d\n", 
+                   counters->func_name, counters->true_count, counters->false_count);
+    }
 }
 

@@ -39,6 +39,7 @@
 #include "tcg/tcg.h"
 #include "fpu/softfloat.h"
 #include "target/sparc/translate.h"
+#include "cpu-stats.h"
 
 //#define DEBUG_FEATURES
 
@@ -522,8 +523,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         }
         memcpy(&last_true_time, &current_ts, sizeof(struct timespec));
     } else {
-        false_count++;
-        current_false_streak++;
+        false_count++; current_false_streak++;
         if (current_true_streak && (!min_true_streak || current_true_streak < min_true_streak))
             min_true_streak = current_true_streak;
         current_true_streak = 0; // Reset true streak
@@ -559,10 +559,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     // Print stats every second
     if (current_time != last_print_time) {
+        int avg_true_ns = true_count ? true_interval_ns / true_count : -1;
+        int avg_false_ns = false_count ? false_interval_ns / false_count : -1;
         // Detect pre-boot
         if (true_count > 98 && true_count < 102 && false_count > 142 && false_count < 175 && min_true_streak == 1 && max_true_streak == 2 && min_false_streak == 1 && max_false_streak < 4
-                && ((is_on_battery() && min_false_ns > 1011 && min_false_ns < 3567 && (false_interval_ns / false_count) > 5680000 && (false_interval_ns / false_count) < 6710000 && (true_interval_ns / true_count) > 9890000 && (true_interval_ns / true_count) < 9940000)
-                || (!is_on_battery() && min_false_ns > 1422 && min_false_ns < 4910 && (false_interval_ns / false_count) > 5970000 && (false_interval_ns / false_count) < 6770000 && (true_interval_ns / true_count) > 10003000 && (true_interval_ns / true_count) < 10110000))) {
+                && ((is_on_battery() && min_false_ns > 1011 && min_false_ns < 3567 && avg_false_ns > 5680000 && avg_false_ns < 6710000 && avg_true_ns > 9890000 && avg_true_ns < 9940000)
+                || (!is_on_battery() && min_false_ns > 1422 && min_false_ns < 4910 && avg_false_ns > 5970000 && avg_false_ns < 6770000 && avg_true_ns > 10003000 && avg_true_ns < 10110000))) {
             if (++prom_boot == 2) {
                 FILE *fp = fopen(BOOTDISK_FILE, "w");
                 if (fp) fclose(fp);
@@ -573,27 +575,26 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             printf("\n--PROM_BOOT=%d\n", prom_boot);
         }
         // Detect post-shutdown (on-battery - sleep_enabled)
-        if (natural_true_rate == 100 && vm_state == 0 && min_false_streak > 54 && max_false_streak < 97 && false_count > 8240 && false_count < 8477 && (false_interval_ns / false_count) > 22500 && (false_interval_ns / false_count) < 24979 && ((!is_on_battery() && min_false_ns > 802 && min_false_ns < 2726 && (true_interval_ns / true_count) > 10600000 && (true_interval_ns / true_count) < 10750000) || (is_on_battery() && min_false_ns > 530 && min_false_ns < 1114))) {
+        if (natural_true_rate == 100 && vm_state == 0 && min_false_streak > 54 && max_false_streak < 97 && false_count > 8240 && false_count < 8477 && avg_false_ns > 22500 && avg_false_ns < 24979 && ((!is_on_battery() && min_false_ns > 802 && min_false_ns < 2726 && avg_true_ns > 10600000 && avg_true_ns < 10750000) || (is_on_battery() && min_false_ns > 530 && min_false_ns < 1114))) {
             shutdown_indicated++;
             printf("\nSHUTDOWN=%d\n", shutdown_indicated);
         } else shutdown_indicated = 0;
 
         display_band_changes();
+		cpu_stats_print_all();
 
         printf("Interrupt Stats: VM=%d Avg_overhead: %llu ns %s%s%s\n"
                "  Counts - True: %u (%u), False: %u, to_sleep: %lu, sleeps: %u/%u/%u\n"
-               "  Avg True Interval: %llu ns (Min/Max: %llu/%llu)\n"
-               "  Avg False Interval: %llu ns (Min/Max: %llu/%llu)\n"
+               "  Avg True Interval: %u ns (Min/Max: %llu/%llu)\n"
+               "  Avg False Interval: %u ns (Min/Max: %llu/%llu)\n"
                "  True Streaks: Min: %d, Max: %d\n  False Streaks: Min: %d, Max: %d\n",
                vm_state, count ? tot_overhead_ns / count : 0,
                is_on_battery() ? "batt " : "",
                idle_os ? "idle_os " : "",
                shutdown_indicated > 2 ? "shutdown" : "",
                true_count, natural_true_rate, false_count, to_sleep, true_sleeps, false_sleeps, total_sleeps,
-               true_count ? true_interval_ns / true_count : 0,
-               min_true_ns, max_true_ns,
-               false_count ? false_interval_ns / false_count : 0,
-               min_false_ns, max_false_ns,
+               avg_true_ns, min_true_ns, max_true_ns,
+               avg_false_ns, min_false_ns, max_false_ns,
                min_true_streak, max_true_streak,
                min_false_streak, max_false_streak);
 

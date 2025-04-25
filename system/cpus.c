@@ -863,8 +863,17 @@ void cpu_stats_print_all(void) {
         struct debug_counters *counters = &counters_array[i];
         if (counters->true_count == 0 && counters->false_count == 0)
             printf("%s: called %d times\n", counters->func_name, counters->call_count);
-        else printf("%s: true=%d, false=%d\n", 
-                   counters->func_name, counters->true_count, counters->false_count);
+        else {
+            uint64_t avg_true_ns = counters->true_count ? counters->total_true_ns / counters->true_count : 0;
+            uint64_t avg_false_ns = counters->false_count ? counters->total_false_ns / counters->false_count : 0;
+            printf("%s: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
+                   "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
+                   counters->func_name,
+                   counters->true_count, avg_true_ns, counters->min_true_ns, counters->max_true_ns,
+                   counters->min_true_streak, counters->max_true_streak,
+                   counters->false_count, avg_false_ns, counters->min_false_ns, counters->max_false_ns,
+                   counters->min_false_streak, counters->max_false_streak);
+        }
     }
 }
 

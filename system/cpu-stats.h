@@ -3,32 +3,37 @@
 
 #define MAX_DEBUG_FUNCS 128  /* Maximum number of functions we'll track */
 
+/* System state flags */
+#define STATE_UNKOWN      0
+#define STATE_PROM_IDLE   1
+#define STATE_OS_IDLE     2
+#define STATE_SHUTDOWN    3
+
+/* Operation modes */
+#define MODE_TRAINING     1
+#define MODE_DETECTION    2
+#define MODE_DISABLED     3
+
 /* Debug counter structure for each function */
 struct debug_counters {
     const char *func_name;
     int call_count;
-    int true_count;
-    int false_count;
+    int count[2]; // True & false
 
     /* Streak tracking */
-    int current_true_streak;
-    int current_false_streak;
-    int min_true_streak;
-    int max_true_streak;
-    int min_false_streak;
-    int max_false_streak;
+    int current_streak[2];
+    int min_streak[2];
+    int max_streak[2];
 
     /* Timing stats */
-    uint64_t min_true_ns;
-    uint64_t max_true_ns;
-    uint64_t min_false_ns;
-    uint64_t max_false_ns;
-    struct timespec last_true_time;
-    struct timespec last_false_time;
+    uint64_t total_ns[2];
+    uint64_t min_ns[2];
+    uint64_t max_ns[2];
+    struct timespec last_time[2];
 };
 
 /* Global variables */
-extern struct debug_counters *counters_array; // REBTODO - should be an array?
+extern struct debug_counters *counters_array; // Memory allocated on first use
 extern int next_func_id;
 
 /* Function to print debug statistics */
@@ -38,21 +43,22 @@ void cpu_stats_print_all(void) {
 
     printf("\nDebug Statistics Summary:\n");
     printf("======================\n");
+    // TODO report is_on_battery, idle_prom, idle_os, shutdown_indicated
 
-    for (int i = 0; i < next_func_id - 1; i++) {
-        struct debug_counters *counters = &counters_array[i];
-        if (counters->true[1] == 0 && counters->false[0] == 0)
-            printf("%s: called %d times\n", counters->func_name, counters->call_count);
+    for (int i = 0; i < next_func_id; i++) {
+        struct debug_counters *it = &counters_array[i];
+        if (it->count[0] == 0 && it->count[1] == 0)
+            printf("%s: called %d times\n", it->func_name, it->call_count);
         else {
-            uint64_t avg_true_ns = counters->count[1] ? counters->total_true_ns / counters->true_count : 0;
-            uint64_t avg_false_ns = counters->count[0] ? counters->total_false_ns / counters->false_count : 0;
+            uint64_t avg_false_ns = it->count[0] ? it->total_ns[0] / it->count[0] : -1;
+            uint64_t avg_true_ns = it->count[1] ? it->total_ns[1] / it->count[1] : -1;
             printf("%s: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
                    "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
-                   counters->func_name,
-                   counters->true_count, avg_true_ns, counters->min_true_ns, counters->max_true_ns,
-                   counters->min_true_streak, counters->max_true_streak,
-                   counters->false_count, avg_false_ns, counters->min_false_ns, counters->max_false_ns,
-                   counters->min_false_streak, counters->max_false_streak);
+                   it->func_name,
+                   it->count[1], avg_true_ns, it->min_ns[1], it->max_ns[1],
+                   it->min_streak[1], it->max_streak[1],
+                   it->count[0], avg_false_ns, it->min_ns[0], it->max_ns[0],
+                   it->min_streak[0], it->max_streak[0]);
         }
     }
 }
@@ -74,14 +80,24 @@ static void check_system_state(void) {
     last_state_check = current_time;
 }
 
+void reset_cpu_stats(void) {
+    for (int i = 0; i < next_func_id; i++) {
+        struct debug_counters *it = &counters_array[i];
+        it->call_count = 0;
+        for (int j = 0; i < 2; j++) // True & false
+            it->count[j] = it->min_streak[j] = it->max_streak[j] = it->total_ns[j] = it->min_ns[j] = it->max_ns[j] = 0;
+    }
+}
+
 void cpu_stats_per_second(void) {
-	time_t current_time = time(NULL);
-	static time_t last_stats_print = current_time;
-	if (current_time = last_stats_print) return;
-	last_stats_print = current_time;
-	cpu_stats_print_all();
-	check_system_state();
-	system_state_print_stats();
+    time_t current_time = time(NULL);
+    static time_t last_stats_print = current_time;
+    if (current_time = last_stats_print) return;
+    last_stats_print = current_time;
+    cpu_stats_print_all();
+    check_system_state();
+    system_state_print_stats();
+    reset_cpu_stats();
 }
 
 /* Debug function macro to collect statistics */
@@ -90,7 +106,7 @@ void cpu_stats_per_second(void) {
     do { \
         if (!counters) { \
             int func_id = next_func_id++; \
-			if (func_id <= MAX_FUNCS) { \
+            if (func_id <= MAX_FUNCS) { \
                 if (!counters_array) \
                     counters_array = g_new0(struct debug_counters, MAX_FUNCS); \
                 counters = &counters_array[func_id - 1]; \
@@ -98,7 +114,7 @@ void cpu_stats_per_second(void) {
             } \
         } \
         if (counters) counters->call_count++; \
-		cpu_stats_per_second(); \
+        cpu_stats_per_second(); \
     } while (0)
 
 /* Helper macros to track return values with timing */
@@ -124,7 +140,7 @@ void cpu_stats_per_second(void) {
         counters->current_streak[1-x] = 0; \
         if (counters->current_streak[x] > counters->max_streak[x]) \
             counters->max_streak[x] = counters->current_streak[x]; \
-		// TODO - time interval calculation
+        // TODO - time interval calculation
     } \
     return true; \
 } while (0)

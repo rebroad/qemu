@@ -78,6 +78,13 @@ static const AccelOpsClass *cpus_accel;
 struct debug_counters *counters_array = NULL;
 int next_func_id = 1;  /* Start at 1 since 0 means uninitialized */
 
+/* Debug statistics and state detection */
+static struct state_training_data training_data[4]; // Unknown, PROM_IDLE, OS_IDLE, SHUTDOWN
+static int current_state = STATE_UNKNOWN;
+static int current_mode = MODE_DISABLED;
+static time_t last_state_check = 0;
+static time_t last_stats_print = 0;
+
 bool cpu_is_stopped(CPUState *cpu) {
     DEBUG_FUNC();
     if (cpu->stopped || !runstate_is_running())
@@ -226,7 +233,7 @@ int64_t cpus_get_virtual_clock(void) {
      *
      * XXX
      */
-	DEBUG_FUNC();
+    DEBUG_FUNC();
     if (cpus_accel && cpus_accel->get_virtual_clock)
         return cpus_accel->get_virtual_clock();
     return cpu_get_clock();
@@ -237,7 +244,7 @@ int64_t cpus_get_virtual_clock(void) {
  * by accelerators that need to track the changes as we warp time.
  */
 void cpus_set_virtual_clock(int64_t new_time) {
-	DEBUG_FUNC();
+    DEBUG_FUNC();
     if (cpus_accel && cpus_accel->set_virtual_clock)
         cpus_accel->set_virtual_clock(new_time);
 }
@@ -248,7 +255,7 @@ void cpus_set_virtual_clock(int64_t new_time) {
  * counter.
  */
 int64_t cpus_get_elapsed_ticks(void) {
-	DEBUG_FUNC();
+    DEBUG_FUNC();
     if (cpus_accel->get_elapsed_ticks)
         return cpus_accel->get_elapsed_ticks();
     return cpu_get_ticks();
@@ -875,5 +882,47 @@ void cpu_stats_print_all(void) {
                    counters->min_false_streak, counters->max_false_streak);
         }
     }
+}
+
+static void check_system_state(void) {
+    time_t current_time = time(NULL);
+
+    // Check state file once per second
+    if (current_time != last_state_check) {
+        FILE *state_file = fopen("vm_state.txt", "r");
+        if (state_file) {
+            int new_state;
+            if (fscanf(state_file, "%d", &new_state) == 1) {
+                // Ignore measurements from the last few seconds before state change
+                if (new_state != current_state) {
+                    qemu_log("State change detected: %d -> %d\n", current_state, new_state);
+                    // Only learn about idle states
+                    if (new_state == STATE_PROM_IDLE || new_state == STATE_OS_IDLE) {
+                        system_state_update(NULL); // Reset current measurements
+                    }
+                }
+                current_state = new_state;
+                current_mode = MODE_TRAINING;
+            }
+            fclose(state_file);
+        }
+        last_state_check = current_time;
+    }
+
+    // Print stats every second
+    if (current_time != last_stats_print) {
+        cpu_stats_print_all();
+        system_state_print_stats();
+        last_stats_print = current_time;
+    }
+}
+
+/* This function is called in the main CPU execution loop */
+bool cpu_exec_should_break(CPUState *cpu) {
+    check_system_state();
+
+    // Add any other global CPU execution control logic here
+
+    return false; // Return true if execution should break
 }
 

@@ -1,11 +1,12 @@
 #ifndef CPU_STATS_H
 #define CPU_STATS_H
 
-void cpu_stats_print_all(void);
+#define MAX_DEBUG_FUNCS 128  /* Maximum number of functions we'll track */
 
-/* Structure to hold debug counters for each function */
+/* Debug counter structure for each function */
 struct debug_counters {
     const char *func_name;
+    int func_id;           /* Unique ID for this function */
     int call_count;
     int true_count;
     int false_count;
@@ -19,20 +20,20 @@ struct debug_counters {
     int max_false_streak;
 
     /* Timing stats */
-    struct timespec last_true_time;
-    struct timespec last_false_time;
-    uint64_t total_true_ns;
-    uint64_t total_false_ns;
     uint64_t min_true_ns;
     uint64_t max_true_ns;
     uint64_t min_false_ns;
     uint64_t max_false_ns;
+    struct timespec last_true_time;
+    struct timespec last_false_time;
 };
 
-/* Array to store counters, with a reasonable initial size */
-#define MAX_FUNCS 128
+/* Global variables */
 extern struct debug_counters *counters_array;
 extern int next_func_id;
+
+/* Function to print debug statistics */
+void cpu_stats_print_all(void);
 
 /* Debug function macro to collect statistics */
 #define DEBUG_FUNC() \

@@ -3,6 +3,10 @@
 
 #defome MAX_DEBUG_FUNCS 128  /* Maximum number of functions we'll track */
 
+/* Global variables for debug counters */
+struct debug_counters *counters_array = NULL;
+int next_func_id = 0;
+
 void cpu_stats_per_second(void);
 
 /* Debug function macro to collect statistics */

@@ -69,10 +69,11 @@ struct debug_counters *find_counters_array(const char *func_name);
     } while (0)
 
 /* Helper macros to track return values with timing */
-#define DEBUG_RETURN(x) do { \
+#define DEBUG_RETURN(n) do { \
     if (counters) { \
         struct timespec current_ts; \
         clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &current_ts); \
+        int x = (n) ? 1 : 0, y = (n) ? 0 : 1; \
         if (counters->last_time[x].tv_sec != 0 || counters->last_time[x].tv_nsec != 0) { \
             uint64_t interval = (current_ts.tv_sec - counters->last_time[x].tv_sec) * 1000000000ULL + \
                                (current_ts.tv_nsec - counters->last_time[x].tv_nsec); \
@@ -85,14 +86,14 @@ struct debug_counters *find_counters_array(const char *func_name);
         counters->last_time[x] = current_ts; \
         counters->count[x]++; \
         counters->current_streak[x]++; \
-        if (counters->current_streak[1-x] && \
-            (!counters->min_streak[1-x] || counters->current_streak[1-x] < counters->min_streak[1-x])) \
-            counters->min_streak[1-x] = counters->current_streak[1-x]; \
-        counters->current_streak[1-x] = 0; \
+        if (counters->current_streak[y] && \
+            (!counters->min_streak[y] || counters->current_streak[y] < counters->min_streak[y])) \
+            counters->min_streak[y] = counters->current_streak[y]; \
+        counters->current_streak[y] = 0; \
         if (counters->current_streak[x] > counters->max_streak[x]) \
             counters->max_streak[x] = counters->current_streak[x]; \
     } \
-    return true; \
+    return n; \
 } while (0)
 
 #endif /* CPU_STATS_H */

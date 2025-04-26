@@ -88,8 +88,8 @@ static time_t last_stats_print = 0;
 bool cpu_is_stopped(CPUState *cpu) {
     DEBUG_FUNC();
     if (cpu->stopped || !runstate_is_running())
-        DEBUG_RETURN_TRUE();
-    DEBUG_RETURN_FALSE();
+        DEBUG_RETURN(1);
+    DEBUG_RETURN(0);
 }
 
 bool cpu_work_list_empty(CPUState *cpu)
@@ -101,17 +101,17 @@ bool cpu_thread_is_idle(CPUState *cpu)
 {
     DEBUG_FUNC();
     if (cpu->stop || !cpu_work_list_empty(cpu))
-        DEBUG_RETURN_FALSE();
+        DEBUG_RETURN(0);
     if (cpu_is_stopped(cpu))
-        DEBUG_RETURN_TRUE();
+        DEBUG_RETURN(1);
     if (!cpu->halted || cpu_has_work(cpu))
-        DEBUG_RETURN_FALSE();
+        DEBUG_RETURN(0);
     if (cpus_accel->cpu_thread_is_idle) {
         bool is_idle = cpus_accel->cpu_thread_is_idle(cpu);
-        if (is_idle) DEBUG_RETURN_TRUE();
-        DEBUG_RETURN_FALSE();
+        if (is_idle) DEBUG_RETURN(1);
+        DEBUG_RETURN(0);
     }
-    DEBUG_RETURN_TRUE();
+    DEBUG_RETURN(1);
 }
 
 bool all_cpu_threads_idle(void)
@@ -120,9 +120,9 @@ bool all_cpu_threads_idle(void)
     CPUState *cpu;
 
     CPU_FOREACH(cpu) {
-        if (!cpu_thread_is_idle(cpu)) DEBUG_RETURN_FALSE();
+        if (!cpu_thread_is_idle(cpu)) DEBUG_RETURN(0);
     }
-    DEBUG_RETURN_TRUE();
+    DEBUG_RETURN(1);
 }
 
 /***********************************************************/
@@ -209,8 +209,8 @@ void cpu_synchronize_pre_loadvm(CPUState *cpu)
 
 bool cpus_are_resettable(void) {
     DEBUG_FUNC();
-    if (!cpus_accel->cpus_are_resettable) DEBUG_RETURN_FALSE();
-    DEBUG_RETURN_TRUE();
+    if (!cpus_accel->cpus_are_resettable) DEBUG_RETURN(0);
+    DEBUG_RETURN(1);
 }
 
 void cpu_exec_reset_hold(CPUState *cpu)
@@ -311,9 +311,9 @@ int vm_shutdown(void) { return do_vm_stop(RUN_STATE_SHUTDOWN, false); }
 bool cpu_can_run(CPUState *cpu)
 {
     DEBUG_FUNC();
-    if (cpu->stop) DEBUG_RETURN_FALSE();
-    if (cpu_is_stopped(cpu)) DEBUG_RETURN_FALSE();
-    DEBUG_RETURN_TRUE();
+    if (cpu->stop) DEBUG_RETURN(0);
+    if (cpu_is_stopped(cpu)) DEBUG_RETURN(0);
+    DEBUG_RETURN(1);
 }
 
 void cpu_handle_guest_debug(CPUState *cpu) {

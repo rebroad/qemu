@@ -404,7 +404,6 @@ static void display_band_changes(void) {
 
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
     DEBUG_FUNC();
-    bool result = false;
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
         if (cpu_interrupts_enabled(env) && env->interrupt_index > 0) {
@@ -414,13 +413,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
                 // REBTODO - can we set cs->halted=1 here like in i386/kvm/kvm.c?
-                result = true;
+                DEBUG_RETURN(1);
             }
         }
     }
 
-    if (result) DEBUG_RETURN_TRUE();
-    DEBUG_RETURN_FALSE();
+    DEBUG_RETURN(0);
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -1103,29 +1101,26 @@ static bool sparc_cpu_has_work(CPUState *cs) {
     // Check for interrupt requests
     bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(cpu_env(cs));
 
-    // Check for power down state
-    if (cs->halted) {
-        g_usleep(MAX_SLEEP_US); // Sleep longer when halted
-        total_sleeps++;
-        total_sleep_us += MAX_SLEEP_US;
-        return false;
-    }
+	int sleep_us = 0;
 
-    // Check for idle loop by monitoring both pc and npc
     if (env->pc == last_pc && env->npc == last_npc) {
         idle_count++;
         if (idle_count > max_idle_count) max_idle_count = idle_count;
         if (idle_count > IDLE_THRESHOLD) {
             // We're in an idle loop, sleep to reduce CPU usage
             // Sleep time increases with idle duration, up to MAX_SLEEP_US
-            int sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
-            g_usleep(sleep_us);
+            sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
             total_sleeps++;
-            total_sleep_us += sleep_us;
-            return false;
         }
     } else idle_count = 0;
 
+    // Check for power down state
+    if (cs->halted) { total_sleeps++; sleep_us = MAX_SLEEP_US; }
+
+    total_sleep_us += sleep_us;
+    g_usleep(sleep_us);
+
+    // Check for idle loop by monitoring both pc and npc
     // Print debug info at most once per second
     time_t current_time = time(NULL);
     if (current_time != last_debug_time) {
@@ -1135,13 +1130,10 @@ static bool sparc_cpu_has_work(CPUState *cs) {
                    total_sleeps > 0 ? total_sleep_us / total_sleeps : 0);
         }
         last_debug_time = current_time;
-        max_idle_count = 0;
-        total_sleeps = 0;
-        total_sleep_us = 0;
+        max_idle_count = total_sleeps = total_sleep_us = 0;
     }
 
-    last_pc = env->pc;
-    last_npc = env->npc;
+    last_pc = env->pc; last_npc = env->npc;
     return has_interrupt;
 }
 

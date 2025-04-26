@@ -4,15 +4,13 @@
 #define MAX_DEBUG_FUNCS 128  /* Maximum number of functions we'll track */
 
 /* System state flags */
-#define STATE_UNKOWN      0
-#define STATE_PROM_IDLE   1
-#define STATE_OS_IDLE     2
-#define STATE_SHUTDOWN    3
+#define STATE_AUTODETECT  -1
+#define STATE_PROM_IDLE   0
+#define STATE_OS_IDLE     1
+#define STATE_SHUTDOWN    2
+#define NUM_STATES        3  // PROM_IDLE, OS_IDLE, SHUTDOWN
 
-/* Operation modes */
-#define MODE_TRAINING     1
-#define MODE_DETECTION    2
-#define MODE_DISABLED     3
+static struct state_edges[NUM_STATES];
 
 /* Debug counter structure for each function */
 struct debug_counters {
@@ -63,21 +61,16 @@ void cpu_stats_print_all(void) {
     }
 }
 
-static void check_system_state(void) {
+static int get_system_state(current_state) {
+    int new_state = STATE_AUTODETECT;
     FILE *state_file = fopen("vm_state.txt", "r");
     if (state_file) {
-        int new_state;
-        if (fscanf(state_file, "%d", &new_state) == 1) {
-            if (new_state != current_state) {
-                qemu_log("State change detected: %d -> %d\n", current_state, new_state);
-                system_state_update(NULL); // Reset current measurements
-            }
-            current_state = new_state;
-            current_mode = MODE_TRAINING;
-        } // TODO - go out of TRAINING mode for invalid states
+        if (fscanf(state_file, "%d", &new_state) == 1 && (new_state != current_state))
+            qemu_log("State change detected: %d -> %d\n", current_state, new_state);
         fclose(state_file);
     }
-    last_state_check = current_time;
+
+	return new_state;
 }
 
 void reset_cpu_stats(void) {
@@ -89,14 +82,25 @@ void reset_cpu_stats(void) {
     }
 }
 
+void update_state_edges(int vm_state) {
+	// TODO we need to update the min and max of each of the counters. This data also needs to be loaded from disk (if empty) and saved to disk (when not loading!).
+    // TODO this function need to look at all the current counters for all the functions and create/update a template (for all those functions) of max and min values for each of the counters.
+	// The format of the saved file needs to include headings for each state (0, 1 and 2), and subheadings for each func_name, then the values of each variable within that function.
+	// "each variable" refers to: min_streak, max_streak, avg_ns, min_ns, max_ns
+	// so we need to record the edges of each of those variables (i.e. the edges of the window that they operate within - i.e. the minimum and maximum that the values reached during training per the applicable "state", i.e. idle_prom, idle_os, shutdown).
+}
+
 void cpu_stats_per_second(void) {
+    static int vm_state = STATE_AUTODETECT;
+
     time_t current_time = time(NULL);
     static time_t last_stats_print = current_time;
     if (current_time = last_stats_print) return;
     last_stats_print = current_time;
+
     cpu_stats_print_all();
-    check_system_state();
-    system_state_print_stats();
+    vm_state = get_system_state(vm_state);
+	update_state_edges(vm_state);
     reset_cpu_stats();
 }
 

@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include "cpu-stats.h"
+#include "qemu/timer.h" // Include for QEMU timers
 
 #define STATE_EDGE_FILE "state_edges.dat"
 #define MAX_FUNC_NAME_LEN 64 // Max length for function names
@@ -55,6 +56,7 @@ bool state_edges_loaded = false;
 
 // Globals used during loading/mapping
 GHashTable *g_func_map = NULL;
+static QEMUTimer *cpu_stats_timer = NULL; // Timer for periodic stats update
 
 static bool is_on_battery(void) {
     FILE *f = fopen("/sys/class/power_supply/ACAD/online", "r");
@@ -68,8 +70,8 @@ static bool is_on_battery(void) {
 
 // Function to print debug statistics
 static void cpu_stats_print_all(void) {
-    if (next_func_id >= MAX_FUNCS)
-        fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_FUNCS);
+    if (next_func_id >= MAX_DEBUG_FUNCS)
+        fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_DEBUG_FUNCS);
 
     bool on_battery = is_on_battery();
     bool prom_idle = detect_system_state(STATE_PROM_IDLE * 2 + on_battery);
@@ -98,17 +100,30 @@ static void cpu_stats_print_all(void) {
     }
 }
 
+/* Timer callback function */
+static void cpu_stats_timer_cb(void *opaque)
+{
+    cpu_stats_per_second(); // Call the original periodic function
+    // Re-arm the timer for the next second
+    timer_mod(cpu_stats_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
+}
+
 // Find (or create) the counters struct for a function
 struct debug_counters *find_counters_array(const char *func_name) {
     if (next_func_id >= MAX_DEBUG_FUNCS) return NULL;
 
-    // Ensure the main counters array is allocated
+    // Ensure the main counters array is allocated and timer is initialized
     if (!counters_array) {
         counters_array = g_new0(struct debug_counters, MAX_DEBUG_FUNCS);
         // Initialize hash map with g_free for keys allocated by g_strdup during load
         g_func_map = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free,   // Free the keys (strdup'd names)
                                            NULL);  // Values (func_id) are integers
+
+        // Initialize and arm the periodic timer
+        cpu_stats_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, cpu_stats_timer_cb, NULL);
+        timer_mod(cpu_stats_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000); // Fire in 1 sec
+
         load_state_edge_data(); // Load data which populates g_func_map and state_edge_data
     }
 
@@ -259,7 +274,7 @@ static void load_state_edge_data(void) {
             fprintf(stderr, "Warning: Empty function name found at saved index %d in '%s'. Skipping mapping.\n", i, STATE_EDGE_FILE);
             // Skip reading state data for this empty name entry? Or read and discard?
             // Let's read and discard to keep file position correct.
-            size_t dummy_read_size = sizeof(struct func_state_edges_saved) * NUM_STATES;
+            size_t dummy_read_size = sizeof(struct func_state_edges) * NUM_STATES;
             if (fseek(f, dummy_read_size, SEEK_CUR) != 0) {
                  fprintf(stderr, "Error seeking past state data for empty name at index %d.\n", i);
                  fclose(f);
@@ -272,24 +287,14 @@ static void load_state_edge_data(void) {
 
         // Read state data for this function
         for (int s = 0; s < NUM_STATES; s++) {
-            struct func_state_edges_saved saved_data;
-            if (fread(&saved_data, sizeof(struct func_state_edges_saved), 1, f) != 1) {
+            // Read directly into the destination structure
+            if (fread(&state_edge_data[s][i], sizeof(struct func_state_edges), 1, f) != 1) {
                 fprintf(stderr, "Error reading state edge data for func_id %d, state %d from '%s'. Load aborted.\\n", i, s, STATE_EDGE_FILE);
                 fclose(f);
                 g_hash_table_remove_all(g_func_map);
                 next_func_id = 0;
                 return;
             }
-
-            // Copy loaded data into the main structure
-            struct func_state_edges *dst = &state_edge_data[s][i];
-            memcpy(dst->call_count, saved_data.call_count, sizeof(dst->call_count));
-            memcpy(dst->min_ns, saved_data.min_ns, sizeof(dst->min_ns));
-            memcpy(dst->max_ns, saved_data.max_ns, sizeof(dst->max_ns));
-            memcpy(dst->avg_ns, saved_data.avg_ns, sizeof(dst->avg_ns));
-            memcpy(dst->min_streak, saved_data.min_streak, sizeof(dst->min_streak));
-            memcpy(dst->max_streak, saved_data.max_streak, sizeof(dst->max_streak));
-            memcpy(dst->count, saved_data.count, sizeof(dst->count));
         }
     }
 
@@ -332,19 +337,8 @@ static void save_state_edge_data() {
 
         // Write state data for this function
         for (int s = 0; s < NUM_STATES; s++) {
-            struct func_state_edges *edges = &state_edge_data[s][i];
-            struct func_state_edges_saved saved_data;
-
-            // Manual copy from state_edge_data[s][i] to saved_data
-            memcpy(saved_data.call_count, edges->call_count, sizeof(saved_data.call_count));
-            memcpy(saved_data.min_ns, edges->min_ns, sizeof(saved_data.min_ns));
-            memcpy(saved_data.max_ns, edges->max_ns, sizeof(saved_data.max_ns));
-            memcpy(saved_data.avg_ns, edges->avg_ns, sizeof(saved_data.avg_ns));
-            memcpy(saved_data.min_streak, edges->min_streak, sizeof(saved_data.min_streak));
-            memcpy(saved_data.max_streak, edges->max_streak, sizeof(saved_data.max_streak));
-            memcpy(saved_data.count, edges->count, sizeof(saved_data.count));
-
-            if (fwrite(&saved_data, sizeof(struct func_state_edges_saved), 1, f) != 1) {
+            // Write directly from the source structure
+            if (fwrite(&state_edge_data[s][i], sizeof(struct func_state_edges), 1, f) != 1) {
                 fprintf(stderr, "Error writing state edge data for func_id %d, state %d to '%s'. File may be corrupted.\\n", i, s, STATE_EDGE_FILE);
                 fclose(f);
                 return; // Stop writing on error
@@ -404,18 +398,12 @@ static void update_state_edges(int vm_state) { state_edges(vm_state, true); }
 
 static bool detect_system_state(int vm_state) { return state_edges(vm_state, false); }
 
-/* Called periodically (e.g., once per second, triggered by DEBUG_FUNC call) */
+/* Called periodically by the timer */
 void cpu_stats_per_second(void) {
     static int vm_state = STATE_AUTODETECT;
 
-    time_t current_time = time(NULL);
-    static time_t last_run_time = current_time;
-
-    if (current_time == last_run_time) return;
-    last_stats_print = current_time;
-
     cpu_stats_print_all();
     vm_state = get_system_state(vm_state);
-    update_state_edges(vm_state);
+    if (vm_state != STATE_AUTODETECT) update_state_edges(vm_state);
     reset_cpu_stats();
 }

@@ -40,7 +40,6 @@ struct debug_counters *find_counters_array(const char *func_name);
     do { \
         if (!counters) counters = find_counters_array(__func__); \
         if (counters) counters->call_count++; \
-        cpu_stats_per_second(); \
     } while (0)
 
 // TODO - cpu_stats_per_second() probably better called from a timer?

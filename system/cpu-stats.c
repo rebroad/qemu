@@ -49,6 +49,7 @@ struct state_edge_file_header {
 
 // Global variables for debug counters
 int next_func_id = 0;
+struct debug_counters *counters_array = NULL; // Memory allocated on first use
 
 // Global variables for state edges
 struct func_state_edges state_edge_data[NUM_STATES][MAX_DEBUG_FUNCS] = {0}; // TODO dynamically allocate?
@@ -309,7 +310,7 @@ static void load_state_edge_data(void) {
 static void save_state_edge_data() {
     FILE *f = fopen(STATE_EDGE_FILE, "wb");
     if (!f) {
-        perror("Error opening state edge file for writing");
+        perror("Could not create state edge file for writing");
         return;
     }
 

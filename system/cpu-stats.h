@@ -29,7 +29,7 @@ struct debug_counters {
 };
 
 /* Global variables for debug counters */
-struct debug_counters *counters_array = NULL; // Memory allocated on first use
+extern struct debug_counters *counters_array; // Memory allocated on first use
 
 void cpu_stats_per_second(void);
 struct debug_counters *find_counters_array(const char *func_name);

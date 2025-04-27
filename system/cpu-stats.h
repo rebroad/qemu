@@ -14,7 +14,7 @@
 struct debug_counters {
     const char *func_name;
     int call_count;
-    int count[2]; // True & false
+    int count[2]; // False=0, True=1
 
     /* Streak tracking */
     int current_streak[2];
@@ -30,7 +30,6 @@ struct debug_counters {
 
 /* Global variables for debug counters */
 struct debug_counters *counters_array = NULL; // Memory allocated on first use
-int next_func_id = 0;
 
 void cpu_stats_per_second(void);
 struct debug_counters *find_counters_array(const char *func_name);
@@ -39,16 +38,12 @@ struct debug_counters *find_counters_array(const char *func_name);
 #define DEBUG_FUNC() \
     static struct debug_counters *counters = NULL; \
     do { \
-        if (!counters) { \
-            if (next_func_id++ <= MAX_DEBUG_FUNCS) { \
-                if (!counters_array) \
-                    counters_array = g_new0(struct debug_counters, MAX_DEBUG_FUNCS); \
-                counters = find_counters_array(__func__); \
-            } \
-        } \
+        if (!counters) counters = find_counters_array(__func__); \
         if (counters) counters->call_count++; \
         cpu_stats_per_second(); \
     } while (0)
+
+// TODO - cpu_stats_per_second() probably better called from a timer?
 
 /* Helper macros to track return values with timing */
 #define DEBUG_RETURN(n) do { \

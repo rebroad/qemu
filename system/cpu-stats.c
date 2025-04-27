@@ -1,6 +1,6 @@
 #include <string.h>
 #include <inttypes.h>
-#include <limits.h> // For UINT64_MAX, INT_MAX
+#include <limits.h>
 #include "cpu-stats.h"
 
 #define STATE_EDGE_FILE "state_edges.dat"
@@ -8,15 +8,15 @@
 #define STATE_EDGE_MAGIC 0xCPU57A75 // Magic number for file format
 #define STATE_EDGE_VERSION 1        // File format version
 
-/* System state flags */
+// System state flags
 #define STATE_AUTODETECT  -1
 #define STATE_PROM_IDLE   0
 #define STATE_OS_IDLE     1
 #define STATE_SHUTDOWN    2
 #define NUM_STATES        3  // PROM_IDLE, OS_IDLE, SHUTDOWN
 
-/* Structure to hold the min/max edges for counters per function */
-/* This structure is used both in the save file and runtime */
+// Structure to hold the min/max edges for counters per function
+// This structure is used both in the save file and runtime
 struct func_state_edges {
     char func_name[MAX_FUNC_NAME_LEN]; // Function name associated with these edges
     // Format: stat[true/false][min/max]
@@ -26,33 +26,37 @@ struct func_state_edges {
     int min_streak[2][2];
     int max_streak[2][2];
     int count[2][2]; // Min/Max observed value for count[0/1]
-};
+} func_edges[MAX_DEBUG_FUNCS];
 
-/* Structure to hold edges for all functions within a specific state */
-struct state_edges {
-    // Note: func_name is now part of func_state_edges
-    struct func_state_edges func_edges[MAX_DEBUG_FUNCS];
-};
-
-/* Header structure for the state edge file */
+// Header structure for the state edge file
 struct state_edge_file_header {
     uint32_t magic;
     uint32_t version;
     uint32_t num_funcs_saved;
 };
 
-/* Global variables for state edges */
+// Global variables for debug counters
+int next_func_id = 0;
+
+// Global variables for state edges
 struct state_edges state_edge_data[NUM_STATES];
-bool state_edges_loaded = false;
+
+// Globals used during loading/mapping
+struct func_state_edges *g_loaded_edge_blocks = NULL; // TODO do we need this?
+int g_num_funcs_saved = 0; // TODO - does this have to be global?
+// Map func name -> saved_idx (index in g_loaded_edge_blocks)
+GHashTable *g_func_name_to_saved_idx_map = NULL;
+// Map func_name -> runtime func_id (index in counters_array/state_edge_data)
+GHashTable *g_runtime_func_map = NULL; // TODO - we don't need a second hashtable!
 
 // Placeholders for system state variables - TODO: Might not need these
 bool idle_prom = false;
 bool idle_os = false;
 bool shutdown_indicated = false;
 
-/* Function to print debug statistics */
+// Function to print debug statistics
 void cpu_stats_print_all(void) {
-    if (next_func_id > MAX_FUNCS)
+    if (next_func_id >= MAX_FUNCS)
         fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_FUNCS);
 
     printf("\nDebug Statistics Summary:\n");
@@ -81,6 +85,81 @@ void cpu_stats_print_all(void) {
     }
 }
 
+// Find (or create) the counters struct for a function
+struct debug_counters *find_counters_array(const char *func_name) {
+    if (next_func_id >= MAX_DEBUG_FUNCS) return NULL;
+
+    // Ensure the main counters array is allocated
+    if (!counters_array) {
+        counters_array = g_new0(struct debug_counters, MAX_DEBUG_FUNCS);
+        load_state_edge_data();
+    }
+
+    gpointer func_id_ptr = NULL;
+    int func_id = -1;
+    // Check the map populated by load_state_edge_data
+    if (g_func_name_to_saved_idx_map &&
+        g_hash_table_lookup_extended(g_func_name_to_saved_idx_map, func_name, NULL, &saved_idx_ptr))
+    {
+        func_id = GPOINTER_TO_INT(saved_idx_ptr);
+    } else
+        func_id = next_func_id++; // Assign the next available ID
+    // TODO - need to ensure next_func_id is updated in load_state_edge_data()
+
+    // Get pointer and set name
+    struct debug_counters *counters = &counters_array[func_id];
+    counters->func_name = func_name; // Use the pointer directly
+
+    // Add to runtime map
+    g_hash_table_insert(g_runtime_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
+
+    // Initialize runtime edges (either from loaded data or defaults)
+    for (int s = 0; s < NUM_STATES; s++) {
+        struct func_state_edges *rt_edges = &state_edge_data[s].func_edges[func_id];
+        if (g_loaded_edge_blocks && func_id == -1) {
+            // Copy loaded data from the saved block for this function name and state
+            // Calculate offset in the flat loaded block array
+            memcpy(rt_edges,
+                   &g_loaded_edge_blocks[saved_idx * NUM_STATES + s],
+                   sizeof(struct func_state_edges));
+            // Ensure func_name is correct (should be, but belt-and-suspenders)
+             if (strncmp(rt_edges->func_name, func_name, MAX_FUNC_NAME_LEN) != 0) {
+                 fprintf(stderr, "Warning: Mismatched func_name during mapping ('%s' vs '%s')!\n", rt_edges->func_name, func_name);
+                 // Copy correct name just in case
+                  strncpy(rt_edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
+                  rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\\0';
+             }
+
+        } else {
+            // New function (not in save file) or data load failed: Initialize runtime edges
+            memset(rt_edges, 0, sizeof(struct func_state_edges)); // Zero out structure
+            strncpy(rt_edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
+            rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\\0';
+
+            // Initialize min edges to max possible value, max edges to 0
+            // This ensures the first update correctly sets the initial bounds.
+            for (int j = 0; j < 2; j++) {
+                rt_edges->min_ns[j][EDGE_MIN] = UINT64_MAX;
+                rt_edges->max_ns[j][EDGE_MIN] = UINT64_MAX;
+                rt_edges->avg_ns[j][EDGE_MIN] = UINT64_MAX;
+                rt_edges->min_streak[j][EDGE_MIN] = INT_MAX;
+                rt_edges->max_streak[j][EDGE_MIN] = INT_MAX;
+                rt_edges->count[j][EDGE_MIN] = INT_MAX;
+
+                // Max values are already 0 from memset
+                 rt_edges->min_ns[j][EDGE_MAX] = 0;
+                 rt_edges->max_ns[j][EDGE_MAX] = 0;
+                 rt_edges->avg_ns[j][EDGE_MAX] = 0;
+                 rt_edges->min_streak[j][EDGE_MAX] = 0;
+                 rt_edges->max_streak[j][EDGE_MAX] = 0;
+                 rt_edges->count[j][EDGE_MAX] = 0;
+            }
+        }
+    }
+
+    return counters;
+}
+
 static int get_system_state(current_state) {
     int new_state = STATE_AUTODETECT;
     FILE *state_file = fopen("vm_state.txt", "r");
@@ -90,7 +169,7 @@ static int get_system_state(current_state) {
         fclose(state_file);
     }
 
-	return new_state;
+    return new_state;
 }
 
 void reset_cpu_stats(void) {
@@ -114,7 +193,6 @@ void load_state_edge_data() {
         // Let's handle it in update: if a min edge is 0, the first value becomes the min.
         // Max values start at 0, first value becomes max.
         printf("State edge file '%s' not found. Initializing defaults.\n", STATE_EDGE_FILE);
-        state_edges_loaded = true; // Mark as loaded even if initialized
         return;
     }
     // Read the entire structure
@@ -127,18 +205,11 @@ void load_state_edge_data() {
                 STATE_EDGE_FILE, read_count, NUM_STATES);
         // Reset to defaults if read failed or was partial
         memset(state_edge_data, 0, sizeof(state_edge_data));
-    } else {
-        printf("Loaded state edge data from '%s'.\n", STATE_EDGE_FILE);
-    }
-    state_edges_loaded = true;
+    } else printf("Loaded state edge data from '%s'.\n", STATE_EDGE_FILE);
 }
 
 /* Save state edge data to file */
 void save_state_edge_data() {
-    if (!state_edges_loaded) {
-        fprintf(stderr, "Error: Cannot save state edges, data not loaded/initialized.\n");
-        return;
-    }
     FILE *f = fopen(STATE_EDGE_FILE, "wb");
     if (!f) {
         perror("Error opening state edge file for writing");
@@ -158,10 +229,6 @@ void save_state_edge_data() {
 void update_state_edges(int vm_state) {
     if (vm_state < 0 || vm_state >= NUM_STATES) {
         return; // Ignore invalid states like AUTODETECT
-    }
-
-    if (!state_edges_loaded) {
-        load_state_edge_data();
     }
 
     // TODO this function need to look at all the current counters for all the functions and create/update a template (for all those functions) of max and min values for each of the counters.
@@ -229,10 +296,6 @@ bool is_within_state_edges(int vm_state) {
         return true; // Or false? Let's return true to not trigger warnings for invalid states.
     }
 
-    if (!state_edges_loaded) {
-        load_state_edge_data();
-    }
-
     struct state_edges *current_state_edges = &state_edge_data[vm_state];
 
     for (int i = 0; i < next_func_id; i++) {
@@ -262,13 +325,6 @@ bool is_within_state_edges(int vm_state) {
 
 void cpu_stats_per_second(void) {
     static int vm_state = STATE_AUTODETECT;
-    static bool first_run = true; // Flag for initial load
-
-    // Load state edges on the very first call
-    if (first_run && !state_edges_loaded) {
-        load_state_edge_data();
-        first_run = false;
-    }
 
     time_t current_time = time(NULL);
     static time_t last_stats_print = current_time;
@@ -278,6 +334,6 @@ void cpu_stats_per_second(void) {
 
     cpu_stats_print_all();
     vm_state = get_system_state(vm_state);
-	update_state_edges(vm_state);
+    update_state_edges(vm_state);
     reset_cpu_stats();
 }

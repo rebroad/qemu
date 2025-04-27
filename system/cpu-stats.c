@@ -43,18 +43,14 @@ bool state_edges_loaded = false;
 // Globals used during loading/mapping
 GHashTable *g_func_map = NULL;
 
-// Placeholders for system state variables - TODO: Might not need these
-bool idle_prom = false;
-bool idle_os = false;
-bool shutdown_indicated = false;
-
 // Function to print debug statistics
-void cpu_stats_print_all(void) {
+static void cpu_stats_print_all(void) {
     if (next_func_id >= MAX_FUNCS)
         fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_FUNCS);
 
+    // TODO set idle_prom, idle_os, shutdown_indicated bools by calling detect_system_state()
+
     printf("\nDebug Statistics Summary:\n");
-    // TODO report is_on_battery, idle_prom, idle_os, shutdown_indicated
     printf("System States: Battery=%s, PROM Idle=%s, OS Idle=%s, Shutdown=%s\n",
            is_on_battery ? "On" : "Off",
            idle_prom ? "Yes" : "No",
@@ -128,14 +124,18 @@ struct debug_counters *find_counters_array(const char *func_name) {
     return &counters_array[func_id];
 }
 
-static int get_system_state(current_state) {
-    int new_state = STATE_AUTODETECT;
+/* Get system state from external source (e.g., file) */
+static int get_system_state(int current_state) {
+    int new_state = STATE_AUTODETECT; // Default to autodetect if file not found/read
+    // TODO: Define vm_state.txt path properly
     FILE *state_file = fopen("vm_state.txt", "r");
     if (state_file) {
-        if (fscanf(state_file, "%d", &new_state) == 1 && (new_state != current_state))
-            qemu_log("State change detected: %d -> %d\n", current_state, new_state);
+        fscanf(state_file, "%d", &new_state);
         fclose(state_file);
     }
+
+    if (new_state != current_state)
+        qemu_log("State change detected: %d -> %d\n", current_state, new_state);
 
     return new_state;
 }
@@ -279,23 +279,23 @@ static void save_state_edge_data() {
                 blocks_written, expected_blocks);
 }
 
-#define UPDATE_EDGE(edge, current_val) \
+#define CHECK_EDGE(edge, current_val) \
 	do { \
 		if (current_val < edge[0]) { \
-            edge[0] = current_val; \
-            updated = true; \
+            if (update) edge[0] = current_val; \
+            outside = true; \
         } \
 		if (current_val > edge[1]) { \
-            edge[1] = current_val; \
-            updated = true; \
+            if (update) edge[1] = current_val; \
+            outside = true; \
         } \
 	} while (0)
 
 /* Update the min/max edges for the given state based on current counters */
-static void update_state_edges(int vm_state) {
-    if (vm_state < 0 || vm_state >= NUM_STATES) return;
+static bool state_edges(int vm_state, bool update) {
+    if (vm_state < 0 || vm_state >= NUM_STATES) return false;
 
-    bool updated = false;
+    bool outside = false;
     struct state_edges *state_edges = &state_edge_data[vm_state];
 
     for (int i = 0; i < next_func_id; i++) {
@@ -304,13 +304,11 @@ static void update_state_edges(int vm_state) {
 
         // Ensure names match - defensive check
         if (strncmp(edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN)) {
-
-            fprintf(stderr, "Warning: Name mismatch in update_state_edges for index %d ('%s' vs '%s')\n",
-                     i, func_edges->func_name, counters->func_name);
+            fprintf(stderr, "Warning: Name mismatch in state_edges for index %d ('%s' vs '%s')\n",
+                     i, edges->func_name, counters->func_name);
             // Ensure name is correct in the edge structure
-            strncpy(func_edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN - 1);
-            func_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
-            // continue; // Maybe skip update if names mismatched? Or just fix name? Let's fix and continue.
+            strncpy(edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN - 1);
+            edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
         }
 
         for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
@@ -318,65 +316,34 @@ static void update_state_edges(int vm_state) {
             if (counters->count[j] > 0) {
                 // Calculate average for this interval
                 uint64_t avg_ns = counters->total_ns[j] / counters->count[j];
-
-                // Update edges using helper functions
-                UPDATE_EDGE(edges->min_ns[j], counters->min_ns[j]);
-                UPDATE_EDGE(edges->max_ns[j], counters->max_ns[j]);
-                UPDATE_EDGE(edges->avg_ns[j], avg_ns);
-                UPDATE_EDGE(edges->min_streak[j], counters->min_streak[j]);
-                UPDATE_EDGE(edges->max_streak[j], counters->max_streak[j]);
-                UPDATE_EDGE(edges->count[j], counters->count[j]);
+                CHECK_EDGE(edges->min_ns[j], counters->min_ns[j]);
+                CHECK_EDGE(edges->max_ns[j], counters->max_ns[j]);
+                CHECK_EDGE(edges->avg_ns[j], avg_ns);
+                CHECK_EDGE(edges->min_streak[j], counters->min_streak[j]);
+                CHECK_EDGE(edges->max_streak[j], counters->max_streak[j]);
+                CHECK_EDGE(edges->count[j], counters->count[j]);
             }
         }
     }
 
     // Save the data file if any edges were updated
-    if (updated) save_state_edge_data();
+    if (update && outside) save_state_edge_data();
+
+    return !outside;
 }
 
-/* Check if current stats fall within the defined edges for the given state */
-static bool is_within_state_edges(int vm_state) {
-    if (vm_state < 0 || vm_state >= NUM_STATES) return false;
+static void update_state_edges(int vm_state) { state_edges(vm_state, true); }
 
-    struct state_edges *current_state_edges = &state_edge_data[vm_state];
+static bool detect_system_state(int vm_state) { return state_edges(vm_state, false); }
 
-    for (int i = 0; i < next_func_id; i++) {
-        struct debug_counters *counters = &counters_array[i];
-        struct func_state_edges *func_edges = &current_state_edges->func_edges[i];
-
-        // Defensive name check - TODO - can remove after testing
-        if (strncmp(func_edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN) != 0) {
-            fprintf(stderr, "Warning: Name mismatch in is_within_state_edges for index %d ('%s' vs '%s')\n", i, func_edges->func_name, counters->func_name);
-            continue; // Skip check if names don't match
-        }
-
-        for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
-            if (!counters->count[j]) continue; // Avoid division by zero
-            uint64_t avg_ns = counters->total_ns[j] / counters->count[j];
-            // Check if current values are outside the known min/max window
-            // Note: Use func_edges->stat[j][0] and func_edges->stat[j][1]
-            if (counters->min_ns[j] < func_edges->min_ns[j][0] || counters->min_ns[j] > func_edges->min_ns[j][1] ||
-                counters->max_ns[j] < func_edges->max_ns[j][0] || counters->max_ns[j] > func_edges->max_ns[j][1] ||
-                avg_ns < func_edges->avg_ns[j][0] || avg_ns > func_edges->avg_ns[j][1] ||
-                counters->min_streak[j] < func_edges->min_streak[j][0] || counters->min_streak[j] > func_edges->min_streak[j][1] ||
-                counters->max_streak[j] < func_edges->max_streak[j][0] || counters->max_streak[j] > func_edges->max_streak[j][1] ||
-                counters->count[j] < func_edges->count[j][0] || counters->count[j] > func_edges->count[j][1])
-            {
-                return false; // Found a value outside the established edges
-            }
-        }
-    }
-
-    return true; // All current stats are within the known edges for this state
-}
-
+/* Called periodically (e.g., once per second, triggered by DEBUG_FUNC call) */
 void cpu_stats_per_second(void) {
     static int vm_state = STATE_AUTODETECT;
 
     time_t current_time = time(NULL);
-    static time_t last_stats_print = current_time;
+    static time_t last_run_time = current_time;
 
-    if (current_time == last_stats_print) return;
+    if (current_time == last_run_time) return;
     last_stats_print = current_time;
 
     cpu_stats_print_all();

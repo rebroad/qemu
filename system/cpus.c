@@ -200,7 +200,7 @@ void cpu_synchronize_pre_loadvm(CPUState *cpu)
 
 bool cpus_are_resettable(void)
 {
-    // REBTODO - surely this function never returns false!?
+    // TODO - surely this function never returns false!?
     DEBUG_FUNC();
     if (cpus_accel->cpus_are_resettable) {
         DEBUG_RETURN(cpus_accel->cpus_are_resettable());
@@ -229,8 +229,9 @@ int64_t cpus_get_virtual_clock(void)
      * XXX
      */
     DEBUG_FUNC();
-    if (cpus_accel && cpus_accel->get_virtual_clock)
+    if (cpus_accel && cpus_accel->get_virtual_clock) {
         return cpus_accel->get_virtual_clock();
+    }
     return cpu_get_clock();
 }
 
@@ -238,7 +239,8 @@ int64_t cpus_get_virtual_clock(void)
  * Signal the new virtual time to the accelerator. This is only needed
  * by accelerators that need to track the changes as we warp time.
  */
-void cpus_set_virtual_clock(int64_t new_time) {
+void cpus_set_virtual_clock(int64_t new_time)
+{
     DEBUG_FUNC(); // TODO - might need to tweak clock is we add sleeping
     if (cpus_accel && cpus_accel->set_virtual_clock) {
         cpus_accel->set_virtual_clock(new_time);
@@ -250,7 +252,8 @@ void cpus_set_virtual_clock(int64_t new_time) {
  * icount is active, cpus_get_elapsed_ticks() uses units of the host CPU cycle
  * counter.
  */
-int64_t cpus_get_elapsed_ticks(void) {
+int64_t cpus_get_elapsed_ticks(void)
+{
     DEBUG_FUNC();
     if (cpus_accel->get_elapsed_ticks) {
         return cpus_accel->get_elapsed_ticks();

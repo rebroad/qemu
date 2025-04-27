@@ -14,6 +14,7 @@
 #define STATE_OS_IDLE     1
 #define STATE_SHUTDOWN    2
 #define NUM_STATES        3  // PROM_IDLE, OS_IDLE, SHUTDOWN
+// TODO also for each of the states above (aside from AUTODETECT) we need to split them into 2 (one when on battery and one when plugged in).
 
 // Structure to hold the min/max edges for counters per function
 // This structure is used both in the save file and runtime
@@ -35,8 +36,10 @@ struct state_edge_file_header {
     uint32_t num_funcs_saved;
 };
 
-// Global variables
+// Global variables for debug counters
 int next_func_id = 0;
+
+// Global variables for state edges
 struct func_state_edges state_edge_data[NUM_STATES] = {0};
 bool state_edges_loaded = false;
 
@@ -86,7 +89,6 @@ struct debug_counters *find_counters_array(const char *func_name) {
                                            NULL,   // No need to free keys (__func__)
                                            NULL);  // No need to free values (int)
         load_state_edge_data();
-                ensure_maps_initialized();
     }
 
     gpointer func_id_ptr = NULL;
@@ -280,16 +282,16 @@ static void save_state_edge_data() {
 }
 
 #define CHECK_EDGE(edge, current_val) \
-	do { \
-		if (current_val < edge[0]) { \
+    do { \
+        if (current_val < edge[0]) { \
             if (update) edge[0] = current_val; \
             outside = true; \
         } \
-		if (current_val > edge[1]) { \
+        if (current_val > edge[1]) { \
             if (update) edge[1] = current_val; \
             outside = true; \
         } \
-	} while (0)
+    } while (0)
 
 /* Update the min/max edges for the given state based on current counters */
 static bool state_edges(int vm_state, bool update) {

@@ -5,7 +5,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <glib.h> // For g_new0
+#include <glib.h> // For g_new0, g_error
 #include <stdbool.h>
 
 #define MAX_DEBUG_FUNCS 128  /* Maximum number of functions we'll track */
@@ -31,35 +31,26 @@ struct debug_counters {
 /* Global variables for debug counters */
 struct debug_counters *counters_array = NULL; // Memory allocated on first use
 
+/* Function declarations */
 void cpu_stats_per_second(void);
 struct debug_counters *find_counters_array(const char *func_name);
 
-/* Debug function macro to collect statistics */
+/* Prototype for the internal TLS helper function (defined in cpu-stats.c) */
+struct debug_counters *_cpu_stats_get_tls_counters(const char *current_func_name);
+
+/* --- Macros --- */
+
+/* Debug function macro - calls helper */
 #define DEBUG_FUNC() \
-    /* Declare shared TLS cache variables for this function scope */ \
-    static __thread struct debug_counters *_tl_counters = NULL; \
-    static __thread const char *_tl_func_name = NULL; \
-    /* Actual work in a do-while(0) block */ \
     do { \
-        if (_tl_counters == NULL || _tl_func_name != __func__) { \
-            _tl_counters = find_counters_array(__func__); \
-            _tl_func_name = __func__; \
-        } \
-        if (_tl_counters) _tl_counters->call_count++; \
+        struct debug_counters *_counters = _cpu_stats_get_tls_counters(__func__); \
+        if (_counters) _counters->call_count++; \
     } while (0)
 
-/* Helper macros to track return values with timing */
+/* Helper macro for return values - calls helper */
 #define DEBUG_RETURN(n) \
-    /* Ensure shared TLS cache variables are declared (compiler handles duplicates) */ \
-    static __thread struct debug_counters *_tl_counters = NULL; \
-    static __thread const char *_tl_func_name = NULL; \
-    /* Actual work in a do-while(0) block */ \
     do { \
-        if (_tl_counters == NULL || _tl_func_name != __func__) { \
-            _tl_counters = find_counters_array(__func__); \
-            _tl_func_name = __func__; \
-        } \
-        struct debug_counters *_counters = _tl_counters; \
+        struct debug_counters *_counters = _cpu_stats_get_tls_counters(__func__); \
         if (_counters) { \
             struct timespec current_ts; \
             clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &current_ts); \

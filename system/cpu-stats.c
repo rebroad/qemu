@@ -58,6 +58,27 @@ bool state_edges_loaded = false;
 GHashTable *g_func_map = NULL;
 static QEMUTimer *cpu_stats_timer = NULL; // Timer for periodic stats update
 
+/* TLS Helper Function (declared in header) */
+struct debug_counters *_cpu_stats_get_tls_counters(const char *current_func_name)
+{
+    static __thread struct debug_counters *_tl_counters = NULL;
+    static __thread const char *_tl_func_name = NULL;
+
+    if (_tl_counters == NULL) {
+        /* First call in this thread for any function */
+        _tl_counters = find_counters_array(current_func_name);
+        _tl_func_name = current_func_name;
+    } else if (_tl_func_name != current_func_name) {
+        /* Cached function is different from current - Abort as per requirement */
+        g_error("cpu-stats: Unexpected function change in TLS cache. Expected '%s', got '%s'. Aborting.",
+                _tl_func_name, current_func_name);
+        /* g_error doesn't return, but to be explicit: */
+        /* return NULL; */ /* Or handle differently if aborting is too harsh */
+    }
+    /* Cache is valid for the current function */
+    return _tl_counters;
+}
+
 static bool is_on_battery(void) {
     FILE *f = fopen("/sys/class/power_supply/ACAD/online", "r");
     if (!f) return false;

@@ -55,10 +55,9 @@ struct debug_counters *find_counters_array(const char *func_name);
             uint64_t interval = (current_ts.tv_sec - counters->last_time[x].tv_sec) * 1000000000ULL + \
                                (current_ts.tv_nsec - counters->last_time[x].tv_nsec); \
             counters->total_ns[x] += interval; \
-            if (interval < counters->min_ns[x] || counters->min_ns[x] == 0) \
+            if (interval < counters->min_ns[x] || !counters->min_ns[x]) \
                 counters->min_ns[x] = interval; \
-            if (interval > counters->max_ns[x]) \
-                counters->max_ns[x] = interval; \
+            if (interval > counters->max_ns[x]) counters->max_ns[x] = interval; \
         } \
         counters->last_time[x] = current_ts; \
         counters->count[x]++; \

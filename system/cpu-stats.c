@@ -94,37 +94,36 @@ struct debug_counters *find_counters_array(const char *func_name) {
     }
 
     gpointer func_id_ptr = NULL;
-    int func_id = -1;
+    int func_id = -1; bool new_func = false;
     // Check the map populated by load_state_edge_data
     if (state_edges_loaded &&
         g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
     {
         func_id = GPOINTER_TO_INT(func_id_ptr);
+    } else {
+        new_func = true;
+        func_id = next_func_id++; // Assign the next available ID
     }
 
     // Initialize edges
     for (int s = 0; s < NUM_STATES; s++) {
         struct func_state_edges *edges = &state_edge_data[s].func_edges[func_id];
-        if (func_id == -1) {
+        if (new_func) {
             // New function (not in save file) or data load failed: Initialize runtime edges
             memset(edges, 0, sizeof(struct func_state_edges)); // Zero out structure
             strncpy(edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
             rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
 
             for (int j = 0; j < 2; j++) {
-                edges->min_ns[j][EDGE_MIN] = UINT64_MAX;
-                edges->max_ns[j][EDGE_MIN] = UINT64_MAX;
-                edges->avg_ns[j][EDGE_MIN] = UINT64_MAX;
-                edges->min_streak[j][EDGE_MIN] = INT_MAX;
-                edges->max_streak[j][EDGE_MIN] = INT_MAX;
-                edges->count[j][EDGE_MIN] = INT_MAX;
+                edges->min_ns[j][0] = UINT64_MAX;
+                edges->max_ns[j][0] = UINT64_MAX;
+                edges->avg_ns[j][0] = UINT64_MAX;
+                edges->min_streak[j][0] = INT_MAX;
+                edges->max_streak[j][0] = INT_MAX;
+                edges->count[j][0] = INT_MAX;
             }
         }
     }
-
-    if (func_id < 0)
-        func_id = next_func_id++; // Assign the next available ID
-    // TODO - need to ensure next_func_id is updated in load_state_edge_data()
 
     return &counters_array[func_id];
 }
@@ -141,7 +140,7 @@ static int get_system_state(current_state) {
     return new_state;
 }
 
-void reset_cpu_stats(void) {
+static void reset_cpu_stats(void) {
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
         it->call_count = 0;
@@ -234,8 +233,8 @@ static void load_state_edge_data(void) {
     state_edges_loaded = true;
 }
 
-/* Save state edge data to file */
-void save_state_edge_data() {
+/* Save state edge data to binary file */
+static void save_state_edge_data() {
     FILE *f = fopen(STATE_EDGE_FILE, "wb");
     if (!f) {
         perror("Error opening state edge file for writing");
@@ -280,18 +279,17 @@ void save_state_edge_data() {
                 blocks_written, expected_blocks);
 }
 
-// Inline helper to update min/max for uint64_t edges
-static inline void update_u64_edge(uint64_t edge[2], uint64_t current_val) {
-    if (current_val < edge[EDGE_MIN]) edge[EDGE_MIN] = current_val;
-    if (current_val > edge[EDGE_MAX]) edge[EDGE_MAX] = current_val;
-}
-
-// Inline helper to update min/max for int edges
-static inline void update_int_edge(int edge[2], int current_val) {
-    if (current_val < edge[EDGE_MIN]) edge[EDGE_MIN] = current_val;
-    if (current_val > edge[EDGE_MAX]) edge[EDGE_MAX] = current_val;
-}
-
+#define UPDATE_EDGE(edge, current_val) \
+	do { \
+		if (current_val < edge[0]) { \
+            edge[0] = current_val; \
+            updated = true; \
+        } \
+		if (current_val > edge[1]) { \
+            edge[1] = current_val; \
+            updated = true; \
+        } \
+	} while (0)
 
 /* Update the min/max edges for the given state based on current counters */
 static void update_state_edges(int vm_state) {
@@ -315,30 +313,30 @@ static void update_state_edges(int vm_state) {
             // continue; // Maybe skip update if names mismatched? Or just fix name? Let's fix and continue.
         }
 
-        for (int j = 0; j < 2; j++) { // True and False stats
-            // TODO - count itself also need to have edges
-            uint64_t avg_ns = counters->count[j] ? counters->total_ns[j] / counters->count[j] : -1;
+        for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
+            // Only update edges if the counter was actually hit in this interval
+            if (counters->count[j] > 0) {
+                // Calculate average for this interval
+                uint64_t avg_ns = counters->total_ns[j] / counters->count[j];
 
-                        // TODO loop through min/max (0/1) array for below
-            // Store previous values to check if updated
-            // TODO - include count edges in the check
-                        // TODO - this function!
+                // Update edges using helper functions
+                UPDATE_EDGE(edges->min_ns[j], counters->min_ns[j]);
+                UPDATE_EDGE(edges->max_ns[j], counters->max_ns[j]);
+                UPDATE_EDGE(edges->avg_ns[j], avg_ns);
+                UPDATE_EDGE(edges->min_streak[j], counters->min_streak[j]);
+                UPDATE_EDGE(edges->max_streak[j], counters->max_streak[j]);
+                UPDATE_EDGE(edges->count[j], counters->count[j]);
             }
         }
     }
 
-    // Save the data if any edges were updated
-    if (updated) {
-        save_state_edge_data();
-    }
+    // Save the data file if any edges were updated
+    if (updated) save_state_edge_data();
 }
 
 /* Check if current stats fall within the defined edges for the given state */
-bool is_within_state_edges(int vm_state) {
-    if (vm_state < 0 || vm_state >= NUM_STATES) {
-        // printf("Cannot check edges for invalid state: %d\n", vm_state);
-        return true; // Or false? Let's return true to not trigger warnings for invalid states.
-    }
+static bool is_within_state_edges(int vm_state) {
+    if (vm_state < 0 || vm_state >= NUM_STATES) return false;
 
     struct state_edges *current_state_edges = &state_edge_data[vm_state];
 
@@ -346,19 +344,24 @@ bool is_within_state_edges(int vm_state) {
         struct debug_counters *counters = &counters_array[i];
         struct func_state_edges *func_edges = &current_state_edges->func_edges[i];
 
-        for (int j = 0; j < 2; j++) { // True and False stats
+        // Defensive name check - TODO - can remove after testing
+        if (strncmp(func_edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN) != 0) {
+            fprintf(stderr, "Warning: Name mismatch in is_within_state_edges for index %d ('%s' vs '%s')\n", i, func_edges->func_name, counters->func_name);
+            continue; // Skip check if names don't match
+        }
+
+        for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
+            if (!counters->count[j]) continue; // Avoid division by zero
             uint64_t avg_ns = counters->total_ns[j] / counters->count[j];
-            // Check if current values are outside the known min/max window for this state
-            // Note: We compare against the min/max observed values for each stat (e.g., min_ns_min and min_ns_max)
-            if (counters->min_ns[j] < func_edges->min_ns_min[j] || counters->min_ns[j] > func_edges->min_ns_max[j] ||
-                counters->max_ns[j] < func_edges->max_ns_min[j] || counters->max_ns[j] > func_edges->max_ns_max[j] ||
-                avg_ns < func_edges->avg_ns_min[j] || avg_ns > func_edges->avg_ns_max[j] ||
-                counters->min_streak[j] < func_edges->min_streak_min[j] || counters->min_streak[j] > func_edges->min_streak_max[j] ||
-                counters->max_streak[j] < func_edges->max_streak_min[j] || counters->max_streak[j] > func_edges->max_streak_max[j])
+            // Check if current values are outside the known min/max window
+            // Note: Use func_edges->stat[j][0] and func_edges->stat[j][1]
+            if (counters->min_ns[j] < func_edges->min_ns[j][0] || counters->min_ns[j] > func_edges->min_ns[j][1] ||
+                counters->max_ns[j] < func_edges->max_ns[j][0] || counters->max_ns[j] > func_edges->max_ns[j][1] ||
+                avg_ns < func_edges->avg_ns[j][0] || avg_ns > func_edges->avg_ns[j][1] ||
+                counters->min_streak[j] < func_edges->min_streak[j][0] || counters->min_streak[j] > func_edges->min_streak[j][1] ||
+                counters->max_streak[j] < func_edges->max_streak[j][0] || counters->max_streak[j] > func_edges->max_streak[j][1] ||
+                counters->count[j] < func_edges->count[j][0] || counters->count[j] > func_edges->count[j][1])
             {
-                 // Log the specific counter that is out of bounds?
-                printf("Warning: Stat out of bounds for func '%s', state %d, type %d\n", counters->func_name, vm_state, j);
-                // Example detail: printf("  min_ns %lu not in [%lu, %lu]\n", counters->min_ns[j], func_edges->min_ns_min[j], func_edges->min_ns_max[j]);
                 return false; // Found a value outside the established edges
             }
         }

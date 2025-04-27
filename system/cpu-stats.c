@@ -42,12 +42,8 @@ int next_func_id = 0;
 struct state_edges state_edge_data[NUM_STATES];
 
 // Globals used during loading/mapping
-struct func_state_edges *g_loaded_edge_blocks = NULL; // TODO do we need this?
-int g_num_funcs_saved = 0; // TODO - does this have to be global?
-// Map func name -> saved_idx (index in g_loaded_edge_blocks)
-GHashTable *g_func_name_to_saved_idx_map = NULL;
+GHashTable *g_func_name_to_saved_data = NULL;
 // Map func_name -> runtime func_id (index in counters_array/state_edge_data)
-GHashTable *g_runtime_func_map = NULL; // TODO - we don't need a second hashtable!
 
 // Placeholders for system state variables - TODO: Might not need these
 bool idle_prom = false;
@@ -98,46 +94,21 @@ struct debug_counters *find_counters_array(const char *func_name) {
     gpointer func_id_ptr = NULL;
     int func_id = -1;
     // Check the map populated by load_state_edge_data
-    if (g_func_name_to_saved_idx_map &&
-        g_hash_table_lookup_extended(g_func_name_to_saved_idx_map, func_name, NULL, &saved_idx_ptr))
+    if (g_func_name_to_saved_data &&
+        g_hash_table_lookup_extended(g_func_name_to_saved_data, func_name, NULL, &saved_idx_ptr))
     {
         func_id = GPOINTER_TO_INT(saved_idx_ptr);
-    } else
-        func_id = next_func_id++; // Assign the next available ID
-    // TODO - need to ensure next_func_id is updated in load_state_edge_data()
-
-    // Get pointer and set name
-    struct debug_counters *counters = &counters_array[func_id];
-    counters->func_name = func_name; // Use the pointer directly
-
-    // Add to runtime map
-    g_hash_table_insert(g_runtime_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
+    }
 
     // Initialize runtime edges (either from loaded data or defaults)
     for (int s = 0; s < NUM_STATES; s++) {
         struct func_state_edges *rt_edges = &state_edge_data[s].func_edges[func_id];
-        if (g_loaded_edge_blocks && func_id == -1) {
-            // Copy loaded data from the saved block for this function name and state
-            // Calculate offset in the flat loaded block array
-            memcpy(rt_edges,
-                   &g_loaded_edge_blocks[saved_idx * NUM_STATES + s],
-                   sizeof(struct func_state_edges));
-            // Ensure func_name is correct (should be, but belt-and-suspenders)
-             if (strncmp(rt_edges->func_name, func_name, MAX_FUNC_NAME_LEN) != 0) {
-                 fprintf(stderr, "Warning: Mismatched func_name during mapping ('%s' vs '%s')!\n", rt_edges->func_name, func_name);
-                 // Copy correct name just in case
-                  strncpy(rt_edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
-                  rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\\0';
-             }
-
-        } else {
+        if (func_id == -1) {
             // New function (not in save file) or data load failed: Initialize runtime edges
             memset(rt_edges, 0, sizeof(struct func_state_edges)); // Zero out structure
             strncpy(rt_edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
             rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\\0';
 
-            // Initialize min edges to max possible value, max edges to 0
-            // This ensures the first update correctly sets the initial bounds.
             for (int j = 0; j < 2; j++) {
                 rt_edges->min_ns[j][EDGE_MIN] = UINT64_MAX;
                 rt_edges->max_ns[j][EDGE_MIN] = UINT64_MAX;
@@ -145,19 +116,15 @@ struct debug_counters *find_counters_array(const char *func_name) {
                 rt_edges->min_streak[j][EDGE_MIN] = INT_MAX;
                 rt_edges->max_streak[j][EDGE_MIN] = INT_MAX;
                 rt_edges->count[j][EDGE_MIN] = INT_MAX;
-
-                // Max values are already 0 from memset
-                 rt_edges->min_ns[j][EDGE_MAX] = 0;
-                 rt_edges->max_ns[j][EDGE_MAX] = 0;
-                 rt_edges->avg_ns[j][EDGE_MAX] = 0;
-                 rt_edges->min_streak[j][EDGE_MAX] = 0;
-                 rt_edges->max_streak[j][EDGE_MAX] = 0;
-                 rt_edges->count[j][EDGE_MAX] = 0;
             }
         }
     }
 
-    return counters;
+    if (func_id < 0)
+        func_id = next_func_id++; // Assign the next available ID
+    // TODO - need to ensure next_func_id is updated in load_state_edge_data()
+
+    return &counters_array[func_id];
 }
 
 static int get_system_state(current_state) {

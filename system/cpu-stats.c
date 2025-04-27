@@ -9,12 +9,21 @@
 #define STATE_EDGE_VERSION 1        // File format version
 
 // System state flags
-#define STATE_AUTODETECT  -1
-#define STATE_PROM_IDLE   0
-#define STATE_OS_IDLE     1
-#define STATE_SHUTDOWN    2
-#define NUM_STATES        3  // PROM_IDLE, OS_IDLE, SHUTDOWN
-// TODO also for each of the states above (aside from AUTODETECT) we need to split them into 2 (one when on battery and one when plugged in).
+#define STATE_AUTODETECT       -1
+#define STATE_PROM_IDLE        0
+#define STATE_OS_IDLE          1
+#define STATE_SHUTDOWN         2
+#define NUM_BASE_STATES        3
+
+// System state flags for AC and Battery
+#define STATE_PROM_IDLE_AC     (STATE_PROM_IDLE * 2)
+#define STATE_PROM_IDLE_BAT    (STATE_PROM_IDLE * 2 + 1)
+#define STATE_OS_IDLE_AC       (STATE_OS_IDLE * 2)
+#define STATE_OS_IDLE_BAT      (STATE_OS_IDLE * 2 + 1)
+#define STATE_SHUTDOWN_AC      (STATE_SHUTDOWN * 2)
+#define STATE_SHUTDOWN_BAT     (STATE_SHUTDOWN * 2 + 1)
+
+#define NUM_STATES             (NUM_BASE_STATES * 2)
 
 // Structure to hold the min/max edges for counters per function
 // This structure is used both in the save file and runtime
@@ -40,25 +49,35 @@ struct state_edge_file_header {
 int next_func_id = 0;
 
 // Global variables for state edges
-struct func_state_edges state_edge_data[NUM_STATES] = {0};
+struct func_state_edges state_edge_data[NUM_STATES][MAX_DEBUG_FUNCS] = {0}; // TODO dynamically allocate?
 bool state_edges_loaded = false;
 
 // Globals used during loading/mapping
 GHashTable *g_func_map = NULL;
+
+static bool is_on_battery(void) {
+    FILE *f = fopen("/sys/class/power_supply/ACAD/online", "r");
+    if (!f) return false;
+
+    char status;
+    bool on_battery = (fscanf(f, "%c", &status) == 1 && status == '0');
+    fclose(f);
+    return on_battery;
+}
 
 // Function to print debug statistics
 static void cpu_stats_print_all(void) {
     if (next_func_id >= MAX_FUNCS)
         fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_FUNCS);
 
-    // TODO set idle_prom, idle_os, shutdown_indicated bools by calling detect_system_state()
+    bool on_battery = is_on_battery();
+    bool prom_idle = detect_system_state(STATE_PROM_IDLE * 2 + on_battery);
+    bool os_idle = detect_system_state(STATE_OS_IDLE * 2 + on_battery);
+    bool shutdown_indicated = detect_system_state(STATE_SHUTDOWN * 2 + on_battery);
 
-    printf("\nDebug Statistics Summary:\n");
-    printf("System States: Battery=%s, PROM Idle=%s, OS Idle=%s, Shutdown=%s\n",
-           is_on_battery ? "On" : "Off",
-           idle_prom ? "Yes" : "No",
-           idle_os ? "Yes" : "No",
-           shutdown_indicated ? "Yes" : "No");
+    printf("\nSystem States: Power=%s%s%s%s\n",
+           on_battery ? "Battery" : "AC", prom_idle ? " prom_idle" : "",
+           os_idle ? " os_idle" : "", shutdown_indicated ? " shutdown" : "");
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
@@ -105,12 +124,12 @@ struct debug_counters *find_counters_array(const char *func_name) {
 
     // Initialize edges
     for (int s = 0; s < NUM_STATES; s++) {
-        struct func_state_edges *edges = &state_edge_data[s].func_edges[func_id];
+        struct func_state_edges *edges = &state_edge_data[s][func_id];
         if (new_func) {
             // New function (not in save file) or data load failed: Initialize runtime edges
             memset(edges, 0, sizeof(struct func_state_edges)); // Zero out structure
             strncpy(edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
-            rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
+            edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
 
             for (int j = 0; j < 2; j++) {
                 edges->min_ns[j][0] = UINT64_MAX;
@@ -128,13 +147,23 @@ struct debug_counters *find_counters_array(const char *func_name) {
 
 /* Get system state from external source (e.g., file) */
 static int get_system_state(int current_state) {
-    int new_state = STATE_AUTODETECT; // Default to autodetect if file not found/read
+    int base_state = STATE_AUTODETECT;
     // TODO: Define vm_state.txt path properly
     FILE *state_file = fopen("vm_state.txt", "r");
     if (state_file) {
-        fscanf(state_file, "%d", &new_state);
+        if (fscanf(state_file, "%d", &base_state) != 1) {
+            fprintf(stderr, "Warning: Failed to read state from vm_state.txt. Using autodetect.\n");
+            base_state = STATE_AUTODETECT;
+        } else if (base_state < 0 || base_state >= NUM_BASE_STATES) {
+            fprintf(stderr, "Warning: Invalid base state %d read from vm_state.txt. Using autodetect.\n", base_state);
+            base_state = STATE_AUTODETECT;
+        }
         fclose(state_file);
     }
+
+    if (base_state == STATE_AUTODETECT) return base_state;
+
+    int new_state = base_state * 2 + (is_on_battery() ? 1 : 0);
 
     if (new_state != current_state)
         qemu_log("State change detected: %d -> %d\n", current_state, new_state);

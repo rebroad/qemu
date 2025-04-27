@@ -35,11 +35,9 @@ struct state_edge_file_header {
     uint32_t num_funcs_saved;
 };
 
-// Global variables for debug counters
+// Global variables
 int next_func_id = 0;
-
-// Global variables for state edges
-struct state_edges state_edge_data[NUM_STATES] = {0};
+struct func_state_edges state_edge_data[NUM_STATES] = {0};
 bool state_edges_loaded = false;
 
 // Globals used during loading/mapping
@@ -88,11 +86,11 @@ struct debug_counters *find_counters_array(const char *func_name) {
     // Ensure the main counters array is allocated
     if (!counters_array) {
         counters_array = g_new0(struct debug_counters, MAX_DEBUG_FUNCS);
-		g_func_map = g_hash_table_new_full(g_str_hash, g_str_equal,
+                g_func_map = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            NULL,   // No need to free keys (__func__)
                                            NULL);  // No need to free values (int)
         load_state_edge_data();
-		ensure_maps_initialized();
+                ensure_maps_initialized();
     }
 
     gpointer func_id_ptr = NULL;
@@ -104,22 +102,22 @@ struct debug_counters *find_counters_array(const char *func_name) {
         func_id = GPOINTER_TO_INT(func_id_ptr);
     }
 
-    // Initialize runtime edges (either from loaded data or defaults)
+    // Initialize edges
     for (int s = 0; s < NUM_STATES; s++) {
-        struct func_state_edges *rt_edges = &state_edge_data[s].func_edges[func_id];
+        struct func_state_edges *edges = &state_edge_data[s].func_edges[func_id];
         if (func_id == -1) {
             // New function (not in save file) or data load failed: Initialize runtime edges
-            memset(rt_edges, 0, sizeof(struct func_state_edges)); // Zero out structure
-            strncpy(rt_edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
-            rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\\0';
+            memset(edges, 0, sizeof(struct func_state_edges)); // Zero out structure
+            strncpy(edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
+            rt_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
 
             for (int j = 0; j < 2; j++) {
-                rt_edges->min_ns[j][EDGE_MIN] = UINT64_MAX;
-                rt_edges->max_ns[j][EDGE_MIN] = UINT64_MAX;
-                rt_edges->avg_ns[j][EDGE_MIN] = UINT64_MAX;
-                rt_edges->min_streak[j][EDGE_MIN] = INT_MAX;
-                rt_edges->max_streak[j][EDGE_MIN] = INT_MAX;
-                rt_edges->count[j][EDGE_MIN] = INT_MAX;
+                edges->min_ns[j][EDGE_MIN] = UINT64_MAX;
+                edges->max_ns[j][EDGE_MIN] = UINT64_MAX;
+                edges->avg_ns[j][EDGE_MIN] = UINT64_MAX;
+                edges->min_streak[j][EDGE_MIN] = INT_MAX;
+                edges->max_streak[j][EDGE_MIN] = INT_MAX;
+                edges->count[j][EDGE_MIN] = INT_MAX;
             }
         }
     }
@@ -152,33 +150,88 @@ void reset_cpu_stats(void) {
     }
 }
 
-/* Load state edge data from file */
-void load_state_edge_data() {
+/* Load state edge data from binary file */
+static void load_state_edge_data(void) {
+    printf("Attempting to load state edge data from '%s'...\n", STATE_EDGE_FILE);
+
     FILE *f = fopen(STATE_EDGE_FILE, "rb");
     if (!f) {
-        // If file doesn't exist, initialize with defaults (zeros/max values)
-        // This effectively makes the first run establish the initial edges.
-        // TODO min values probably should not be initialized to zero - or ensure we have a way to detect that the zero actually means uninitialized elsewhere in the code.
-        // Initialize min values to large numbers and max to 0? Or handle in update?
-        // Let's handle it in update: if a min edge is 0, the first value becomes the min.
-        // Max values start at 0, first value becomes max.
-        printf("State edge file '%s' not found. Initializing defaults.\n", STATE_EDGE_FILE);
-    } else {
-        // Read the entire structure
-        // TODO - How will we connect the function counters to the state edges? The file will need to include the func_names.
-        size_t read_count = fread(state_edge_data, sizeof(struct state_edges), NUM_STATES, f);
-        fclose(f);
+        perror("State edge file not found or cannot be opened. Initializing defaults.");
+        return;
+    }
 
-        if (read_count != NUM_STATES) {
-            fprintf(stderr, "Error reading state edge file '%s'. Read %zu states, expected %d. Using defaults.\n",
-                    STATE_EDGE_FILE, read_count, NUM_STATES);
-        } else {
-		    printf("Loaded state edge data from '%s'.\n", STATE_EDGE_FILE);
-		    state_edges_loaded = true;
-			// TODO - update next_func_id based on how many functions loaded
-			// TODO - g_func_map should also be populated by what we load here
-		}
-	}
+    // Read header
+    struct state_edge_file_header header;
+    if (fread(&header, sizeof(header), 1, f) != 1) {
+        fprintf(stderr, "Error reading state edge file header from '%s'. Using defaults.\n", STATE_EDGE_FILE);
+        fclose(f);
+        return;
+    }
+
+    // Validate header
+    if (header.magic != STATE_EDGE_MAGIC || header.version != STATE_EDGE_VERSION) {
+         fprintf(stderr, "Error: Invalid magic number (0x%x vs 0x%x) or version (%u vs %u) in state edge file '%s'. Using defaults.\n",
+                 header.magic, STATE_EDGE_MAGIC, header.version, STATE_EDGE_VERSION, STATE_EDGE_FILE);
+        fclose(f);
+        return;
+    }
+
+    next_func_id = header.num_funcs_saved;
+    if (!next_func_id) {
+        printf("State edge file '%s' is empty or contains no function data.\n", STATE_EDGE_FILE);
+        fclose(f);
+        return;
+    }
+    if (next_func_id > MAX_DEBUG_FUNCS) {
+        fprintf(stderr, "Warning: State edge file '%s' contains more functions (%u) than MAX_DEBUG_FUNCS (%d). Truncating.\n",
+                STATE_EDGE_FILE, next_func_id, MAX_DEBUG_FUNCS);
+        next_func_id = MAX_DEBUG_FUNCS; // Avoid overallocation
+    }
+
+    // Allocate temporary buffer for all loaded blocks
+    // Size = num_funcs * num_states * sizeof(struct)
+    size_t total_blocks_size = (size_t)next_func_id * NUM_STATES * sizeof(struct func_state_edges);
+    state_edge_data = g_malloc(total_blocks_size);
+    if (!state_edge_data) {
+        fprintf(stderr, "Error allocating memory (%zu bytes) for loaded state edges. Using defaults.\n", total_blocks_size);
+        fclose(f);
+        next_func_id = 0;
+        return;
+    }
+
+    // Read all func_state_edges blocks
+    size_t blocks_to_read = (size_t)next_func_id * NUM_STATES;
+    size_t blocks_read = fread(state_edge_data, sizeof(struct func_state_edges), blocks_to_read, f);
+
+    fclose(f);
+
+    if (blocks_read != blocks_to_read) {
+        fprintf(stderr, "Error reading state edge data blocks from '%s'. Read %zu, expected %zu. Using defaults.\n", STATE_EDGE_FILE, blocks_read, blocks_to_read);
+        g_free(state_edge_data);
+        state_edge_data = NULL;
+        next_func_id = 0;
+        return;
+    }
+
+    // Create and populate the name -> func_id map
+    g_func_map = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                      NULL, // Keys are within g_loaded_edge_blocks
+                                      NULL); // Values are integers
+    for (int i = 0; i < next_func_id; i++) {
+        // Name should be the same across states for the same function index 'i'
+        // Use the name from state 0's block
+        const char *func_name = state_edge_data[i * NUM_STATES + 0].func_name;
+        // Ensure null termination from file read, just in case
+        ((char*)func_name)[MAX_FUNC_NAME_LEN - 1] = '\0';
+
+        if (strlen(func_name) > 0)
+            g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(i));
+        else
+            fprintf(stderr, "Warning: Empty function name found at saved index %d in '%s'. Skipping mapping.\n", i, STATE_EDGE_FILE);
+    }
+
+    printf("Loaded %d function edge sets from '%s'.\n", next_func_id, STATE_EDGE_FILE);
+    state_edges_loaded = true;
 }
 
 /* Save state edge data to file */
@@ -188,39 +241,88 @@ void save_state_edge_data() {
         perror("Error opening state edge file for writing");
         return;
     }
+
+    // Write header
+    struct state_edge_file_header header = {
+        .magic = STATE_EDGE_MAGIC,
+        .version = STATE_EDGE_VERSION,
+        .num_funcs_saved = (uint32_t)next_func_id // Save current number of functions
+    };
+    if (fwrite(&header, sizeof(header), 1, f) != 1) {
+        fprintf(stderr, "Error writing state edge file header to '%s'. Aborting save.\n", STATE_EDGE_FILE);
+        fclose(f);
+        return;
+    }
+
+    // Write data blocks: Loop through functions, then states
+    size_t blocks_written = 0;
+    for (int i = 0; i < next_func_id; i++) {
+        for (int s = 0; s < NUM_STATES; s++) {
+            struct func_state_edges *edges = &state_edge_data[s].func_edges[i];
+
+            if (fwrite(edges, sizeof(struct func_state_edges), 1, f) == 1)
+                blocks_written++;
+            else {
+                fprintf(stderr, "Error writing state edge data block (func_id %d, state %d) to '%s'. Aborting save.\n", i, s, STATE_EDGE_FILE);
+                fclose(f);
+                return;
+            }
+        }
+    }
+
     // Write the entire structure
-    size_t write_count = fwrite(state_edge_data, sizeof(struct state_edges), NUM_STATES, f);
+    //size_t write_count = fwrite(state_edge_data, sizeof(struct func_state_edges), NUM_STATES, f);
     fclose(f);
 
-    if (write_count != NUM_STATES) {
-        fprintf(stderr, "Error writing state edge file '%s'. Wrote %zu states, expected %d.\n",
-                STATE_EDGE_FILE, write_count, NUM_STATES);
-    }
+    size_t expected_blocks = (size_t)next_func_id * NUM_STATES;
+    if (blocks_written != expected_blocks)
+        fprintf(stderr, "Error saving state edge data: Wrote %zu blocks, expected %zu.\n",
+                blocks_written, expected_blocks);
 }
 
-/* Update the min/max edges for the given state based on current counters */
-void update_state_edges(int vm_state) {
-    if (vm_state < 0 || vm_state >= NUM_STATES) {
-        return; // Ignore invalid states like AUTODETECT
-    }
+// Inline helper to update min/max for uint64_t edges
+static inline void update_u64_edge(uint64_t edge[2], uint64_t current_val) {
+    if (current_val < edge[EDGE_MIN]) edge[EDGE_MIN] = current_val;
+    if (current_val > edge[EDGE_MAX]) edge[EDGE_MAX] = current_val;
+}
 
-    // TODO this function need to look at all the current counters for all the functions and create/update a template (for all those functions) of max and min values for each of the counters.
+// Inline helper to update min/max for int edges
+static inline void update_int_edge(int edge[2], int current_val) {
+    if (current_val < edge[EDGE_MIN]) edge[EDGE_MIN] = current_val;
+    if (current_val > edge[EDGE_MAX]) edge[EDGE_MAX] = current_val;
+}
+
+
+/* Update the min/max edges for the given state based on current counters */
+static void update_state_edges(int vm_state) {
+    if (vm_state < 0 || vm_state >= NUM_STATES) return;
 
     bool updated = false;
-    struct state_edges *current_state_edges = &state_edge_data[vm_state];
+    struct state_edges *state_edges = &state_edge_data[vm_state];
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *counters = &counters_array[i];
-        struct func_state_edges *func_edges = &current_state_edges->func_edges[i];
+        struct func_state_edges *edges = &state_edges->func_edges[i];
+
+        // Ensure names match - defensive check
+        if (strncmp(edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN)) {
+
+            fprintf(stderr, "Warning: Name mismatch in update_state_edges for index %d ('%s' vs '%s')\n",
+                     i, func_edges->func_name, counters->func_name);
+            // Ensure name is correct in the edge structure
+            strncpy(func_edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN - 1);
+            func_edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
+            // continue; // Maybe skip update if names mismatched? Or just fix name? Let's fix and continue.
+        }
 
         for (int j = 0; j < 2; j++) { // True and False stats
             // TODO - count itself also need to have edges
             uint64_t avg_ns = counters->count[j] ? counters->total_ns[j] / counters->count[j] : -1;
 
-			// TODO loop through min/max (0/1) array for below
+                        // TODO loop through min/max (0/1) array for below
             // Store previous values to check if updated
             // TODO - include count edges in the check
-			// TODO - this function!
+                        // TODO - this function!
             }
         }
     }

@@ -17,16 +17,6 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <time.h>
-#include <unistd.h>
-#include <sys/time.h>
-#include <sys/resource.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <math.h>
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
@@ -94,308 +84,16 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 }
 
 #ifndef CONFIG_USER_ONLY
-#define NUM_BANDS 256
-
-static inline unsigned long long timespec_diff_ns(struct timespec *start, struct timespec *end) {
-    return (end->tv_sec - start->tv_sec) * 1000000000LL + (end->tv_nsec - start->tv_nsec);
-}
-
-static inline void timespecadd(struct timespec *a, const struct timespec *b)
+static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    a->tv_sec += b->tv_sec; a->tv_nsec += b->tv_nsec;
-
-    // Normalize to ensure tv_nsec is between 0 and 999,999,999
-    while (a->tv_nsec >= 1000000000) {
-        a->tv_sec++;
-        a->tv_nsec -= 1000000000;
-    }
-}
-
-static int vm_state = 2;
-static time_t last_models_save_time;
-
-#define MODELS_FILE "timing_models.bin"
-#define BOOTDISK_FILE ".go-boot"
-
-struct BandModel {
-    unsigned long long min_value;
-    unsigned long long max_value;
-    bool values_seen;
-};
-
-struct TimingModel {
-    unsigned long long boundaries[NUM_BANDS + 1];
-    struct BandModel bands[NUM_BANDS];
-    unsigned long long total_samples;
-};
-
-typedef enum {
-    MODEL_TRUE_BATTERY = 0,
-    MODEL_TRUE_AC,
-    MODEL_FALSE_BATTERY,
-    MODEL_FALSE_AC,
-    MODEL_TOTAL_BATTERY,
-    MODEL_TOTAL_AC,
-    NUM_MODELS // Total number of models
-} ModelType;
-
-static const char *model_names[NUM_MODELS] = {
-    "true_model_battery",
-    "true_model_ac",
-    "false_model_battery",
-    "false_model_ac",
-    "total_model_battery",
-    "total_model_ac"
-};
-
-static struct TimingModel all_models[NUM_MODELS];
-
-static void save_models(void) {
-    FILE *f = fopen(MODELS_FILE, "wb");
-    if (!f) {
-        perror("Failed to open models file for writing");
-        return;
-    }
-
-    // Write the models data
-    fwrite(&all_models, sizeof(all_models), 1, f);
-
-    fclose(f);
-}
-
-static bool load_models(void) {
-    FILE *f = fopen(MODELS_FILE, "rb");
-    if (!f) return false;
-
-    size_t read_count = fread(&all_models, sizeof(all_models), 1, f);
-    fclose(f);
-
-    return (read_count == 1);
-}
-
-static void periodic_model_save(void) {
-    time_t current_time = time(NULL);
-
-    if (current_time - last_models_save_time >= 5) {
-        save_models();
-        last_models_save_time = current_time;
-    }
-}
-
-typedef enum {
-    CHANGE_TYPE_NONE = 0,
-    CHANGE_TYPE_FIRST_USE,
-    CHANGE_TYPE_MIN_UPDATE,
-    CHANGE_TYPE_MAX_UPDATE,
-    CHANGE_TYPE_BOUNDARY_CHANGE
-} ChangeType;
-
-struct BandChange {
-    ChangeType change_type;
-    unsigned long long old_value;
-    unsigned long long new_value;
-    ModelType model_type;
-    bool has_change;
-};
-
-static struct BandChange band_changes[NUM_BANDS]; // Array to track changes per band
-
-static void log_band_change(struct BandModel *band, int band_index,
-                                  unsigned long long old_value,
-                                  unsigned long long new_value,
-                                  ChangeType change_type,
-                                  ModelType model_type) {
-    // Ignore if no change type is provided
-    if (change_type == CHANGE_TYPE_NONE) return;
-
-    // Track the most significant change for this band
-    if (!band_changes[band_index].has_change) {
-        // No change recorded yet for this band
-        band_changes[band_index].change_type = change_type;
-        band_changes[band_index].old_value = old_value;
-        band_changes[band_index].new_value = new_value;
-        band_changes[band_index].model_type = model_type;
-        band_changes[band_index].has_change = true;
-    } else {
-        // If this change is more significant, overwrite the previous one
-        if (change_type == CHANGE_TYPE_FIRST_USE) {
-            // "first_use" is the most significant change
-            band_changes[band_index].change_type = change_type;
-            band_changes[band_index].old_value = old_value;
-            band_changes[band_index].new_value = new_value;
-            band_changes[band_index].model_type = model_type;
-        } else if (change_type == CHANGE_TYPE_BOUNDARY_CHANGE &&
-                   band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE) {
-            // "boundary_change" is more significant than "min_update" or "max_update"
-            band_changes[band_index].change_type = change_type;
-            band_changes[band_index].old_value = old_value;
-            band_changes[band_index].new_value = new_value;
-            band_changes[band_index].model_type = model_type;
-        } else if (change_type == CHANGE_TYPE_MAX_UPDATE &&
-                   band_changes[band_index].change_type != CHANGE_TYPE_FIRST_USE &&
-                   band_changes[band_index].change_type != CHANGE_TYPE_BOUNDARY_CHANGE) {
-            // "max_update" is more significant than "min_update"
-            band_changes[band_index].change_type = change_type;
-            band_changes[band_index].old_value = old_value;
-            band_changes[band_index].new_value = new_value;
-            band_changes[band_index].model_type = model_type;
-        }
-    }
-}
-
-static bool should_sleep(int result, unsigned long long value) {
-    bool on_battery = is_on_battery();
-    ModelType model_type;
-
-    // Select appropriate model based on the type of interval and power state
-    if (result == 1) {
-        model_type = on_battery ? MODEL_TRUE_BATTERY : MODEL_TRUE_AC;
-    } else if (result == 0) {
-        model_type = on_battery ? MODEL_FALSE_BATTERY : MODEL_FALSE_AC;
-    } else {
-        model_type = on_battery ? MODEL_TOTAL_BATTERY : MODEL_TOTAL_AC;
-    }
-
-    struct TimingModel *model = &all_models[model_type];
-
-    // If the VM is busy, we're in learning mode. Update the model
-    if (vm_state == 1) {
-        bool found_band = false;
-        for (int i = 0; i < NUM_BANDS; i++) {
-            if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
-                found_band = true;
-                /*printf("Debug: value %llu falls in band %d (bounds: %llu=%llu), seen=%d, min=%llu, max=%llu\n",
-                    value, i, model->boundaries[i], model->boundaries[i+1],
-                    model->bands[i].values_seen,
-                    model->bands[i].min_value,
-                    model->bands[i].max_value); */
-                if (!model->bands[i].values_seen) {
-                    log_band_change(&model->bands[i], i, 0, value, CHANGE_TYPE_FIRST_USE, model_type);
-                    model->bands[i].min_value = value;
-                    model->bands[i].max_value = value;
-                    model->bands[i].values_seen = true;
-                } else {
-                    if (value < model->bands[i].min_value) {
-                        log_band_change(&model->bands[i], i, model->bands[i].min_value, value, CHANGE_TYPE_MIN_UPDATE, model_type);
-                        model->bands[i].min_value = value;
-                    }
-                    if (value > model->bands[i].max_value) {
-                        log_band_change(&model->bands[i], i, model->bands[i].max_value, value, CHANGE_TYPE_MAX_UPDATE, model_type);
-                        model->bands[i].max_value = value;
-                    }
-                }
-                break;
-            }
-        }
-        if (!found_band)
-            printf("Debug: value %llu didn't fall into any band!\n", value);
-        model->total_samples++;
-    }
-    if (vm_state == 1) {
-        periodic_model_save();
-        return false;  // Don't sleep since VM is busy
-    }
-
-    // Exit if we have a lack of samples
-    if (model->total_samples < 100) return false;
-
-    // During normal operation, check for deviations from busy pattern
-    int outlier_count = 0, total_active_bands = 0;
-
-    for (int i = 0; i < NUM_BANDS; i++) {
-        if (value >= model->boundaries[i] && value < model->boundaries[i + 1]) {
-            total_active_bands++;
-
-            // If we see values in bands that were never active during busy state,
-            // or values outside the ranges seen during busy state, count as outliers
-            if (!model->bands[i].values_seen ||
-                value < model->bands[i].min_value ||
-                value > model->bands[i].max_value) {
-                outlier_count++;
-            }
-            break;
-        }
-    }
-
-    // If we have enough outliers, suggest sleeping
-    return (total_active_bands > 0 &&
-            (double)outlier_count / total_active_bands > 0.3);
-}
-
-static void initialize_bands(void) {
-    for (ModelType model_type = 0; model_type < NUM_MODELS; model_type++) {
-        struct TimingModel *model = &all_models[model_type];
-        double min_log = log10(1.0);
-        double max_log = log10(1000000.0);
-        double step = (max_log - min_log) / NUM_BANDS;
-
-        for (int i = 0; i <= NUM_BANDS; i++) {
-            model->boundaries[i] = (unsigned long long)pow(10, min_log + (step * i));
-        }
-        model->boundaries[0] = 0;
-    }
-}
-
-static void adjust_band_boundaries(void) {
-    for (ModelType model_type = 0; model_type < NUM_MODELS; model_type++) {
-        struct TimingModel *model = &all_models[model_type];
-        if (model->total_samples)
-            printf("%s: samples=%llu\n", model_names[model_type], model->total_samples);
-        for (int i = 0; i < NUM_BANDS - 1; i++) {
-            unsigned long long max_current_band = model->bands[i].max_value;
-            unsigned long long min_next_band = model->bands[i + 1].min_value;
-
-            // If there's a gap between the current band's max and the next band's min
-            if (max_current_band < min_next_band) {
-                // Calculate the logarithmic center of the gap
-                double log_max = log10(max_current_band);
-                double log_min = log10(min_next_band);
-                double log_center = (log_max + log_min) / 2;
-                unsigned long long new_boundary = (unsigned long long)pow(10, log_center);
-
-                // Adjust the boundary between the current and next band
-                unsigned long long old_boundary = model->boundaries[i + 1];
-                if (new_boundary) model->boundaries[i + 1] = new_boundary;
-                if (new_boundary && old_boundary != new_boundary)
-                    log_band_change(&model->bands[i], i, old_boundary, new_boundary, CHANGE_TYPE_BOUNDARY_CHANGE, model_type);
-            }
-        }
-    }
-}
-
-static void display_band_changes(void) {
-    char buffer[4096] = {0};
-    size_t remaining = sizeof(buffer);
-    char *current = buffer;
-
-    for (int i = 0; i < NUM_BANDS; i++) if (band_changes[i].has_change) {
-        struct TimingModel *model = &all_models[band_changes[i].model_type];
-        int written = snprintf(current, remaining,
-                "%s, band %d (%llu-%llu) %s: value=%llu->%llu\n",
-                model_names[band_changes[i].model_type], i,
-                model->boundaries[i], model->boundaries[i+1],
-                band_changes[i].change_type == CHANGE_TYPE_FIRST_USE ? "new" :
-                band_changes[i].change_type == CHANGE_TYPE_MIN_UPDATE ? "min" :
-                band_changes[i].change_type == CHANGE_TYPE_MAX_UPDATE ? "max" :
-                band_changes[i].change_type == CHANGE_TYPE_BOUNDARY_CHANGE ? "boundary" : "",
-                band_changes[i].old_value, band_changes[i].new_value);
-
-        current += written;
-        remaining -= written;
-    }
-
-    if (strlen(buffer) > 0) printf("%s\n", buffer);
-
-    memset(band_changes, 0, sizeof(band_changes));
-}
-
-static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
     DEBUG_FUNC();
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
+
         if (cpu_interrupts_enabled(env) && env->interrupt_index > 0) {
             int pil = env->interrupt_index & 0xf;
             int type = env->interrupt_index & 0xf0;
+
             if (type != TT_EXTINT || cpu_pil_allowed(env, pil)) {
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
@@ -404,12 +102,12 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request) {
             }
         }
     }
-
     DEBUG_RETURN(0);
 }
 #endif /* !CONFIG_USER_ONLY */
 
-static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info) {
+static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info)
+{
     info->print_insn = print_insn_sparc;
 #ifdef TARGET_SPARC64
     info->mach = bfd_mach_sparc_v9b;
@@ -417,7 +115,8 @@ static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info) {
 }
 
 static void
-cpu_add_feat_as_prop(const char *typename, const char *name, const char *val) {
+cpu_add_feat_as_prop(const char *typename, const char *name, const char *val)
+{
     GlobalProperty *prop = g_new0(typeof(*prop), 1);
     prop->driver = typename;
     prop->property = g_strdup(name);
@@ -427,18 +126,24 @@ cpu_add_feat_as_prop(const char *typename, const char *name, const char *val) {
 
 /* Parse "+feature,-feature,feature=foo" CPU feature string */
 static void sparc_cpu_parse_features(const char *typename, char *features,
-                                     Error **errp) {
+                                     Error **errp)
+{
     GList *l, *plus_features = NULL, *minus_features = NULL;
     char *featurestr; /* Single 'key=value" string being parsed */
     static bool cpu_globals_initialized;
 
-    if (cpu_globals_initialized) return;
+    if (cpu_globals_initialized) {
+        return;
+    }
     cpu_globals_initialized = true;
 
-    if (!features) return;
+    if (!features) {
+        return;
+    }
 
-    for (featurestr = strtok(features, ","); featurestr;
-            featurestr = strtok(NULL, ",")) {
+    for (featurestr = strtok(features, ",");
+         featurestr;
+         featurestr = strtok(NULL, ",")) {
         const char *name;
         const char *val = NULL;
         char *eq = NULL;
@@ -498,7 +203,8 @@ static void sparc_cpu_parse_features(const char *typename, char *features,
     g_list_free_full(minus_features, g_free);
 }
 
-void cpu_sparc_set_id(CPUSPARCState *env, unsigned int cpu) {
+void cpu_sparc_set_id(CPUSPARCState *env, unsigned int cpu)
+{
 #if !defined(TARGET_SPARC64)
     env->mxccregs[7] = ((cpu + 8) & 0xf) << 24;
 #endif
@@ -1073,7 +779,8 @@ static void sparc_restore_state_to_opc(CPUState *cs,
     }
 }
 
-static bool sparc_cpu_has_work(CPUState *cs) {
+static bool sparc_cpu_has_work(CPUState *cs)
+{
     CPUSPARCState *env = cpu_env(cs);
     static target_ulong last_pc = 0;
     static target_ulong last_npc = 0;
@@ -1086,9 +793,9 @@ static bool sparc_cpu_has_work(CPUState *cs) {
     static int total_sleep_us = 0;  // Track total sleep time
 
     // Check for interrupt requests
-    bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(cpu_env(cs));
+    bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(env);
 
-	int sleep_us = 0;
+    int sleep_us = 0;
 
     if (env->pc == last_pc && env->npc == last_npc) {
         idle_count++;

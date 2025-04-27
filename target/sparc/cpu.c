@@ -173,19 +173,6 @@ static bool load_models(void) {
     return (read_count == 1);
 }
 
-static bool is_on_battery(void) {
-    FILE *f = fopen("/sys/class/power_supply/ACAD/online", "r");
-    if (!f) {
-        // If we can't read the file, assume AC power
-        return false;
-    }
-
-    char status;
-    bool on_battery = (fscanf(f, "%c", &status) == 1 && status == '0');
-    fclose(f);
-    return on_battery;
-}
-
 static void periodic_model_save(void) {
     time_t current_time = time(NULL);
 

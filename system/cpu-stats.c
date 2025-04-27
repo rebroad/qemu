@@ -29,13 +29,15 @@
 // This structure is used both in the save file and runtime
 struct func_state_edges {
     char func_name[MAX_FUNC_NAME_LEN]; // Function name associated with these edges
+    // Format: stat[min/max] (no true/false)
+    uint64_t call_count[2];
     // Format: stat[true/false][min/max]
     uint64_t min_ns[2][2];
     uint64_t max_ns[2][2];
     uint64_t avg_ns[2][2];
     int min_streak[2][2];
     int max_streak[2][2];
-    int count[2][2]; // Min/Max observed value for count[0/1]
+    uint64_t count[2][2]; // Min/Max observed value for count[0/1]
 } func_edges[MAX_DEBUG_FUNCS];
 
 // Header structure for the state edge file
@@ -131,13 +133,14 @@ struct debug_counters *find_counters_array(const char *func_name) {
             strncpy(edges->func_name, func_name, MAX_FUNC_NAME_LEN - 1);
             edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
 
+            edges->call_count[0] = UINT64_MAX;
             for (int j = 0; j < 2; j++) {
                 edges->min_ns[j][0] = UINT64_MAX;
                 edges->max_ns[j][0] = UINT64_MAX;
                 edges->avg_ns[j][0] = UINT64_MAX;
                 edges->min_streak[j][0] = INT_MAX;
                 edges->max_streak[j][0] = INT_MAX;
-                edges->count[j][0] = INT_MAX;
+                edges->count[j][0] = UINT64_MAX;
             }
         }
     }
@@ -220,7 +223,8 @@ static void load_state_edge_data(void) {
 
     // Allocate temporary buffer for all loaded blocks
     // Size = num_funcs * num_states * sizeof(struct)
-    size_t total_blocks_size = (size_t)next_func_id * NUM_STATES * sizeof(struct func_state_edges);
+    size_t blocks_to_read = (size_t)next_func_id * NUM_STATES;
+    size_t total_blocks_size = blocks_to_read * sizeof(struct func_state_edges);
     state_edge_data = g_malloc(total_blocks_size);
     if (!state_edge_data) {
         fprintf(stderr, "Error allocating memory (%zu bytes) for loaded state edges. Using defaults.\n", total_blocks_size);
@@ -230,7 +234,6 @@ static void load_state_edge_data(void) {
     }
 
     // Read all func_state_edges blocks
-    size_t blocks_to_read = (size_t)next_func_id * NUM_STATES;
     size_t blocks_read = fread(state_edge_data, sizeof(struct func_state_edges), blocks_to_read, f);
 
     fclose(f);
@@ -250,11 +253,11 @@ static void load_state_edge_data(void) {
     for (int i = 0; i < next_func_id; i++) {
         // Name should be the same across states for the same function index 'i'
         // Use the name from state 0's block
-        const char *func_name = state_edge_data[i * NUM_STATES + 0].func_name;
+        const char *func_name = state_edge_data[0][i].func_name;
         // Ensure null termination from file read, just in case
         ((char*)func_name)[MAX_FUNC_NAME_LEN - 1] = '\0';
 
-        if (strlen(func_name) > 0)
+        if (func_name && strlen(func_name) > 0)
             g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(i));
         else
             fprintf(stderr, "Warning: Empty function name found at saved index %d in '%s'. Skipping mapping.\n", i, STATE_EDGE_FILE);
@@ -279,32 +282,28 @@ static void save_state_edge_data() {
         .num_funcs_saved = (uint32_t)next_func_id // Save current number of functions
     };
     if (fwrite(&header, sizeof(header), 1, f) != 1) {
-        fprintf(stderr, "Error writing state edge file header to '%s'. Aborting save.\n", STATE_EDGE_FILE);
+        fprintf(stderr, "Error writing state edge file header to '%s'.\n", STATE_EDGE_FILE);
         fclose(f);
         return;
     }
 
-    // Write data blocks: Loop through functions, then states
-    size_t blocks_written = 0;
+    // Write all func_state_edges blocks
     for (int i = 0; i < next_func_id; i++) {
         for (int s = 0; s < NUM_STATES; s++) {
-            struct func_state_edges *edges = &state_edge_data[s].func_edges[i];
-
-            if (fwrite(edges, sizeof(struct func_state_edges), 1, f) == 1)
-                blocks_written++;
-            else {
-                fprintf(stderr, "Error writing state edge data block (func_id %d, state %d) to '%s'. Aborting save.\n", i, s, STATE_EDGE_FILE);
+            struct func_state_edges *edges = &state_edge_data[s][i];
+            if (fwrite(edges, sizeof(struct func_state_edges), 1, f) != 1) {
+                fprintf(stderr, "Error writing state edge data for func_id %d, state %d to '%s'. File may be corrupted.\n", i, s, STATE_EDGE_FILE);
                 fclose(f);
-                return;
+                return; // Stop writing on error
             }
         }
     }
 
-    // Write the entire structure
+    // Write the entire structure - TODO - is this an option?
     //size_t write_count = fwrite(state_edge_data, sizeof(struct func_state_edges), NUM_STATES, f);
     fclose(f);
 
-    size_t expected_blocks = (size_t)next_func_id * NUM_STATES;
+    size_t expected_blocks = (size_t)next_func_id * NUM_STATES; // TODO - remove after testing
     if (blocks_written != expected_blocks)
         fprintf(stderr, "Error saving state edge data: Wrote %zu blocks, expected %zu.\n",
                 blocks_written, expected_blocks);
@@ -327,11 +326,10 @@ static bool state_edges(int vm_state, bool update) {
     if (vm_state < 0 || vm_state >= NUM_STATES) return false;
 
     bool outside = false;
-    struct state_edges *state_edges = &state_edge_data[vm_state];
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *counters = &counters_array[i];
-        struct func_state_edges *edges = &state_edges->func_edges[i];
+        struct func_state_edges *edges = &state_edge_data[vm_state][i];
 
         // Ensure names match - defensive check
         if (strncmp(edges->func_name, counters->func_name, MAX_FUNC_NAME_LEN)) {
@@ -342,6 +340,7 @@ static bool state_edges(int vm_state, bool update) {
             edges->func_name[MAX_FUNC_NAME_LEN - 1] = '\0';
         }
 
+        CHECK_EDGE(edges->call_count, counters->call_count);
         for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
             // Only update edges if the counter was actually hit in this interval
             if (counters->count[j] > 0) {

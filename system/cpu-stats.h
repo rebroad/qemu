@@ -36,39 +36,53 @@ struct debug_counters *find_counters_array(const char *func_name);
 
 /* Debug function macro to collect statistics */
 #define DEBUG_FUNC() \
-    static struct debug_counters *counters = NULL; \
+    /* Declare shared TLS cache variables for this function scope */ \
+    static __thread struct debug_counters *_tl_counters = NULL; \
+    static __thread const char *_tl_func_name = NULL; \
+    /* Actual work in a do-while(0) block */ \
     do { \
-        if (!counters) counters = find_counters_array(__func__); \
-        if (counters) counters->call_count++; \
+        if (_tl_counters == NULL || _tl_func_name != __func__) { \
+            _tl_counters = find_counters_array(__func__); \
+            _tl_func_name = __func__; \
+        } \
+        if (_tl_counters) _tl_counters->call_count++; \
     } while (0)
 
-// TODO - cpu_stats_per_second() probably better called from a timer?
-
 /* Helper macros to track return values with timing */
-#define DEBUG_RETURN(n) do { \
-    if (counters) { \
-        struct timespec current_ts; \
-        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &current_ts); \
-        int x = (n) ? 1 : 0, y = (n) ? 0 : 1; \
-        if (counters->last_time[x].tv_sec != 0 || counters->last_time[x].tv_nsec != 0) { \
-            uint64_t interval = (current_ts.tv_sec - counters->last_time[x].tv_sec) * 1000000000ULL + \
-                               (current_ts.tv_nsec - counters->last_time[x].tv_nsec); \
-            counters->total_ns[x] += interval; \
-            if (interval < counters->min_ns[x] || !counters->min_ns[x]) \
-                counters->min_ns[x] = interval; \
-            if (interval > counters->max_ns[x]) counters->max_ns[x] = interval; \
+#define DEBUG_RETURN(n) \
+    /* Ensure shared TLS cache variables are declared (compiler handles duplicates) */ \
+    static __thread struct debug_counters *_tl_counters = NULL; \
+    static __thread const char *_tl_func_name = NULL; \
+    /* Actual work in a do-while(0) block */ \
+    do { \
+        if (_tl_counters == NULL || _tl_func_name != __func__) { \
+            _tl_counters = find_counters_array(__func__); \
+            _tl_func_name = __func__; \
         } \
-        counters->last_time[x] = current_ts; \
-        counters->count[x]++; \
-        counters->current_streak[x]++; \
-        if (counters->current_streak[y] && \
-            (!counters->min_streak[y] || counters->current_streak[y] < counters->min_streak[y])) \
-            counters->min_streak[y] = counters->current_streak[y]; \
-        counters->current_streak[y] = 0; \
-        if (counters->current_streak[x] > counters->max_streak[x]) \
-            counters->max_streak[x] = counters->current_streak[x]; \
-    } \
-    return n; \
-} while (0)
+        struct debug_counters *_counters = _tl_counters; \
+        if (_counters) { \
+            struct timespec current_ts; \
+            clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &current_ts); \
+            int x = (n) ? 1 : 0, y = (n) ? 0 : 1; \
+            if (_counters->last_time[x].tv_sec != 0 || _counters->last_time[x].tv_nsec != 0) { \
+                uint64_t interval = (current_ts.tv_sec - _counters->last_time[x].tv_sec) * 1000000000ULL + \
+                                   (current_ts.tv_nsec - _counters->last_time[x].tv_nsec); \
+                _counters->total_ns[x] += interval; \
+                if (interval < _counters->min_ns[x] || !_counters->min_ns[x]) \
+                    _counters->min_ns[x] = interval; \
+                if (interval > _counters->max_ns[x]) _counters->max_ns[x] = interval; \
+            } \
+            _counters->last_time[x] = current_ts; \
+            _counters->count[x]++; \
+            _counters->current_streak[x]++; \
+            if (_counters->current_streak[y] && \
+                (!_counters->min_streak[y] || _counters->current_streak[y] < _counters->min_streak[y])) \
+                _counters->min_streak[y] = _counters->current_streak[y]; \
+            _counters->current_streak[y] = 0; \
+            if (_counters->current_streak[x] > _counters->max_streak[x]) \
+                _counters->max_streak[x] = _counters->current_streak[x]; \
+        } \
+        return n; \
+    } while (0)
 
 #endif /* CPU_STATS_H */

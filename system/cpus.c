@@ -77,7 +77,7 @@ static const AccelOpsClass *cpus_accel;
 bool cpu_is_stopped(CPUState *cpu)
 {
     DEBUG_FUNC();
-    DEBUG (cpu->stopped || !runstate_is_running());
+    DEBUG_RETURN(cpu->stopped || !runstate_is_running());
 }
 
 bool cpu_work_list_empty(CPUState *cpu)

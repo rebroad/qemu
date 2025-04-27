@@ -1,12 +1,12 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <inttypes.h>
-#include <stdbool.h>
-#include <glib.h> // Include necessary headers
+#include <limits.h> // For UINT64_MAX, INT_MAX
+#include "cpu-stats.h"
 
-#include "cpu-stats.h" // Include the header file
+#define STATE_EDGE_FILE "state_edges.dat"
+#define MAX_FUNC_NAME_LEN 64 // Max length for function names
+#define STATE_EDGE_MAGIC 0xCPU57A75 // Magic number for file format
+#define STATE_EDGE_VERSION 1        // File format version
 
 /* System state flags */
 #define STATE_AUTODETECT  -1
@@ -15,29 +15,35 @@
 #define STATE_SHUTDOWN    2
 #define NUM_STATES        3  // PROM_IDLE, OS_IDLE, SHUTDOWN
 
-/* Debug counter structure for each function */
-struct debug_counters {
-    const char *func_name;
-    int call_count;
-    int count[2]; // True & false
-
-    /* Streak tracking */
-    int current_streak[2];
-    int min_streak[2];
-    int max_streak[2];
-
-    /* Timing stats */
-    uint64_t total_ns[2];
-    uint64_t min_ns[2];
-    uint64_t max_ns[2];
-    struct timespec last_time[2];
+/* Structure to hold the min/max edges for counters per function */
+/* This structure is used both in the save file and runtime */
+struct func_state_edges {
+    char func_name[MAX_FUNC_NAME_LEN]; // Function name associated with these edges
+    // Format: stat[true/false][min/max]
+    uint64_t min_ns[2][2];
+    uint64_t max_ns[2][2];
+    uint64_t avg_ns[2][2];
+    int min_streak[2][2];
+    int max_streak[2][2];
+    int count[2][2]; // Min/Max observed value for count[0/1]
 };
 
-/* Global variables */
-extern struct debug_counters *counters_array; // Memory allocated on first use
-extern int next_func_id;
-extern struct state_edges state_edge_data[NUM_STATES]; // Defined in header
-extern bool state_edges_loaded; // Defined in header
+/* Structure to hold edges for all functions within a specific state */
+struct state_edges {
+    // Note: func_name is now part of func_state_edges
+    struct func_state_edges func_edges[MAX_DEBUG_FUNCS];
+};
+
+/* Header structure for the state edge file */
+struct state_edge_file_header {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t num_funcs_saved;
+};
+
+/* Global variables for state edges */
+struct state_edges state_edge_data[NUM_STATES];
+bool state_edges_loaded = false;
 
 // Placeholders for system state variables - TODO: Might not need these
 bool idle_prom = false;

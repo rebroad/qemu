@@ -39,11 +39,11 @@ struct state_edge_file_header {
 int next_func_id = 0;
 
 // Global variables for state edges
-struct state_edges state_edge_data[NUM_STATES];
+struct state_edges state_edge_data[NUM_STATES] = {0};
+bool state_edges_loaded = false;
 
 // Globals used during loading/mapping
-GHashTable *g_func_name_to_saved_data = NULL;
-// Map func_name -> runtime func_id (index in counters_array/state_edge_data)
+GHashTable *g_func_map = NULL;
 
 // Placeholders for system state variables - TODO: Might not need these
 bool idle_prom = false;
@@ -88,16 +88,20 @@ struct debug_counters *find_counters_array(const char *func_name) {
     // Ensure the main counters array is allocated
     if (!counters_array) {
         counters_array = g_new0(struct debug_counters, MAX_DEBUG_FUNCS);
+		g_func_map = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                           NULL,   // No need to free keys (__func__)
+                                           NULL);  // No need to free values (int)
         load_state_edge_data();
+		ensure_maps_initialized();
     }
 
     gpointer func_id_ptr = NULL;
     int func_id = -1;
     // Check the map populated by load_state_edge_data
-    if (g_func_name_to_saved_data &&
-        g_hash_table_lookup_extended(g_func_name_to_saved_data, func_name, NULL, &saved_idx_ptr))
+    if (state_edges_loaded &&
+        g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
     {
-        func_id = GPOINTER_TO_INT(saved_idx_ptr);
+        func_id = GPOINTER_TO_INT(func_id_ptr);
     }
 
     // Initialize runtime edges (either from loaded data or defaults)
@@ -155,24 +159,26 @@ void load_state_edge_data() {
         // If file doesn't exist, initialize with defaults (zeros/max values)
         // This effectively makes the first run establish the initial edges.
         // TODO min values probably should not be initialized to zero - or ensure we have a way to detect that the zero actually means uninitialized elsewhere in the code.
-        memset(state_edge_data, 0, sizeof(state_edge_data));
         // Initialize min values to large numbers and max to 0? Or handle in update?
         // Let's handle it in update: if a min edge is 0, the first value becomes the min.
         // Max values start at 0, first value becomes max.
         printf("State edge file '%s' not found. Initializing defaults.\n", STATE_EDGE_FILE);
-        return;
-    }
-    // Read the entire structure
-    // TODO - How will we connect the function counters to the state edges? The file will need to include the func_names.
-    size_t read_count = fread(state_edge_data, sizeof(struct state_edges), NUM_STATES, f);
-    fclose(f);
+    } else {
+        // Read the entire structure
+        // TODO - How will we connect the function counters to the state edges? The file will need to include the func_names.
+        size_t read_count = fread(state_edge_data, sizeof(struct state_edges), NUM_STATES, f);
+        fclose(f);
 
-    if (read_count != NUM_STATES) {
-        fprintf(stderr, "Error reading state edge file '%s'. Read %zu states, expected %d. Using defaults.\n",
-                STATE_EDGE_FILE, read_count, NUM_STATES);
-        // Reset to defaults if read failed or was partial
-        memset(state_edge_data, 0, sizeof(state_edge_data));
-    } else printf("Loaded state edge data from '%s'.\n", STATE_EDGE_FILE);
+        if (read_count != NUM_STATES) {
+            fprintf(stderr, "Error reading state edge file '%s'. Read %zu states, expected %d. Using defaults.\n",
+                    STATE_EDGE_FILE, read_count, NUM_STATES);
+        } else {
+		    printf("Loaded state edge data from '%s'.\n", STATE_EDGE_FILE);
+		    state_edges_loaded = true;
+			// TODO - update next_func_id based on how many functions loaded
+			// TODO - g_func_map should also be populated by what we load here
+		}
+	}
 }
 
 /* Save state edge data to file */
@@ -199,13 +205,6 @@ void update_state_edges(int vm_state) {
     }
 
     // TODO this function need to look at all the current counters for all the functions and create/update a template (for all those functions) of max and min values for each of the counters.
-    // The format of the saved file needs to include headings for each state (0, 1 and 2), and subheadings for each func_name, then the values of each variable within that function.
-    // "each variable" refers to: min_streak, max_streak, avg_ns, min_ns, max_ns
-    // so we need to record the edges of each of those variables (i.e. the edges of the window that they operate within - i.e. the minimum and maximum that the values reached during training per the applicable "state", i.e. idle_prom, idle_os, shutdown).
-
-    // Note: The file format requirement seems overly complex for a simple binary save/load.
-    // We are saving the raw min/max edge data directly. Reporting can format it nicely.
-    // The binary format optimizes for brevity as requested.
 
     bool updated = false;
     struct state_edges *current_state_edges = &state_edge_data[vm_state];
@@ -218,34 +217,10 @@ void update_state_edges(int vm_state) {
             // TODO - count itself also need to have edges
             uint64_t avg_ns = counters->count[j] ? counters->total_ns[j] / counters->count[j] : -1;
 
+			// TODO loop through min/max (0/1) array for below
             // Store previous values to check if updated
-            uint64_t old_min_ns_min = func_edges->min_ns_min[j];
-            uint64_t old_min_ns_max = func_edges->min_ns_max[j];
-            uint64_t old_max_ns_min = func_edges->max_ns_min[j];
-            uint64_t old_max_ns_max = func_edges->max_ns_max[j];
-            uint64_t old_avg_ns_min = func_edges->avg_ns_min[j];
-            uint64_t old_avg_ns_max = func_edges->avg_ns_max[j];
-            int old_min_streak_min = func_edges->min_streak_min[j];
-            int old_min_streak_max = func_edges->min_streak_max[j];
-            int old_max_streak_min = func_edges->max_streak_min[j];
-            int old_max_streak_max = func_edges->max_streak_max[j];
-
-            // Update edges for min/max/avg ns and min/max streak
-            UPDATE_EDGE(func_edges->min_ns_min[j], func_edges->min_ns_max[j], counters->min_ns[j]);
-            UPDATE_EDGE(func_edges->max_ns_min[j], func_edges->max_ns_max[j], counters->max_ns[j]);
-            UPDATE_EDGE(func_edges->avg_ns_min[j], func_edges->avg_ns_max[j], avg_ns);
-            // Only update streak edges if a streak occurred (count > 0 implies streak > 0)
-            UPDATE_EDGE(func_edges->min_streak_min[j], func_edges->min_streak_max[j], counters->min_streak[j]);
-            UPDATE_EDGE(func_edges->max_streak_min[j], func_edges->max_streak_max[j], counters->max_streak[j]);
-
-            // Check if any edge actually changed
             // TODO - include count edges in the check
-            if (old_min_ns_min != func_edges->min_ns_min[j] || old_min_ns_max != func_edges->min_ns_max[j] ||
-                old_max_ns_min != func_edges->max_ns_min[j] || old_max_ns_max != func_edges->max_ns_max[j] ||
-                old_avg_ns_min != func_edges->avg_ns_min[j] || old_avg_ns_max != func_edges->avg_ns_max[j] ||
-                old_min_streak_min != func_edges->min_streak_min[j] || old_min_streak_max != func_edges->min_streak_max[j] ||
-                old_max_streak_min != func_edges->max_streak_min[j] || old_max_streak_max != func_edges->max_streak_max[j]) {
-                updated = true;
+			// TODO - this function!
             }
         }
     }

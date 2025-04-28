@@ -148,7 +148,7 @@ struct debug_counters *find_counters_array(const char *func_name) {
         counters_array[func_id].func_name = func_name;
 
         // Also add it to the map for future lookups (if needed, though usually lookup happens first)
-        g_hash_table_insert(g_func_map, func_name, GINT_TO_POINTER(func_id));
+        g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
     }
 
     // Initialize runtime state edges if this is a newly encountered function
@@ -196,7 +196,7 @@ static int get_system_state(int current_state) {
     int new_state = base_state * 2 + (is_on_battery() ? 1 : 0);
 
     if (new_state != current_state)
-        qemu_log("State change detected: %d -> %d\n", current_state, new_state);
+        printf("State change detected: %d -> %d\n", current_state, new_state);
 
     return new_state;
 }

@@ -95,8 +95,8 @@ static void cpu_stats_print_all(void) {
             printf("%s [%s]: called %d times\n",
                    it->func_name, it->file_name, it->call_count);
         else {
-            uint64_t avg_false_ns = it->count[0] ? it->total_ns[0] / it->count[0] : -1;
-            uint64_t avg_true_ns = it->count[1] ? it->total_ns[1] / it->count[1] : -1;
+            uint64_t avg_false_ns = it->count[0] ? it->total_ns[0] / it->count[0] : 0;
+            uint64_t avg_true_ns = it->count[1] ? it->total_ns[1] / it->count[1] : 0;
             printf("%s [%s]: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
                    "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
                    it->func_name, it->file_name,

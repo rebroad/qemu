@@ -140,16 +140,18 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
     // Check the map populated by load_state_edge_data
     if (g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
     {
-        func_id = GPOINTER_TO_INT(func_id_ptr);
-        if (counters_array[func_id].call_count == 0) {
+        int orig_func_id = GPOINTER_TO_INT(func_id_ptr);
+        //if (counters_array[orig_func_id].call_count == 0) {
             new_func = true;
             func_id = next_func_id++; // Assign the next available ID
-        }
-        fprintf(stderr, "Existing func %s from %s at idx %d counters=%p\n",
-                    func_name, file_name, func_id, (void*)&counters_array[func_id]);
+        //}
+        fprintf(stderr, "Existing func %s from %s at idx %d->%d counters=%p\n",
+                    func_name, file_name, orig_func_id, func_id, (void*)&counters_array[func_id]);
     } else {
         new_func = true;
         func_id = next_func_id++; // Assign the next available ID
+        fprintf(stderr, "New func %s from %s at idx %d counters=%p\n",
+                func_name, file_name, func_id, (void*)&counters_array[func_id]);
     }
 
     if (new_func) {
@@ -158,8 +160,6 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
 
         // Also add it to the map for future lookups
         g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
-        fprintf(stderr, "New func %s from %s at idx %d counters=%p\n",
-                func_name, file_name, func_id, (void*)&counters_array[func_id]);
     }
 
     // Initialize runtime state edges if this is a newly encountered function

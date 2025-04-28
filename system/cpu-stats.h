@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <pthread.h>
 
 #define MAX_DEBUG_FUNCS 128  /* Maximum number of functions we'll track */
 
@@ -14,7 +13,6 @@
 struct debug_counters {
     const char *func_name;
     const char *file_name;  // Added to track source file
-    pthread_t thread_id;    // Track which thread this counter belongs to
     int call_count;
     int count[2]; // False=0, True=1
 
@@ -33,21 +31,15 @@ struct debug_counters {
 /* Global variables for debug counters */
 extern struct debug_counters *counters_array; // Memory allocated on first use
 
-void cpu_stats_per_second(void);
-struct debug_counters *find_counters_array(const char *func_name, const char *file_name, pthread_t thread_id);
+struct debug_counters *find_counters_array(const char *func_name, const char *file_name);
 
 /* Debug function macro to collect statistics */
 #define DEBUG_FUNC() \
     static struct debug_counters *counters = NULL; \
     do { \
-        if (!counters) { \
-            pthread_t tid = pthread_self(); \
-            counters = find_counters_array(__func__, __FILE__, tid); \
-        } \
+        if (!counters) counters = find_counters_array(__func__, __FILE__); \
         if (counters) counters->call_count++; \
     } while (0)
-
-// TODO - cpu_stats_per_second() probably better called from a timer?
 
 /* Helper macros to track return values with timing */
 #define DEBUG_RETURN(n) do { \

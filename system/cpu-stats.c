@@ -51,6 +51,7 @@ struct state_edge_file_header {
 static void load_state_edge_data(void);
 static bool detect_system_state(int vm_state);
 static void save_state_edge_data(void);
+static void cpu_stats_per_second(void);
 
 // Global variables for debug counters
 int next_func_id = 0;
@@ -91,14 +92,14 @@ static void cpu_stats_print_all(void) {
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
         if (it->count[0] == 0 && it->count[1] == 0)
-            printf("%s [%s] (thread=%lu): called %d times\n",
-                   it->func_name, it->file_name, (unsigned long)it->thread_id, it->call_count);
+            printf("%s [%s]: called %d times\n",
+                   it->func_name, it->file_name, it->call_count);
         else {
             uint64_t avg_false_ns = it->count[0] ? it->total_ns[0] / it->count[0] : -1;
             uint64_t avg_true_ns = it->count[1] ? it->total_ns[1] / it->count[1] : -1;
-            printf("%s [%s] (thread=%lu): true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
+            printf("%s [%s]: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
                    "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
-                   it->func_name, it->file_name, (unsigned long)it->thread_id,
+                   it->func_name, it->file_name,
                    it->count[1], avg_true_ns, it->min_ns[1], it->max_ns[1],
                    it->min_streak[1], it->max_streak[1],
                    it->count[0], avg_false_ns, it->min_ns[0], it->max_ns[0],
@@ -116,7 +117,7 @@ static void cpu_stats_timer_cb(void *opaque)
 }
 
 // Find (or create) the counters struct for a function
-struct debug_counters *find_counters_array(const char *func_name, const char *file_name, pthread_t thread_id) {
+struct debug_counters *find_counters_array(const char *func_name, const char *file_name) {
     if (next_func_id >= MAX_DEBUG_FUNCS) return NULL;
 
     // Ensure the main counters array is allocated and timer is initialized
@@ -137,34 +138,28 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
     gpointer func_id_ptr = NULL;
     int func_id = -1; bool new_func = false;
     // Check the map populated by load_state_edge_data
-    if (state_edges_loaded &&
-        g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
+    if (g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
     {
         func_id = GPOINTER_TO_INT(func_id_ptr);
-        // Check if this is a new thread calling the same function
-        if (counters_array[func_id].thread_id != thread_id) {
+        if (counters_array[func_id].call_count == 0) {
             new_func = true;
             func_id = next_func_id++; // Assign the next available ID
-        } else {
-            fprintf(stderr, "Found existing function %s from %s at index %d (thread=%lu)\n",
-                    func_name, file_name, func_id, (unsigned long)thread_id);
         }
+        fprintf(stderr, "Found existing function %s from %s at index %d\n",
+                    func_name, file_name, func_id);
     } else {
         new_func = true;
         func_id = next_func_id++; // Assign the next available ID
     }
 
     if (new_func) {
-        // Store the function name and thread ID in the main counters array
         counters_array[func_id].func_name = func_name;
         counters_array[func_id].file_name = file_name;
-        counters_array[func_id].thread_id = thread_id;
 
         // Also add it to the map for future lookups
         g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
-        fprintf(stderr, "New func %s from %s at idx %d (%p,%lu) counters=%p\n",
-                func_name, file_name, func_id, (void*)func_name, (unsigned long)thread_id,
-                (void*)&counters_array[func_id]);
+        fprintf(stderr, "New func %s from %s at idx %d counters=%p\n",
+                func_name, file_name, func_id, (void*)&counters_array[func_id]);
     }
 
     // Initialize runtime state edges if this is a newly encountered function
@@ -421,7 +416,7 @@ static void update_state_edges(int vm_state) { state_edges(vm_state, true); }
 static bool detect_system_state(int vm_state) { return state_edges(vm_state, false); }
 
 /* Called periodically by the timer */
-void cpu_stats_per_second(void) {
+static void cpu_stats_per_second(void) {
     static int vm_state = STATE_AUTODETECT;
 
     cpu_stats_print_all();

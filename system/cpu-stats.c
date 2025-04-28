@@ -121,9 +121,9 @@ struct debug_counters *find_counters_array(const char *func_name) {
     // Ensure the main counters array is allocated and timer is initialized
     if (!counters_array) {
         counters_array = g_new0(struct debug_counters, MAX_DEBUG_FUNCS);
-        // Initialize hash map with g_free for keys allocated by g_strdup during load
+        // Initialize hash map with NULL key_destroy_func since we're using string literals
         g_func_map = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                           g_free,   // Free the keys (strdup'd names)
+                                           NULL,   // Don't free the keys (they're string literals)
                                            NULL);  // Values (func_id) are integers
 
         // Initialize and arm the periodic timer

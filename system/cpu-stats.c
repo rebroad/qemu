@@ -145,8 +145,8 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
             new_func = true;
             func_id = next_func_id++; // Assign the next available ID
         }
-        fprintf(stderr, "Found existing function %s from %s at index %d\n",
-                    func_name, file_name, func_id);
+        fprintf(stderr, "Existing func %s from %s at idx %d counters=%p\n",
+                    func_name, file_name, func_id, (void*)&counters_array[func_id]);
     } else {
         new_func = true;
         func_id = next_func_id++; // Assign the next available ID

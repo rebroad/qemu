@@ -91,13 +91,13 @@ static void cpu_stats_print_all(void) {
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
         if (it->count[0] == 0 && it->count[1] == 0)
-            printf("%s: called %d times\n", it->func_name, it->call_count);
+            printf("%s(%d): called %d times\n", it->func_name, i, it->call_count);
         else {
             uint64_t avg_false_ns = it->count[0] ? it->total_ns[0] / it->count[0] : -1;
             uint64_t avg_true_ns = it->count[1] ? it->total_ns[1] / it->count[1] : -1;
-            printf("%s: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
+            printf("%s(%d): true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
                    "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
-                   it->func_name,
+                   it->func_name, i,
                    it->count[1], avg_true_ns, it->min_ns[1], it->max_ns[1],
                    it->min_streak[1], it->max_streak[1],
                    it->count[0], avg_false_ns, it->min_ns[0], it->max_ns[0],
@@ -139,15 +139,17 @@ struct debug_counters *find_counters_array(const char *func_name) {
     if (state_edges_loaded &&
         g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
     {
+        printf("Found function %s at index %d\n", func_name, func_id);
         func_id = GPOINTER_TO_INT(func_id_ptr);
     } else {
         new_func = true;
         func_id = next_func_id++; // Assign the next available ID
+        printf("New function %s at index %d\n", func_name, func_id);
 
         // Store the function name in the main counters array
         counters_array[func_id].func_name = func_name;
 
-        // Also add it to the map for future lookups (if needed, though usually lookup happens first)
+        // Also add it to the map for future lookups
         g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
     }
 
@@ -216,7 +218,7 @@ static void load_state_edge_data(void) {
 
     FILE *f = fopen(STATE_EDGE_FILE, "rb");
     if (!f) {
-        perror("State edge file not found or cannot be opened. Initializing defaults.");
+        fprintf(stderr, "State edge file not found or cannot be opened. Initializing defaults.\n");
         return;
     }
 

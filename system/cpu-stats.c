@@ -157,14 +157,12 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
     if (new_func) {
         counters_array[func_id].func_name = func_name;
         counters_array[func_id].file_name = file_name;
+        counters_array[func_id].last_time[0].tv_sec = 0; counters_array[func_id].last_time[0].tv_nsec = 0;
+        counters_array[func_id].last_time[1].tv_sec = 0; counters_array[func_id].last_time[1].tv_nsec = 0;
 
         // Also add it to the map for future lookups
         g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
-    }
 
-    // Initialize runtime state edges if this is a newly encountered function
-    // (either truly new or loaded but not yet initialized by this function)
-    if (new_func) {
         // Initialize edges for the new function
         for (int s = 0; s < NUM_STATES; s++) {
             struct func_state_edges *edges = &state_edge_data[s][func_id];

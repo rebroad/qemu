@@ -6,7 +6,7 @@
 
 #define STATE_EDGE_FILE "state_edges.dat"
 #define MAX_FUNC_NAME_LEN 64 // Max length for function names
-#define STATE_EDGE_MAGIC 0xCPU57A75 // Magic number for file format
+#define STATE_EDGE_MAGIC 0x43505557 // Magic number for file format (CPUW)
 #define STATE_EDGE_VERSION 1        // File format version
 
 // System state flags
@@ -46,6 +46,11 @@ struct state_edge_file_header {
     uint32_t version;
     uint32_t num_funcs_saved;
 };
+
+// Forward declarations
+static void load_state_edge_data(void);
+static bool detect_system_state(int vm_state);
+static void save_state_edge_data(void);
 
 // Global variables for debug counters
 int next_func_id = 0;
@@ -261,7 +266,7 @@ static void load_state_edge_data(void) {
             next_func_id = 0; // Reset func count
             return;
         }
-        func_name_buf[MAX_FUNC_NAME_LEN - 1] = '\\0'; // Ensure null termination
+        func_name_buf[MAX_FUNC_NAME_LEN - 1] = '\0'; // Ensure null termination
 
         // Map the name to the function index 'i'
         if (strlen(func_name_buf) > 0) {
@@ -307,7 +312,7 @@ static void load_state_edge_data(void) {
 }
 
 /* Save state edge data to binary file */
-static void save_state_edge_data() {
+static void save_state_edge_data(void) {
     FILE *f = fopen(STATE_EDGE_FILE, "wb");
     if (!f) {
         perror("Could not create state edge file for writing");

@@ -78,9 +78,9 @@ bool cpu_is_stopped(CPUState *cpu)
 {
     DEBUG_FUNC();
     if (cpu->stopped || !runstate_is_running()) {
-		DEBUG_RETURN(1);
-	}
-	DEBUG_RETURN(0);
+        DEBUG_RETURN(1);
+    }
+    DEBUG_RETURN(0);
 }
 
 bool cpu_work_list_empty(CPUState *cpu)
@@ -207,7 +207,7 @@ bool cpus_are_resettable(void)
     DEBUG_FUNC();
     if (cpus_accel->cpus_are_resettable) {
         DEBUG_RETURN(cpus_accel->cpus_are_resettable());
-	}
+    }
     DEBUG_RETURN(1);
 }
 

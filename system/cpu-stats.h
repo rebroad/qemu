@@ -12,6 +12,7 @@
 /* Debug counter structure for each function */
 struct debug_counters {
     const char *func_name;
+    const char *file_name;  // Added to track source file
     int call_count;
     int count[2]; // False=0, True=1
 
@@ -31,13 +32,13 @@ struct debug_counters {
 extern struct debug_counters *counters_array; // Memory allocated on first use
 
 void cpu_stats_per_second(void);
-struct debug_counters *find_counters_array(const char *func_name);
+struct debug_counters *find_counters_array(const char *func_name, const char *file_name);
 
 /* Debug function macro to collect statistics */
 #define DEBUG_FUNC() \
     static struct debug_counters *counters = NULL; \
     do { \
-        if (!counters) counters = find_counters_array(__func__); \
+        if (!counters) counters = find_counters_array(__func__, __FILE__); \
         if (counters) counters->call_count++; \
     } while (0)
 

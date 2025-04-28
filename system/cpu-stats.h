@@ -5,8 +5,6 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "glib-compat.h"
-#include <glib.h> // For g_new0
 #include <stdbool.h>
 
 #define MAX_DEBUG_FUNCS 128  /* Maximum number of functions we'll track */

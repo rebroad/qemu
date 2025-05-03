@@ -204,8 +204,10 @@ static int get_system_state(int current_state) {
 
     int new_state = base_state * 2 + (is_on_battery() ? 1 : 0);
 
-    if (new_state != current_state)
+    if (new_state != current_state) {
         printf("State change detected: %d -> %d\n", current_state, new_state);
+        qemu_log("State change detected: %d -> %d\n", current_state, new_state);
+    }
 
     return new_state;
 }

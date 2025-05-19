@@ -391,6 +391,7 @@ static bool state_edges(int vm_state, bool update) {
 
         CHECK_EDGE(edges->call_count, counters->call_count);
         for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
+            CHECK_EDGE(edges->count[j], counters->count[j]);
             // Only update edges if the counter was actually hit in this interval
             if (counters->last_time[j].tv_sec == 0) outside = true;
             else if (counters->count[j] > 0) {
@@ -402,7 +403,6 @@ static bool state_edges(int vm_state, bool update) {
                 CHECK_EDGE(edges->min_streak[j], counters->min_streak[j]);
                 CHECK_EDGE(edges->max_streak[j], counters->max_streak[j]);
             }
-            CHECK_EDGE(edges->count[j], counters->count[j]);
         }
     }
 

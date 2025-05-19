@@ -219,7 +219,7 @@ static void reset_cpu_stats(void) {
         struct debug_counters *it = &counters_array[i];
         it->call_count = 0;
         for (int j = 0; j < 2; j++) // True & false
-            it->count[j] = it->min_streak[j] = it->max_streak[j] = it->total_ns[j] = it->min_ns[j] = it->max_ns[j] = 0;
+            it->count[j] = it->current_streak[j] = it->min_streak[j] = it->max_streak[j] = it->total_ns[j] = it->min_ns[j] = it->max_ns[j] = 0;
     }
 }
 

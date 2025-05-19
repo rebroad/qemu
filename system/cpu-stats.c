@@ -1,6 +1,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include <limits.h>
+#include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "cpu-stats.h"
 #include "qemu/timer.h" // Include for QEMU timers
 

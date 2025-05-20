@@ -102,15 +102,19 @@ static void cpu_stats_print_all(void) {
     bool shutdown_indicated = detect_system_state(STATE_SHUTDOWN * 2 + on_battery);
     static int prom_idle_count = 0;
 
-    if (prom_idle && ++prom_idle_count == 2) {
+    printf("DEBUG: prom_idle=%d, prom_idle_count=%d\n", prom_idle, prom_idle_count);
+
+    if (prom_idle && prom_idle_count < 2 && ++prom_idle_count == 2) {
         FILE *f = fopen(BOOTDISK_FILE, "w");
-        if (f) fclose(f);
-        printf("DEBUG: %s created\n", BOOTDISK_FILE);
-    } else if (prom_idle_count) {
-        if (!--prom_idle_count) {
-            if (unlink(BOOTDISK_FILE) == 0)
-                printf("DEBUG: %s removed\n", BOOTDISK_FILE);
-        }
+        if (f) {
+            fclose(f);
+            printf("DEBUG: %s created\n", BOOTDISK_FILE);
+        } else printf("DEBUG: Failed to create %s: %s\n", BOOTDISK_FILE, strerror(errno));
+    } else if (!prom_idle && prom_idle_count && !--prom_idle_count) {
+        if (unlink(BOOTDISK_FILE) == 0)
+            printf("DEBUG: %s removed\n", BOOTDISK_FILE);
+        else
+            printf("DEBUG: Failed to remove %s: %s\n", BOOTDISK_FILE, strerror(errno));
     }
 
     printf("\nSystem States: Power=%s%s%s%s\n",
@@ -119,19 +123,20 @@ static void cpu_stats_print_all(void) {
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
-        if (!it->func_name || !it->file_name) {
-            fprintf(stderr, "Warning: Found null function name or file at index %d\n", i);
+        if (!it->func_name) {
+            fprintf(stderr, "Warning: Found null function name at index %d\n", i);
             continue;
         }
-        if (it->count[0] == 0 && it->count[1] == 0)
-            printf("%s [%s]: called %d times\n",
-                   it->func_name, it->file_name, it->call_count);
-        else {
+        if (it->count[0] == 0 && it->count[1] == 0) {
+            g_autofree char *file_str = it->file_name ? g_strdup_printf(" [%s]", it->file_name) : NULL;
+            printf("%s%s: called %d times\n", it->func_name, file_str ? file_str : "", it->call_count);
+        } else {
             uint64_t avg_false_ns = it->count[0] ? it->total_ns[0] / it->count[0] : 0;
             uint64_t avg_true_ns = it->count[1] ? it->total_ns[1] / it->count[1] : 0;
-            printf("%s [%s]: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
+            g_autofree char *file_str = it->file_name ? g_strdup_printf(" [%s]", it->file_name) : NULL;
+            printf("%s%s: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
                    "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
-                   it->func_name, it->file_name,
+                   it->func_name, file_str ? file_str : "",
                    it->count[1], avg_true_ns, it->min_ns[1], it->max_ns[1],
                    it->min_streak[1], it->max_streak[1],
                    it->count[0], avg_false_ns, it->min_ns[0], it->max_ns[0],
@@ -184,8 +189,14 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
     if (g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
     {
         func_id = GPOINTER_TO_INT(func_id_ptr);
-        printf("DEBUG: Found existing func %s from %s at idx %d counters=%p\n",
-                    func_name, file_name, func_id, (void*)&counters_array[func_id]);
+        g_autofree char *file_str = file_name ? g_strdup_printf(" from %s", file_name) : NULL;
+        printf("DEBUG: Found existing func %s%s at idx %d counters=%p\n",
+                    func_name, file_str ? file_str : "",
+                    func_id, (void*)&counters_array[func_id]);
+        // Update file_name if it was previously NULL
+        if (!counters_array[func_id].file_name) {
+            counters_array[func_id].file_name = file_name;
+        }
     } else {
         new_func = true;
         func_id = next_func_id++; // Assign the next available ID
@@ -196,7 +207,7 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
     if (new_func) {
         // The strings from __func__ and __FILE__ are compile-time constants
         counters_array[func_id].func_name = func_name;
-        counters_array[func_id].file_name = file_name;
+        counters_array[func_id].file_name = NULL; // Will be set when function is actually called
         counters_array[func_id].last_time[0].tv_sec = 0; counters_array[func_id].last_time[0].tv_nsec = 0;
         counters_array[func_id].last_time[1].tv_sec = 0; counters_array[func_id].last_time[1].tv_nsec = 0;
 
@@ -335,7 +346,7 @@ static void load_state_edge_data(void) {
             gchar *name_key = g_strdup(func_name_buf);
             g_hash_table_insert(g_func_map, name_key, GINT_TO_POINTER(i));
             counters_array[i].func_name = name_key;  // Use the same copy for both
-            counters_array[i].file_name = "unknown"; // We don't save file names in the state file
+            counters_array[i].file_name = NULL; // Will be set when function is actually called
         } else {
             fprintf(stderr, "Warning: Empty function name found at saved index %d in '%s'. Skipping mapping.\n", i, STATE_EDGE_FILE);
             // Skip reading state data for this empty name entry

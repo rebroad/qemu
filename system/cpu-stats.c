@@ -89,6 +89,8 @@ static bool is_on_battery(void) {
     return on_battery;
 }
 
+#define BOOTDISK_FILE ".go-boot"
+
 // Function to print debug statistics
 static void cpu_stats_print_all(void) {
     if (next_func_id >= MAX_DEBUG_FUNCS)
@@ -98,6 +100,18 @@ static void cpu_stats_print_all(void) {
     bool prom_idle = detect_system_state(STATE_PROM_IDLE * 2 + on_battery);
     bool os_idle = detect_system_state(STATE_OS_IDLE * 2 + on_battery);
     bool shutdown_indicated = detect_system_state(STATE_SHUTDOWN * 2 + on_battery);
+    static int prom_idle_count = 0;
+
+    if (prom_idle && ++prom_idle_count == 2) {
+        FILE *f = fopen(BOOTDISK_FILE, "w");
+        if (f) fclose(f);
+        printf("DEBUG: %s created\n", BOOTDISK_FILE);
+    } else if (prom_idle_count) {
+        if (!--prom_idle_count) {
+            if (unlink(BOOTDISK_FILE) == 0)
+                printf("DEBUG: %s removed\n", BOOTDISK_FILE);
+        }
+    }
 
     printf("\nSystem States: Power=%s%s%s%s\n",
            on_battery ? "Battery" : "AC", prom_idle ? " prom_idle" : "",

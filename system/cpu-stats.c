@@ -92,7 +92,7 @@ static bool is_on_battery(void) {
 #define BOOTDISK_FILE ".go-boot"
 
 // Function to print debug statistics
-static void cpu_stats_print_all(void) {
+static void cpu_stats_print_all(int current_state) {
     if (next_func_id >= MAX_DEBUG_FUNCS)
         fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_DEBUG_FUNCS);
 
@@ -104,17 +104,20 @@ static void cpu_stats_print_all(void) {
 
     printf("DEBUG: prom_idle=%d, prom_idle_count=%d\n", prom_idle, prom_idle_count);
 
-    if (prom_idle && prom_idle_count < 2 && ++prom_idle_count == 2) {
-        FILE *f = fopen(BOOTDISK_FILE, "w");
-        if (f) {
-            fclose(f);
-            printf("DEBUG: %s created\n", BOOTDISK_FILE);
-        } else printf("DEBUG: Failed to create %s: %s\n", BOOTDISK_FILE, strerror(errno));
-    } else if (!prom_idle && prom_idle_count && !--prom_idle_count) {
-        if (unlink(BOOTDISK_FILE) == 0)
-            printf("DEBUG: %s removed\n", BOOTDISK_FILE);
-        else
-            printf("DEBUG: Failed to remove %s: %s\n", BOOTDISK_FILE, strerror(errno));
+    // Only handle BOOTDISK_FILE in autodetect mode
+    if (current_state == STATE_AUTODETECT) {
+        if (prom_idle && prom_idle_count < 2 && ++prom_idle_count == 2) {
+            FILE *f = fopen(BOOTDISK_FILE, "w");
+            if (f) {
+                fclose(f);
+                printf("DEBUG: %s created\n", BOOTDISK_FILE);
+            } else printf("DEBUG: Failed to create %s: %s\n", BOOTDISK_FILE, strerror(errno));
+        } else if (!prom_idle && prom_idle_count && !--prom_idle_count) {
+            if (unlink(BOOTDISK_FILE) == 0)
+                printf("DEBUG: %s removed\n", BOOTDISK_FILE);
+            else
+                printf("DEBUG: Failed to remove %s: %s\n", BOOTDISK_FILE, strerror(errno));
+        }
     }
 
     printf("\nSystem States: Power=%s%s%s%s\n",
@@ -500,12 +503,12 @@ static void update_state_edges(int vm_state) {
 static void cpu_stats_per_second(void) {
     static int vm_state = STATE_AUTODETECT;
 
-    // This will detect all states and print stats
-    cpu_stats_print_all();
-
     // Get explicit state if available
     int new_state = get_system_state(vm_state);
     printf("DEBUG: Current state: %d, New state: %d\n", vm_state, new_state);
+
+    // This will detect all states and print stats
+    cpu_stats_print_all(new_state);
 
     if (new_state != STATE_AUTODETECT) {
         printf("DEBUG: Using explicit state %d\n", new_state);

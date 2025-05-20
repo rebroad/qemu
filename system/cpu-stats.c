@@ -28,11 +28,54 @@
 
 #define NUM_STATES             (NUM_BASE_STATES * 2)
 
+/* Handle overflow by halving all sum values */
+static void halve_sum_values(struct func_state_edges *edges) {
+    edges->sum_call_count /= 2;
+    for (int j = 0; j < 2; j++) {
+        edges->sum_min_ns[j] /= 2;
+        edges->sum_max_ns[j] /= 2;
+        edges->sum_avg_ns[j] /= 2;
+        edges->sum_min_streak[j] /= 2;
+        edges->sum_max_streak[j] /= 2;
+        edges->sum_count[j] /= 2;
+    }
+    edges->num_samples /= 2;
+}
+
+#define CHECK_EDGE(edge, current_val, sum_val) \
+    do { \
+        if (current_val < edge[0]) { \
+            if (update) edge[0] = current_val; \
+            outside = true; \
+        } \
+        if (current_val > edge[1]) { \
+            if (update) edge[1] = current_val; \
+            outside = true; \
+        } \
+        if (update) { \
+            if (sum_val > UINT64_MAX - current_val) \
+                halve_sum_values(edges); \
+            sum_val += current_val; \
+            edges->num_samples++; \
+        } else { \
+            float conf = calculate_confidence( \
+                current_val, \
+                edge[0], \
+                edge[1], \
+                sum_val / edges->num_samples \
+            ); \
+            total_confidence += conf; \
+            num_metrics++; \
+        } \
+    } while (0)
+
 // Structure to hold the min/max edges for counters per function
 // This structure is used both in the save file and runtime
 struct func_state_edges {
     // Format: stat[min/max] (no true/false)
     uint64_t call_count[2];
+    uint64_t sum_call_count;  // Sum of call_count values
+
     // Format: stat[true/false][min/max]
     uint64_t min_ns[2][2];
     uint64_t max_ns[2][2];
@@ -40,6 +83,15 @@ struct func_state_edges {
     int min_streak[2][2];
     int max_streak[2][2];
     uint64_t count[2][2]; // Min/Max observed value for count[0/1]
+
+    // Sums for average calculations
+    uint32_t num_samples;       // Number of samples collected for averages
+    uint64_t sum_min_ns[2];     // Sum of min_ns values
+    uint64_t sum_max_ns[2];     // Sum of max_ns values
+    uint64_t sum_avg_ns[2];     // Sum of avg_ns values
+    uint64_t sum_min_streak[2]; // Sum of min_streak values
+    uint64_t sum_max_streak[2]; // Sum of max_streak values
+    uint64_t sum_count[2];      // Sum of count values
 } func_edges[MAX_DEBUG_FUNCS];
 
 // Header structure for the state edge file
@@ -51,7 +103,6 @@ struct state_edge_file_header {
 
 // Forward declarations
 static void load_state_edge_data(void);
-static bool detect_system_state(int vm_state);
 static void save_state_edge_data(void);
 static void cpu_stats_per_second(void);
 
@@ -67,18 +118,6 @@ bool state_edges_loaded = false;
 GHashTable *g_func_map = NULL;
 static QEMUTimer *cpu_stats_timer = NULL; // Timer for periodic stats update
 
-#define CHECK_EDGE(edge, current_val) \
-    do { \
-        if (current_val < edge[0]) { \
-            if (update) edge[0] = current_val; \
-            outside = true; \
-        } \
-        if (current_val > edge[1]) { \
-            if (update) edge[1] = current_val; \
-            outside = true; \
-        } \
-    } while (0)
-
 static bool is_on_battery(void) {
     FILE *f = fopen("/sys/class/power_supply/ACAD/online", "r");
     if (!f) return false;
@@ -91,28 +130,44 @@ static bool is_on_battery(void) {
 
 #define BOOTDISK_FILE ".go-boot"
 
+/* Calculate confidence score for a value based on min/avg/max */
+static float calculate_confidence(uint64_t value, uint64_t min_val, uint64_t max_val, uint64_t avg_val) {
+    if (min_val == max_val) return (value == min_val) ? 1.0f : 0.0f;
+
+    // Calculate standard deviation as 1/4 of the range
+    float std_dev = (max_val - min_val) / 4.0f;
+    if (std_dev == 0) return 0.0f;
+
+    // Calculate z-score
+    float z_score = (value - avg_val) / std_dev;
+
+    // Convert to confidence using normal distribution approximation
+    // exp(-x^2/2) gives us a value between 0 and 1
+    return expf(-(z_score * z_score) / 2.0f);
+}
+
 // Function to print debug statistics
 static void cpu_stats_print_all(int current_state) {
     if (next_func_id >= MAX_DEBUG_FUNCS)
         fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_DEBUG_FUNCS);
 
     bool on_battery = is_on_battery();
-    bool prom_idle = detect_system_state(STATE_PROM_IDLE * 2 + on_battery);
-    bool os_idle = detect_system_state(STATE_OS_IDLE * 2 + on_battery);
-    bool shutdown_indicated = detect_system_state(STATE_SHUTDOWN * 2 + on_battery);
+    float prom_idle_conf = state_edges(STATE_PROM_IDLE * 2 + on_battery, false);
+    float os_idle_conf = state_edges(STATE_OS_IDLE * 2 + on_battery, false);
+    float shutdown_conf = state_edges(STATE_SHUTDOWN * 2 + on_battery, false);
     static int prom_idle_count = 0;
 
-    printf("DEBUG: prom_idle=%d, prom_idle_count=%d\n", prom_idle, prom_idle_count);
+    printf("DEBUG: prom_idle_conf=%.2f, prom_idle_count=%d\n", prom_idle_conf, prom_idle_count);
 
     // Only handle BOOTDISK_FILE in autodetect mode
     if (current_state == STATE_AUTODETECT) {
-        if (prom_idle && prom_idle_count < 2 && ++prom_idle_count == 2) {
+        if (prom_idle_conf > 0.8f && prom_idle_count < 2 && ++prom_idle_count == 2) {
             FILE *f = fopen(BOOTDISK_FILE, "w");
             if (f) {
                 fclose(f);
                 printf("DEBUG: %s created\n", BOOTDISK_FILE);
             } else printf("DEBUG: Failed to create %s: %s\n", BOOTDISK_FILE, strerror(errno));
-        } else if (!prom_idle && prom_idle_count && !--prom_idle_count) {
+        } else if (prom_idle_conf < 0.2f && prom_idle_count && !--prom_idle_count) {
             if (unlink(BOOTDISK_FILE) == 0)
                 printf("DEBUG: %s removed\n", BOOTDISK_FILE);
             else
@@ -121,8 +176,8 @@ static void cpu_stats_print_all(int current_state) {
     }
 
     printf("\nSystem States: Power=%s%s%s%s\n",
-           on_battery ? "Battery" : "AC", prom_idle ? " prom_idle" : "",
-           os_idle ? " os_idle" : "", shutdown_indicated ? " shutdown" : "");
+           on_battery ? "Battery" : "AC", prom_idle_conf > 0.8f ? " prom_idle" : "",
+           os_idle_conf > 0.8f ? " os_idle" : "", shutdown_conf > 0.8f ? " shutdown" : "");
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
@@ -224,6 +279,8 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
             // Initialize with max/min sentinels
             edges->call_count[0] = UINT64_MAX;
             edges->call_count[1] = 0;
+            edges->sum_call_count = 0;
+
             for (int j = 0; j < 2; j++) { // True/False
                 edges->min_ns[j][0] = UINT64_MAX; edges->min_ns[j][1] = 0;
                 edges->max_ns[j][0] = 0; edges->max_ns[j][1] = 0; // Max starts at 0
@@ -231,6 +288,12 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
                 edges->min_streak[j][0] = INT_MAX; edges->min_streak[j][1] = 0;
                 edges->max_streak[j][0] = 0; edges->max_streak[j][1] = 0; // Max starts at 0
                 edges->count[j][0] = UINT64_MAX; edges->count[j][1] = 0;
+                edges->sum_min_ns[j] = 0;
+                edges->sum_max_ns[j] = 0;
+                edges->sum_avg_ns[j] = 0;
+                edges->sum_min_streak[j] = 0;
+                edges->sum_max_streak[j] = 0;
+                edges->sum_count[j] = 0;
             }
         }
     }
@@ -435,13 +498,14 @@ static void save_state_edge_data(void) {
 }
 
 /* Update the min/max edges for the given state based on current counters */
-static bool state_edges(int vm_state, bool update) {
+static float state_edges(int vm_state, bool update) {
     if (vm_state < 0 || vm_state >= NUM_STATES) {
         printf("DEBUG: Invalid vm_state %d\n", vm_state);
-        return false;
+        return 0.0f;
     }
 
-    bool outside = false;
+    float total_confidence = 0.0f;
+    int num_metrics = 0;
     printf("DEBUG: Checking edges for state %d (update=%d)\n", vm_state, update);
 
     for (int i = 0; i < next_func_id; i++) {
@@ -459,9 +523,12 @@ static bool state_edges(int vm_state, bool update) {
                    edges->call_count[0], edges->call_count[1]);
         }
 
-        CHECK_EDGE(edges->call_count, counters->call_count);
+        // Update call count edges and sum
+        CHECK_EDGE(edges->call_count, counters->call_count, edges->sum_call_count);
+
+        // Process timing metrics if we have any data
         for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
-            CHECK_EDGE(edges->count[j], counters->count[j]);
+            CHECK_EDGE(edges->count[j], counters->count[j], edges->sum_count[j]);
             if (counters->count[j] > 0) {
                 printf("DEBUG: Function %s[%d]: count=%u, edges=[%lu,%lu]\n",
                        counters->func_name, j, counters->count[j],
@@ -474,29 +541,18 @@ static bool state_edges(int vm_state, bool update) {
                 printf("DEBUG: Function %s[%d]: avg_ns=%lu, edges=[%lu,%lu]\n",
                        counters->func_name, j, avg_ns,
                        edges->avg_ns[j][0], edges->avg_ns[j][1]);
-                CHECK_EDGE(edges->min_ns[j], counters->min_ns[j]);
-                CHECK_EDGE(edges->max_ns[j], counters->max_ns[j]);
-                CHECK_EDGE(edges->avg_ns[j], avg_ns);
-                CHECK_EDGE(edges->min_streak[j], counters->min_streak[j]);
-                CHECK_EDGE(edges->max_streak[j], counters->max_streak[j]);
+                CHECK_EDGE(edges->min_ns[j], counters->min_ns[j], edges->sum_min_ns[j]);
+                CHECK_EDGE(edges->max_ns[j], counters->max_ns[j], edges->sum_max_ns[j]);
+                CHECK_EDGE(edges->avg_ns[j], avg_ns, edges->sum_avg_ns[j]);
+                CHECK_EDGE(edges->min_streak[j], counters->min_streak[j], edges->sum_min_streak[j]);
+                CHECK_EDGE(edges->max_streak[j], counters->max_streak[j], edges->sum_max_streak[j]);
             }
         }
     }
 
-    printf("DEBUG: State %d check complete, outside=%d\n", vm_state, outside);
-    return !outside;
-}
-
-static bool detect_system_state(int vm_state) {
-    printf("DEBUG: Attempting to detect state %d\n", vm_state);
-    bool result = state_edges(vm_state, false);
-    printf("DEBUG: State detection result for state %d: %d\n", vm_state, result);
-    return result;
-}
-
-static void update_state_edges(int vm_state) {
-    printf("DEBUG: Updating edges for state %d\n", vm_state);
-    state_edges(vm_state, true);
+    printf("DEBUG: State %d check complete, confidence=%.2f\n", vm_state,
+           num_metrics > 0 ? total_confidence / num_metrics : 0.0f);
+    return num_metrics > 0 ? total_confidence / num_metrics : 0.0f;
 }
 
 /* Called periodically by the timer */
@@ -512,7 +568,7 @@ static void cpu_stats_per_second(void) {
 
     if (new_state != STATE_AUTODETECT) {
         printf("DEBUG: Using explicit state %d\n", new_state);
-        update_state_edges(new_state);
+        state_edges(new_state, true);
     }
 
     vm_state = new_state;

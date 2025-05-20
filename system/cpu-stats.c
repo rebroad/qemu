@@ -187,7 +187,7 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
         counters_array[func_id].last_time[1].tv_sec = 0; counters_array[func_id].last_time[1].tv_nsec = 0;
 
         // Also add it to the map for future lookups
-        g_hash_table_insert(g_func_map, func_name, GINT_TO_POINTER(func_id));
+        g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
 
         // Initialize edges for the new function
         for (int s = 0; s < NUM_STATES; s++) {

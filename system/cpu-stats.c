@@ -67,6 +67,18 @@ bool state_edges_loaded = false;
 GHashTable *g_func_map = NULL;
 static QEMUTimer *cpu_stats_timer = NULL; // Timer for periodic stats update
 
+#define CHECK_EDGE(edge, current_val) \
+    do { \
+        if (current_val < edge[0]) { \
+            if (update) edge[0] = current_val; \
+            outside = true; \
+        } \
+        if (current_val > edge[1]) { \
+            if (update) edge[1] = current_val; \
+            outside = true; \
+        } \
+    } while (0)
+
 static bool is_on_battery(void) {
     FILE *f = fopen("/sys/class/power_supply/ACAD/online", "r");
     if (!f) return false;
@@ -93,6 +105,10 @@ static void cpu_stats_print_all(void) {
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
+        if (!it->func_name || !it->file_name) {
+            fprintf(stderr, "Warning: Found null function name or file at index %d\n", i);
+            continue;
+        }
         if (it->count[0] == 0 && it->count[1] == 0)
             printf("%s [%s]: called %d times\n",
                    it->func_name, it->file_name, it->call_count);
@@ -120,21 +136,32 @@ static void cpu_stats_timer_cb(void *opaque)
 
 // Find (or create) the counters struct for a function
 struct debug_counters *find_counters_array(const char *func_name, const char *file_name) {
-    if (next_func_id >= MAX_DEBUG_FUNCS) return NULL;
+    if (!func_name || !file_name) {
+        fprintf(stderr, "Warning: Attempted to register function with null name or file\n");
+        return NULL;
+    }
+
+    if (next_func_id >= MAX_DEBUG_FUNCS) {
+        fprintf(stderr, "Warning: Exceeded maximum number of tracked functions (%d)\n", MAX_DEBUG_FUNCS);
+        return NULL;
+    }
 
     // Ensure the main counters array is allocated and timer is initialized
     if (!counters_array) {
+        printf("DEBUG: Initializing counters array and timer\n");
         counters_array = g_new0(struct debug_counters, MAX_DEBUG_FUNCS);
         // Initialize hash map with NULL key_destroy_func since we're using string literals
         g_func_map = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                           NULL,   // Don't free the keys (they're string literals)
+                                           NULL,   // Don't free the keys - they're shared with counters_array
                                            NULL);  // Values (func_id) are integers
 
         // Initialize and arm the periodic timer
         cpu_stats_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, cpu_stats_timer_cb, NULL);
         timer_mod(cpu_stats_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000); // Fire in 1 sec
 
+        printf("DEBUG: About to load state edge data\n");
         load_state_edge_data(); // Load data which populates g_func_map and state_edge_data
+        printf("DEBUG: Finished loading state edge data\n");
     }
 
     gpointer func_id_ptr = NULL;
@@ -142,28 +169,25 @@ struct debug_counters *find_counters_array(const char *func_name, const char *fi
     // Check the map populated by load_state_edge_data
     if (g_hash_table_lookup_extended(g_func_map, func_name, NULL, &func_id_ptr))
     {
-        int orig_func_id = GPOINTER_TO_INT(func_id_ptr);
-        //if (counters_array[orig_func_id].call_count == 0) {
-            new_func = true;
-            func_id = next_func_id++; // Assign the next available ID
-        //}
-        fprintf(stderr, "Existing func %s from %s at idx %d->%d counters=%p\n",
-                    func_name, file_name, orig_func_id, func_id, (void*)&counters_array[func_id]);
+        func_id = GPOINTER_TO_INT(func_id_ptr);
+        printf("DEBUG: Found existing func %s from %s at idx %d counters=%p\n",
+                    func_name, file_name, func_id, (void*)&counters_array[func_id]);
     } else {
         new_func = true;
         func_id = next_func_id++; // Assign the next available ID
-        fprintf(stderr, "New func %s from %s at idx %d counters=%p\n",
+        printf("DEBUG: Registering new func %s from %s at idx %d counters=%p\n",
                 func_name, file_name, func_id, (void*)&counters_array[func_id]);
     }
 
     if (new_func) {
+        // The strings from __func__ and __FILE__ are compile-time constants
         counters_array[func_id].func_name = func_name;
         counters_array[func_id].file_name = file_name;
         counters_array[func_id].last_time[0].tv_sec = 0; counters_array[func_id].last_time[0].tv_nsec = 0;
         counters_array[func_id].last_time[1].tv_sec = 0; counters_array[func_id].last_time[1].tv_nsec = 0;
 
         // Also add it to the map for future lookups
-        g_hash_table_insert(g_func_map, (gpointer)func_name, GINT_TO_POINTER(func_id));
+        g_hash_table_insert(g_func_map, func_name, GINT_TO_POINTER(func_id));
 
         // Initialize edges for the new function
         for (int s = 0; s < NUM_STATES; s++) {
@@ -200,11 +224,19 @@ static int get_system_state(int current_state) {
             base_state = STATE_AUTODETECT;
         }
         fclose(state_file);
+        printf("DEBUG: Read state %d from vm_state.txt\n", base_state);
+    } else {
+        printf("DEBUG: No vm_state.txt found, will try to autodetect\n");
     }
 
-    if (base_state == STATE_AUTODETECT) return base_state;
+    if (base_state == STATE_AUTODETECT) {
+        printf("DEBUG: Using autodetect mode\n");
+        return base_state;
+    }
 
     int new_state = base_state * 2 + (is_on_battery() ? 1 : 0);
+    printf("DEBUG: Calculated new_state=%d (base_state=%d, on_battery=%d)\n",
+           new_state, base_state, is_on_battery());
 
     if (new_state != current_state) {
         printf("State change detected: %d -> %d\n", current_state, new_state);
@@ -250,6 +282,8 @@ static void load_state_edge_data(void) {
     }
 
     int num_funcs_loaded = header.num_funcs_saved;
+    printf("DEBUG: Loading %d functions from state edge file\n", num_funcs_loaded);
+
     if (!num_funcs_loaded) {
         printf("State edge file '%s' is empty or contains no function data.\n", STATE_EDGE_FILE);
         fclose(f);
@@ -272,27 +306,25 @@ static void load_state_edge_data(void) {
     for (int i = 0; i < num_funcs_loaded; i++) {
         char func_name_buf[MAX_FUNC_NAME_LEN];
         if (fread(func_name_buf, sizeof(char), MAX_FUNC_NAME_LEN, f) != MAX_FUNC_NAME_LEN) {
-            fprintf(stderr, "Error reading function name for index %d from '%s'. Load aborted.\\n", i, STATE_EDGE_FILE);
+            fprintf(stderr, "Error reading function name for index %d from '%s'. Load aborted.\n", i, STATE_EDGE_FILE);
             fclose(f);
-            // Clean up potentially partially populated map/data?
-            g_hash_table_remove_all(g_func_map); // Clear map on error
-            next_func_id = 0; // Reset func count
+            g_hash_table_remove_all(g_func_map);
+            next_func_id = 0;
             return;
         }
         func_name_buf[MAX_FUNC_NAME_LEN - 1] = '\0'; // Ensure null termination
 
         // Map the name to the function index 'i'
         if (strlen(func_name_buf) > 0) {
+            printf("DEBUG: Loading function '%s' at index %d\n", func_name_buf, i);
+            // We need to copy the buffer since it's reused for each function
             gchar *name_key = g_strdup(func_name_buf);
             g_hash_table_insert(g_func_map, name_key, GINT_TO_POINTER(i));
-            // Note: name_key is now owned by the hash table if g_str_hash/equal are used
-            // with a key_destroy_func=g_free in g_hash_table_new_full.
-            // If default funcs used, we need to manage this memory or leak it.
-            // Assuming g_hash_table_new_full uses g_free for keys.
+            counters_array[i].func_name = name_key;  // Use the same copy for both
+            counters_array[i].file_name = "unknown"; // We don't save file names in the state file
         } else {
             fprintf(stderr, "Warning: Empty function name found at saved index %d in '%s'. Skipping mapping.\n", i, STATE_EDGE_FILE);
-            // Skip reading state data for this empty name entry? Or read and discard?
-            // Let's read and discard to keep file position correct.
+            // Skip reading state data for this empty name entry
             size_t dummy_read_size = sizeof(struct func_state_edges) * NUM_STATES;
             if (fseek(f, dummy_read_size, SEEK_CUR) != 0) {
                  fprintf(stderr, "Error seeking past state data for empty name at index %d.\n", i);
@@ -301,31 +333,34 @@ static void load_state_edge_data(void) {
                  next_func_id = 0;
                  return;
             }
-            continue; // Skip to next function
+            continue;
         }
 
         // Read state data for this function
         for (int s = 0; s < NUM_STATES; s++) {
-            // Read directly into the destination structure
             if (fread(&state_edge_data[s][i], sizeof(struct func_state_edges), 1, f) != 1) {
-                fprintf(stderr, "Error reading state edge data for func_id %d, state %d from '%s'. Load aborted.\\n", i, s, STATE_EDGE_FILE);
+                fprintf(stderr, "Error reading state edge data for func_id %d, state %d from '%s'. Load aborted.\n", i, s, STATE_EDGE_FILE);
                 fclose(f);
                 g_hash_table_remove_all(g_func_map);
                 next_func_id = 0;
                 return;
             }
+            printf("DEBUG: Loaded edges for state %d: call_count=[%lu,%lu]\n",
+                   s, state_edge_data[s][i].call_count[0], state_edge_data[s][i].call_count[1]);
         }
     }
 
     fclose(f);
-
-    next_func_id = num_funcs_loaded; // Update global count based on successful load
-    printf("Loaded %d function edge sets for %d states from '%s'.\\n", next_func_id, NUM_STATES, STATE_EDGE_FILE);
+    // Update next_func_id to be after the last loaded function
+    next_func_id = num_funcs_loaded;
+    printf("DEBUG: Set next_func_id to %d after loading state edges\n", next_func_id);
+    printf("Loaded %d function edge sets for %d states from '%s'.\n", next_func_id, NUM_STATES, STATE_EDGE_FILE);
     state_edges_loaded = true;
 }
 
 /* Save state edge data to binary file */
 static void save_state_edge_data(void) {
+    printf("DEBUG: Attempting to save state edge data to '%s'\n", STATE_EDGE_FILE);
     FILE *f = fopen(STATE_EDGE_FILE, "wb");
     if (!f) {
         perror("Could not create state edge file for writing");
@@ -344,6 +379,8 @@ static void save_state_edge_data(void) {
         return;
     }
 
+    printf("DEBUG: Saving %d functions to state edge file\n", next_func_id);
+
     // Write data: Loop functions, then states
     for (int i = 0; i < next_func_id; i++) {
         // Assume counters_array is populated correctly and name exists
@@ -358,7 +395,7 @@ static void save_state_edge_data(void) {
         for (int s = 0; s < NUM_STATES; s++) {
             // Write directly from the source structure
             if (fwrite(&state_edge_data[s][i], sizeof(struct func_state_edges), 1, f) != 1) {
-                fprintf(stderr, "Error writing state edge data for func_id %d, state %d to '%s'. File may be corrupted.\\n", i, s, STATE_EDGE_FILE);
+                fprintf(stderr, "Error writing state edge data for func_id %d, state %d to '%s'. File may be corrupted.\n", i, s, STATE_EDGE_FILE);
                 fclose(f);
                 return; // Stop writing on error
             }
@@ -366,39 +403,49 @@ static void save_state_edge_data(void) {
     }
 
     fclose(f);
-    printf("Saved %d function edge sets for %d states to '%s'.\n", next_func_id, NUM_STATES, STATE_EDGE_FILE);
+    printf("DEBUG: Successfully saved state edge data\n");
 }
-
-#define CHECK_EDGE(edge, current_val) \
-    do { \
-        if (current_val < edge[0]) { \
-            if (update) edge[0] = current_val; \
-            outside = true; \
-        } \
-        if (current_val > edge[1]) { \
-            if (update) edge[1] = current_val; \
-            outside = true; \
-        } \
-    } while (0)
 
 /* Update the min/max edges for the given state based on current counters */
 static bool state_edges(int vm_state, bool update) {
-    if (vm_state < 0 || vm_state >= NUM_STATES) return false;
+    if (vm_state < 0 || vm_state >= NUM_STATES) {
+        printf("DEBUG: Invalid vm_state %d\n", vm_state);
+        return false;
+    }
 
     bool outside = false;
+    printf("DEBUG: Checking edges for state %d (update=%d)\n", vm_state, update);
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *counters = &counters_array[i];
         struct func_state_edges *edges = &state_edge_data[vm_state][i];
 
+        if (!counters->func_name) {
+            printf("DEBUG: Skipping null function at index %d\n", i);
+            continue;
+        }
+
+        if (counters->call_count > 0) {
+            printf("DEBUG: Function %s: call_count=%u, edges=[%lu,%lu]\n",
+                   counters->func_name, counters->call_count,
+                   edges->call_count[0], edges->call_count[1]);
+        }
+
         CHECK_EDGE(edges->call_count, counters->call_count);
         for (int j = 0; j < 2; j++) { // True=1 and False=0 stats
             CHECK_EDGE(edges->count[j], counters->count[j]);
-            // Only update edges if the counter was actually hit in this interval
-            if (counters->last_time[j].tv_sec == 0) outside = true;
-            else if (counters->count[j] > 0) {
+            if (counters->count[j] > 0) {
+                printf("DEBUG: Function %s[%d]: count=%u, edges=[%lu,%lu]\n",
+                       counters->func_name, j, counters->count[j],
+                       edges->count[j][0], edges->count[j][1]);
+            }
+            // Only update edges if we have timing data
+            if (counters->count[j] > 0) {
                 // Calculate average for this interval
                 uint64_t avg_ns = counters->total_ns[j] / counters->count[j];
+                printf("DEBUG: Function %s[%d]: avg_ns=%lu, edges=[%lu,%lu]\n",
+                       counters->func_name, j, avg_ns,
+                       edges->avg_ns[j][0], edges->avg_ns[j][1]);
                 CHECK_EDGE(edges->min_ns[j], counters->min_ns[j]);
                 CHECK_EDGE(edges->max_ns[j], counters->max_ns[j]);
                 CHECK_EDGE(edges->avg_ns[j], avg_ns);
@@ -409,21 +456,43 @@ static bool state_edges(int vm_state, bool update) {
     }
 
     // Save the data file if any edges were updated
-    if (update && outside) save_state_edge_data();
+    if (update && outside) {
+        printf("DEBUG: Saving state edge data due to outside edges\n");
+        save_state_edge_data();
+    }
 
+    printf("DEBUG: State %d check complete, outside=%d\n", vm_state, outside);
     return !outside;
 }
 
-static void update_state_edges(int vm_state) { state_edges(vm_state, true); }
+static bool detect_system_state(int vm_state) {
+    printf("DEBUG: Attempting to detect state %d\n", vm_state);
+    bool result = state_edges(vm_state, false);
+    printf("DEBUG: State detection result for state %d: %d\n", vm_state, result);
+    return result;
+}
 
-static bool detect_system_state(int vm_state) { return state_edges(vm_state, false); }
+static void update_state_edges(int vm_state) {
+    printf("DEBUG: Updating edges for state %d\n", vm_state);
+    state_edges(vm_state, true);
+}
 
 /* Called periodically by the timer */
 static void cpu_stats_per_second(void) {
     static int vm_state = STATE_AUTODETECT;
 
+    // This will detect all states and print stats
     cpu_stats_print_all();
-    vm_state = get_system_state(vm_state);
-    if (vm_state != STATE_AUTODETECT) update_state_edges(vm_state);
+
+    // Get explicit state if available
+    int new_state = get_system_state(vm_state);
+    printf("DEBUG: Current state: %d, New state: %d\n", vm_state, new_state);
+
+    if (new_state != STATE_AUTODETECT) {
+        printf("DEBUG: Using explicit state %d\n", new_state);
+        update_state_edges(new_state);
+    }
+
+    vm_state = new_state;
     reset_cpu_stats();
 }

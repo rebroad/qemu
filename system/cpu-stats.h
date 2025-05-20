@@ -29,6 +29,9 @@ extern struct debug_counters *counters_array;  // Memory allocated on first use
 // Function to find or create counters for a function
 struct debug_counters *find_counters_array(const char *func_name, const char *file_name);
 
+// Initialize CPU stats subsystem
+void cpu_stats_init(void);
+
 // Debug macros for function instrumentation
 #define DEBUG_FUNC() \
     static struct debug_counters *counters = NULL; \

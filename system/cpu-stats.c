@@ -480,12 +480,6 @@ static bool state_edges(int vm_state, bool update) {
         }
     }
 
-    // Save the data file if any edges were updated
-    if (update && outside) {
-        printf("DEBUG: Saving state edge data due to outside edges\n");
-        save_state_edge_data();
-    }
-
     printf("DEBUG: State %d check complete, outside=%d\n", vm_state, outside);
     return !outside;
 }
@@ -520,4 +514,20 @@ static void cpu_stats_per_second(void) {
 
     vm_state = new_state;
     reset_cpu_stats();
+}
+
+// Add shutdown handler
+static void cpu_stats_shutdown(void)
+{
+    if (g_func_map) {
+        save_state_edge_data();
+        g_hash_table_destroy(g_func_map);
+        g_func_map = NULL;
+    }
+}
+
+// Add initialization function
+void cpu_stats_init(void)
+{
+    atexit(cpu_stats_shutdown);
 }

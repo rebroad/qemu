@@ -52,6 +52,7 @@
 #include "qom/object.h"
 #include "qom/object_interfaces.h"
 #include "system/cpus.h"
+#include "system/cpu-stats.h"
 #include "system/qtest.h"
 #include "system/replay.h"
 #include "system/reset.h"
@@ -885,6 +886,9 @@ void qemu_init_subsystems(void)
 
     bdrv_init_with_whitelist();
     socket_init();
+
+    // Initialize CPU stats
+    cpu_stats_init();
 }
 
 

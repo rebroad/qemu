@@ -7,7 +7,10 @@
 #include "cpu-stats.h"
 #include "qemu/timer.h" // Include for QEMU timers
 #include "qemu/option.h"
+#include "qemu/config-file.h" // For qemu_add_opts
 #include "monitor/hmp.h"
+#include "monitor/monitor-internal.h"
+#include "include/qapi/qmp/qdict.h"
 
 // Debug flag for CPU stats logging
 static bool cpu_stats_debug = false;
@@ -217,8 +220,6 @@ static void cpu_stats_print_all(int current_state) {
                        it->count[0], avg_false_ns, it->min_ns[0], it->max_ns[0], it->min_streak[0], it->max_streak[0]);
         }
     }
-
-    total_calls = total_idle_calls = 0;
 }
 
 /* Timer callback function */
@@ -638,17 +639,17 @@ static void hmp_cpu_stats_debug(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "CPU stats debug logging %s\n", enable ? "enabled" : "disabled");
 }
 
-static void qmp_cpu_stats_debug(bool enable, Error **errp)
+static void qmp_cpu_stats_debug(QDict *args, QObject **ret, Error **errp)
 {
+    bool enable = qdict_get_bool(args, "enable");
     cpu_stats_set_debug(enable);
 }
 
 static void cpu_stats_register_commands(void)
 {
-    monitor_register_hmp("cpu-stats-debug", true, hmp_cpu_stats_debug,
-                        "cpu-stats-debug enable|disable");
-    qmp_register_command("cpu-stats-debug", qmp_cpu_stats_debug,
-                        QCO_ALLOW_PRECONFIG);
+    monitor_register_hmp("cpu-stats-debug", true, hmp_cpu_stats_debug);
+    qmp_register_command(&qmp_commands, "cpu-stats-debug", qmp_cpu_stats_debug,
+                        QCO_ALLOW_PRECONFIG, 0);
 }
 
 // Modify cpu_stats_init

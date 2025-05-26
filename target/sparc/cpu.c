@@ -31,7 +31,13 @@
 #include "target/sparc/translate.h"
 #include "system/cpu-stats.h"
 #include "qemu/option.h"
+#include "qemu/config-file.h"
 #include "monitor/hmp.h"
+#include "monitor/monitor-internal.h"
+#include "qapi/qmp/qdict.h"
+
+/* Prototype for sparc_cpu_parse_opts to avoid implicit declaration */
+static void sparc_cpu_parse_opts(void);
 
 // Debug flag for SPARC CPU logging
 static bool sparc_cpu_debug = false;
@@ -1166,12 +1172,15 @@ static void sparc_cpu_register_opts(void)
     qemu_add_opts(&sparc_cpu_opts);
 }
 
+// Forward declarations for monitor commands
+static void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict);
+static void qmp_sparc_cpu_debug(QDict *args, QObject **ret, Error **errp);
+
 static void sparc_cpu_register_commands(void)
 {
-    monitor_register_hmp("sparc-cpu-debug", true, hmp_sparc_cpu_debug,
-                        "sparc-cpu-debug enable|disable");
-    qmp_register_command("sparc-cpu-debug", qmp_sparc_cpu_debug,
-                        QCO_ALLOW_PRECONFIG);
+    monitor_register_hmp("sparc-cpu-debug", true, hmp_sparc_cpu_debug);
+    qmp_register_command(&qmp_commands, "sparc-cpu-debug", qmp_sparc_cpu_debug,
+                        QCO_ALLOW_PRECONFIG, 0);
 }
 
 static void sparc_cpu_register_types(void)
@@ -1203,7 +1212,8 @@ static void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
 }
 
-static void qmp_sparc_cpu_debug(bool enable, Error **errp)
+static void qmp_sparc_cpu_debug(QDict *args, QObject **ret, Error **errp)
 {
+    bool enable = qdict_get_bool(args, "enable");
     sparc_cpu_set_debug(enable);
 }

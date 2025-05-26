@@ -6,6 +6,11 @@
 #include "qemu/log.h"
 #include "cpu-stats.h"
 #include "qemu/timer.h" // Include for QEMU timers
+#include "qemu/option.h"
+#include "monitor/hmp.h"
+
+// Debug flag for CPU stats logging
+static bool cpu_stats_debug = false;
 
 #define STATE_EDGE_FILE "state_edges.dat"
 #define MAX_FUNC_NAME_LEN 64 // Max length for function names
@@ -148,6 +153,13 @@ static float calculate_confidence(uint64_t value, uint64_t min_val, uint64_t max
     return expf(-(z_score * z_score) / 2.0f);
 }
 
+// Add function to toggle debug logging
+void cpu_stats_set_debug(bool enable)
+{
+    cpu_stats_debug = enable;
+    printf("CPU stats debug logging %s\n", enable ? "enabled" : "disabled");
+}
+
 // Function to print debug statistics
 static void cpu_stats_print_all(int current_state) {
     if (next_func_id >= MAX_DEBUG_FUNCS)
@@ -159,7 +171,8 @@ static void cpu_stats_print_all(int current_state) {
     float shutdown_conf = state_edges(STATE_SHUTDOWN * 2 + on_battery, false);
     static int prom_idle_count = 0;
 
-    printf("DEBUG: prom_idle_conf=%.2f, prom_idle_count=%d\n", prom_idle_conf, prom_idle_count);
+    if (cpu_stats_debug)
+        printf("DEBUG: prom_idle_conf=%.2f, prom_idle_count=%d\n", prom_idle_conf, prom_idle_count);
 
     // Only handle BOOTDISK_FILE in autodetect mode
     if (current_state == STATE_AUTODETECT) {
@@ -167,42 +180,45 @@ static void cpu_stats_print_all(int current_state) {
             FILE *f = fopen(BOOTDISK_FILE, "w");
             if (f) {
                 fclose(f);
-                printf("DEBUG: %s created\n", BOOTDISK_FILE);
-            } else printf("DEBUG: Failed to create %s: %s\n", BOOTDISK_FILE, strerror(errno));
+                if (cpu_stats_debug) printf("DEBUG: %s created\n", BOOTDISK_FILE);
+            } else if (cpu_stats_debug) printf("DEBUG: Failed to create %s: %s\n", BOOTDISK_FILE, strerror(errno));
         } else if (prom_idle_conf < 0.2f && prom_idle_count && !--prom_idle_count) {
-            if (unlink(BOOTDISK_FILE) == 0)
-                printf("DEBUG: %s removed\n", BOOTDISK_FILE);
-            else
-                printf("DEBUG: Failed to remove %s: %s\n", BOOTDISK_FILE, strerror(errno));
+            if (unlink(BOOTDISK_FILE) == 0) {
+                if (cpu_stats_debug) printf("DEBUG: %s removed\n", BOOTDISK_FILE);
+            } else if (cpu_stats_debug) printf("DEBUG: Failed to remove %s: %s\n", BOOTDISK_FILE, strerror(errno));
         }
     }
 
-    printf("\nSystem States: Power=%s%s%s%s\n",
-           on_battery ? "Battery" : "AC", prom_idle_conf > 0.8f ? " prom_idle" : "",
-           os_idle_conf > 0.8f ? " os_idle" : "", shutdown_conf > 0.8f ? " shutdown" : "");
+    if (cpu_stats_debug)
+        printf("\nSystem States: Power=%s%s%s%s\n",
+               on_battery ? "Battery" : "AC", prom_idle_conf > 0.8f ? " prom_idle" : "",
+               os_idle_conf > 0.8f ? " os_idle" : "", shutdown_conf > 0.8f ? " shutdown" : "");
 
     for (int i = 0; i < next_func_id; i++) {
         struct debug_counters *it = &counters_array[i];
         if (!it->func_name) {
-            fprintf(stderr, "Warning: Found null function name at index %d\n", i);
+            if (cpu_stats_debug)
+                printf("Warning: Found null function name at index %d\n", i);
             continue;
         }
         if (it->count[0] == 0 && it->count[1] == 0) {
             g_autofree char *file_str = it->file_name ? g_strdup_printf(" [%s]", it->file_name) : NULL;
-            printf("%s%s: called %d times\n", it->func_name, file_str ? file_str : "", it->call_count);
+            if (cpu_stats_debug)
+                printf("%s%s: called %d times\n", it->func_name, file_str ? file_str : "", it->call_count);
         } else {
             uint64_t avg_false_ns = it->count[0] ? it->total_ns[0] / it->count[0] : 0;
             uint64_t avg_true_ns = it->count[1] ? it->total_ns[1] / it->count[1] : 0;
             g_autofree char *file_str = it->file_name ? g_strdup_printf(" [%s]", it->file_name) : NULL;
-            printf("%s%s: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
-                   "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
-                   it->func_name, file_str ? file_str : "",
-                   it->count[1], avg_true_ns, it->min_ns[1], it->max_ns[1],
-                   it->min_streak[1], it->max_streak[1],
-                   it->count[0], avg_false_ns, it->min_ns[0], it->max_ns[0],
-                   it->min_streak[0], it->max_streak[0]);
+            if (cpu_stats_debug)
+                printf("%s%s: true=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d), "
+                       "false=%d (avg/min/max=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " ns, streak=%d-%d)\n",
+                       it->func_name, file_str ? file_str : "",
+                       it->count[1], avg_true_ns, it->min_ns[1], it->max_ns[1], it->min_streak[1], it->max_streak[1],
+                       it->count[0], avg_false_ns, it->min_ns[0], it->max_ns[0], it->min_streak[0], it->max_streak[0]);
         }
     }
+
+    total_calls = total_idle_calls = 0;
 }
 
 /* Timer callback function */
@@ -587,8 +603,59 @@ static void cpu_stats_shutdown(void)
     }
 }
 
-// Add initialization function
+// Add after other static variables
+static QemuOptsList cpu_stats_opts = {
+    .name = "cpu-stats",
+    .head = QTAILQ_HEAD_INITIALIZER(cpu_stats_opts.head),
+    .desc = {
+        {
+            .name = "debug",
+            .type = QEMU_OPT_BOOL,
+        },
+        { /* end of list */ }
+    },
+};
+
+// Add before cpu_stats_init
+static void cpu_stats_register_opts(void)
+{
+    qemu_add_opts(&cpu_stats_opts);
+}
+
+static void cpu_stats_parse_opts(void)
+{
+    QemuOpts *opts = qemu_opts_find(&cpu_stats_opts, NULL);
+    if (opts) {
+        cpu_stats_debug = qemu_opt_get_bool(opts, "debug", false);
+    }
+}
+
+// Add after cpu_stats_init
+static void hmp_cpu_stats_debug(Monitor *mon, const QDict *qdict)
+{
+    bool enable = qdict_get_bool(qdict, "enable");
+    cpu_stats_set_debug(enable);
+    monitor_printf(mon, "CPU stats debug logging %s\n", enable ? "enabled" : "disabled");
+}
+
+static void qmp_cpu_stats_debug(bool enable, Error **errp)
+{
+    cpu_stats_set_debug(enable);
+}
+
+static void cpu_stats_register_commands(void)
+{
+    monitor_register_hmp("cpu-stats-debug", true, hmp_cpu_stats_debug,
+                        "cpu-stats-debug enable|disable");
+    qmp_register_command("cpu-stats-debug", qmp_cpu_stats_debug,
+                        QCO_ALLOW_PRECONFIG);
+}
+
+// Modify cpu_stats_init
 void cpu_stats_init(void)
 {
     atexit(cpu_stats_shutdown);
+    cpu_stats_register_opts();
+    cpu_stats_parse_opts();
+    cpu_stats_register_commands();
 }

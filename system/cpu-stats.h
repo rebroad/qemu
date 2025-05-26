@@ -66,4 +66,7 @@ void cpu_stats_init(void);
     return n; \
 } while (0)
 
+// Debug control
+void cpu_stats_set_debug(bool enable);
+
 #endif /* CPU_STATS_H */

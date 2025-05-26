@@ -30,8 +30,25 @@
 #include "fpu/softfloat.h"
 #include "target/sparc/translate.h"
 #include "system/cpu-stats.h"
+#include "qemu/option.h"
+#include "monitor/hmp.h"
 
-//#define DEBUG_FEATURES
+// Debug flag for SPARC CPU logging
+static bool sparc_cpu_debug = false;
+
+static QemuOptsList sparc_cpu_opts = {
+    .name = "sparc-cpu",
+    .implied_opt_name = "cpu",
+    .head = QTAILQ_HEAD_INITIALIZER(sparc_cpu_opts.head),
+    .desc = {
+        {
+            .name = "debug",
+            .type = QEMU_OPT_BOOL,
+            .help = "Enable SPARC CPU debug output",
+        },
+        { /* end of list */ }
+    },
+};
 
 static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 {
@@ -791,11 +808,13 @@ static bool sparc_cpu_has_work(CPUState *cs)
     static int max_idle_count = 0;  // Track maximum idle count reached
     static int total_sleeps = 0;    // Track total number of sleeps
     static int total_sleep_us = 0;  // Track total sleep time
+    static int calls_since_last_debug = 0;  // Track number of calls since last debug output
 
     // Check for interrupt requests
     bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(env);
 
     int sleep_us = 0;
+    calls_since_last_debug++;
 
     if (env->pc == last_pc && env->npc == last_npc) {
         idle_count++;
@@ -806,29 +825,40 @@ static bool sparc_cpu_has_work(CPUState *cs)
             sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
             total_sleeps++;
         }
-    } else idle_count = 0;
+    } else {
+        idle_count = 0;
+    }
 
     // Check for power down state
-    if (cs->halted) { total_sleeps++; sleep_us = MAX_SLEEP_US; }
+    if (cs->halted) { 
+        total_sleeps++; 
+        sleep_us = MAX_SLEEP_US; 
+    }
 
     total_sleep_us += sleep_us;
     g_usleep(sleep_us);
 
-    // Check for idle loop by monitoring both pc and npc
     // Print debug info at most once per second
     time_t current_time = time(NULL);
     if (current_time != last_debug_time) {
-        if (max_idle_count > 0 || total_sleeps > 0) {
-            printf("SPARC Idle Stats: max_idle=%d, total_sleeps=%d, avg_sleep_us=%d\n",
-                   max_idle_count, total_sleeps,
+        if (sparc_cpu_debug && (max_idle_count > 0 || total_sleeps > 0 || calls_since_last_debug > 0)) {
+            printf("SPARC CPU Stats (1s): calls=%d, max_idle=%d, total_sleeps=%d, avg_sleep_us=%d\n",
+                   calls_since_last_debug, max_idle_count, total_sleeps,
                    total_sleeps > 0 ? total_sleep_us / total_sleeps : 0);
         }
         last_debug_time = current_time;
-        max_idle_count = total_sleeps = total_sleep_us = 0;
+        max_idle_count = total_sleeps = total_sleep_us = calls_since_last_debug = 0;
     }
 
     last_pc = env->pc; last_npc = env->npc;
     return has_interrupt;
+}
+
+// Add function to toggle debug logging
+void sparc_cpu_set_debug(bool enable)
+{
+    sparc_cpu_debug = enable;
+    printf("SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
 }
 
 static int sparc_cpu_mmu_index(CPUState *cs, bool ifetch)
@@ -953,6 +983,7 @@ static void sparc_cpu_initfn(Object *obj)
     if (scc->cpu_def) {
         env->def = *scc->cpu_def;
     }
+    sparc_cpu_parse_opts();
 }
 
 static void sparc_get_nwindows(Object *obj, Visitor *v, const char *name,
@@ -1130,6 +1161,19 @@ static void sparc_register_cpudef_type(const struct sparc_def_t *def)
     g_free(typename);
 }
 
+static void sparc_cpu_register_opts(void)
+{
+    qemu_add_opts(&sparc_cpu_opts);
+}
+
+static void sparc_cpu_register_commands(void)
+{
+    monitor_register_hmp("sparc-cpu-debug", true, hmp_sparc_cpu_debug,
+                        "sparc-cpu-debug enable|disable");
+    qmp_register_command("sparc-cpu-debug", qmp_sparc_cpu_debug,
+                        QCO_ALLOW_PRECONFIG);
+}
+
 static void sparc_cpu_register_types(void)
 {
     int i;
@@ -1138,6 +1182,28 @@ static void sparc_cpu_register_types(void)
     for (i = 0; i < ARRAY_SIZE(sparc_defs); i++) {
         sparc_register_cpudef_type(&sparc_defs[i]);
     }
+    sparc_cpu_register_opts();
+    sparc_cpu_register_commands();
 }
 
 type_init(sparc_cpu_register_types)
+
+static void sparc_cpu_parse_opts(void)
+{
+    QemuOpts *opts = qemu_opts_find(&sparc_cpu_opts, NULL);
+    if (opts) {
+        sparc_cpu_debug = qemu_opt_get_bool(opts, "debug", false);
+    }
+}
+
+static void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
+{
+    bool enable = qdict_get_bool(qdict, "enable");
+    sparc_cpu_set_debug(enable);
+    monitor_printf(mon, "SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
+}
+
+static void qmp_sparc_cpu_debug(bool enable, Error **errp)
+{
+    sparc_cpu_set_debug(enable);
+}

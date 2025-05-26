@@ -1,6 +1,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <math.h> // For expf
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "cpu-stats.h"
@@ -28,47 +29,6 @@
 
 #define NUM_STATES             (NUM_BASE_STATES * 2)
 
-/* Handle overflow by halving all sum values */
-static void halve_sum_values(struct func_state_edges *edges) {
-    edges->sum_call_count /= 2;
-    for (int j = 0; j < 2; j++) {
-        edges->sum_min_ns[j] /= 2;
-        edges->sum_max_ns[j] /= 2;
-        edges->sum_avg_ns[j] /= 2;
-        edges->sum_min_streak[j] /= 2;
-        edges->sum_max_streak[j] /= 2;
-        edges->sum_count[j] /= 2;
-    }
-    edges->num_samples /= 2;
-}
-
-#define CHECK_EDGE(edge, current_val, sum_val) \
-    do { \
-        if (current_val < edge[0]) { \
-            if (update) edge[0] = current_val; \
-            outside = true; \
-        } \
-        if (current_val > edge[1]) { \
-            if (update) edge[1] = current_val; \
-            outside = true; \
-        } \
-        if (update) { \
-            if (sum_val > UINT64_MAX - current_val) \
-                halve_sum_values(edges); \
-            sum_val += current_val; \
-            edges->num_samples++; \
-        } else { \
-            float conf = calculate_confidence( \
-                current_val, \
-                edge[0], \
-                edge[1], \
-                sum_val / edges->num_samples \
-            ); \
-            total_confidence += conf; \
-            num_metrics++; \
-        } \
-    } while (0)
-
 // Structure to hold the min/max edges for counters per function
 // This structure is used both in the save file and runtime
 struct func_state_edges {
@@ -93,6 +53,48 @@ struct func_state_edges {
     uint64_t sum_max_streak[2]; // Sum of max_streak values
     uint64_t sum_count[2];      // Sum of count values
 } func_edges[MAX_DEBUG_FUNCS];
+
+// Forward declaration for state_edges
+static float state_edges(int vm_state, bool update);
+
+/* Handle overflow by halving all sum values */
+static void halve_sum_values(struct func_state_edges *edges) {
+    edges->sum_call_count /= 2;
+    for (int j = 0; j < 2; j++) {
+        edges->sum_min_ns[j] /= 2;
+        edges->sum_max_ns[j] /= 2;
+        edges->sum_avg_ns[j] /= 2;
+        edges->sum_min_streak[j] /= 2;
+        edges->sum_max_streak[j] /= 2;
+        edges->sum_count[j] /= 2;
+    }
+    edges->num_samples /= 2;
+}
+
+#define CHECK_EDGE(edge, current_val, sum_val) \
+    do { \
+        if (current_val < edge[0]) { \
+            if (update) edge[0] = current_val; \
+        } \
+        if (current_val > edge[1]) { \
+            if (update) edge[1] = current_val; \
+        } \
+        if (update) { \
+            if (sum_val > UINT64_MAX - current_val) \
+                halve_sum_values(edges); \
+            sum_val += current_val; \
+            edges->num_samples++; \
+        } else { \
+            float conf = calculate_confidence( \
+                current_val, \
+                edge[0], \
+                edge[1], \
+                sum_val / edges->num_samples \
+            ); \
+            total_confidence += conf; \
+            num_metrics++; \
+        } \
+    } while (0)
 
 // Header structure for the state edge file
 struct state_edge_file_header {

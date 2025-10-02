@@ -721,6 +721,20 @@ SRST
 ERST
 
     {
+        .name       = "sparc-cpu-debug",
+        .args_type  = "enable:b",
+        .params     = "on|off",
+        .help       = "enable or disable SPARC CPU idle detection debug output",
+        .cmd        = hmp_sparc_cpu_debug,
+    },
+
+SRST
+``sparc-cpu-debug`` *on*|*off*
+  Enable or disable SPARC CPU idle detection debug output.
+  This shows statistics about idle loop detection and CPU throttling.
+ERST
+
+    {
         .name       = "mouse_move",
         .args_type  = "dx_str:s,dy_str:s,dz_str:s?",
         .params     = "dx dy [dz]",

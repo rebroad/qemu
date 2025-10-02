@@ -1173,12 +1173,12 @@ static void sparc_cpu_register_opts(void)
 }
 
 // Forward declarations for monitor commands
-static void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict);
+void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict);
 static void qmp_sparc_cpu_debug(QDict *args, QObject **ret, Error **errp);
 
 static void sparc_cpu_register_commands(void)
 {
-    monitor_register_hmp("sparc-cpu-debug", true, hmp_sparc_cpu_debug);
+    monitor_register_hmp("sparc-cpu-debug", false, hmp_sparc_cpu_debug);
     qmp_register_command(&qmp_commands, "sparc-cpu-debug", qmp_sparc_cpu_debug,
                         QCO_ALLOW_PRECONFIG, 0);
 }
@@ -1205,7 +1205,7 @@ static void sparc_cpu_parse_opts(void)
     }
 }
 
-static void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
+void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
 {
     bool enable = qdict_get_bool(qdict, "enable");
     sparc_cpu_set_debug(enable);

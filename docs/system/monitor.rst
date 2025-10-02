@@ -14,6 +14,8 @@ You can use it to:
 
 -  Inspect the VM state without an external debugger.
 
+-  Enable or disable debug logging for various components.
+
 Commands
 ~~~~~~~~
 
@@ -22,6 +24,17 @@ The following commands are available:
 .. hxtool-doc:: hmp-commands.hx
 
 .. hxtool-doc:: hmp-commands-info.hx
+
+Debug Commands
+~~~~~~~~~~~~~
+
+.. cmdoption:: cpu-stats-debug [on|off]
+
+   Enable or disable debug logging for CPU statistics. When enabled, detailed information about CPU operations and performance metrics will be printed.
+
+.. cmdoption:: sparc-cpu-debug [on|off]
+
+   Enable or disable debug logging for SPARC CPU operations. When enabled, detailed information about SPARC-specific CPU operations and state changes will be printed.
 
 Integer expressions
 ~~~~~~~~~~~~~~~~~~~

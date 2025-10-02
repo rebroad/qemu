@@ -21,3 +21,14 @@ Device URL Syntax
 ~~~~~~~~~~~~~~~~~
 
 .. include:: device-url-syntax.rst.inc
+
+Debug Options
+~~~~~~~~~~~~
+
+.. option:: -cpu-stats-debug
+
+   Enable debug logging for CPU statistics. This will print detailed information about CPU operations and performance metrics.
+
+.. option:: -sparc-cpu-debug
+
+   Enable debug logging for SPARC CPU operations. This will print detailed information about SPARC-specific CPU operations and state changes.

@@ -814,13 +814,39 @@ static bool sparc_cpu_has_work(CPUState *cs)
     static int total_sleep_us = 0;  // Track total sleep time
     static int calls_since_last_debug = 0;  // Track number of calls since last debug output
 
+    // Known idle addresses (discovered through analysis)
+    static const target_ulong SUNOS_IDLE_PC = 0xf01294f8;
+    static const target_ulong PROM_IDLE_PCS[] = {0xffd16750, 0xffd20170, 0xffef0000};
+    static const int NUM_PROM_IDLE_PCS = sizeof(PROM_IDLE_PCS) / sizeof(PROM_IDLE_PCS[0]);
+
     // Check for interrupt requests
     bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(env);
 
     int sleep_us = 0;
     calls_since_last_debug++;
 
-    if (env->pc == last_pc && env->npc == last_npc) {
+    // Check for known idle patterns first (faster detection)
+    bool is_known_idle = false;
+    if (env->pc == SUNOS_IDLE_PC) {
+        is_known_idle = true;
+    } else {
+        // Check PROM idle PCs
+        for (int i = 0; i < NUM_PROM_IDLE_PCS; i++) {
+            if (env->pc == PROM_IDLE_PCS[i]) {
+                is_known_idle = true;
+                break;
+            }
+        }
+    }
+
+    if (is_known_idle) {
+        // Known idle PC - start sleeping immediately
+        idle_count++;
+        if (idle_count > max_idle_count) max_idle_count = idle_count;
+        sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
+        total_sleeps++;
+    } else if (env->pc == last_pc && env->npc == last_npc) {
+        // Generic idle detection (any repeated PC/NPC)
         idle_count++;
         if (idle_count > max_idle_count) max_idle_count = idle_count;
         if (idle_count > IDLE_THRESHOLD) {

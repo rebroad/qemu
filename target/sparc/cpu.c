@@ -29,7 +29,6 @@
 #include "tcg/tcg.h"
 #include "fpu/softfloat.h"
 #include "target/sparc/translate.h"
-#include "system/cpu-stats.h"
 #include "qemu/option.h"
 #include "qemu/config-file.h"
 #include "monitor/hmp.h"
@@ -109,7 +108,6 @@ static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 #ifndef CONFIG_USER_ONLY
 static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    DEBUG_FUNC();
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
 
@@ -121,11 +119,11 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
                 // REBTODO - can we set cs->halted=1 here like in i386/kvm/kvm.c?
-                DEBUG_RETURN(1);
+                return true;
             }
         }
     }
-    DEBUG_RETURN(0);
+    return false;
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -1174,14 +1172,6 @@ static void sparc_cpu_register_opts(void)
 
 // Forward declarations for monitor commands
 void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict);
-static void qmp_sparc_cpu_debug(QDict *args, QObject **ret, Error **errp);
-
-static void sparc_cpu_register_commands(void)
-{
-    monitor_register_hmp("sparc-cpu-debug", false, hmp_sparc_cpu_debug);
-    qmp_register_command(&qmp_commands, "sparc-cpu-debug", qmp_sparc_cpu_debug,
-                        QCO_ALLOW_PRECONFIG, 0);
-}
 
 static void sparc_cpu_register_types(void)
 {
@@ -1192,7 +1182,6 @@ static void sparc_cpu_register_types(void)
         sparc_register_cpudef_type(&sparc_defs[i]);
     }
     sparc_cpu_register_opts();
-    sparc_cpu_register_commands();
 }
 
 type_init(sparc_cpu_register_types)
@@ -1212,8 +1201,3 @@ void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
 }
 
-static void qmp_sparc_cpu_debug(QDict *args, QObject **ret, Error **errp)
-{
-    bool enable = qdict_get_bool(args, "enable");
-    sparc_cpu_set_debug(enable);
-}

@@ -11,7 +11,6 @@ system_ss.add(files(
   'bootdevice.c',
   'cpus.c',
   'cpu-timers.c',
-  'cpu-stats.c',
   'datadir.c',
   'dirtylimit.c',
   'dma-helpers.c',

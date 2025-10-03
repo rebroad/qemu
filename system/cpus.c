@@ -46,7 +46,6 @@
 #include "hw/boards.h"
 #include "hw/hw.h"
 #include "trace.h"
-#include "cpu-stats.h"
 
 #ifdef CONFIG_LINUX
 
@@ -76,11 +75,10 @@ static const AccelOpsClass *cpus_accel;
 
 bool cpu_is_stopped(CPUState *cpu)
 {
-    DEBUG_FUNC();
     if (cpu->stopped || !runstate_is_running()) {
-        DEBUG_RETURN(1);
+        return true;
     }
-    DEBUG_RETURN(0);
+    return false;
 }
 
 bool cpu_work_list_empty(CPUState *cpu)
@@ -90,33 +88,31 @@ bool cpu_work_list_empty(CPUState *cpu)
 
 bool cpu_thread_is_idle(CPUState *cpu)
 {
-    DEBUG_FUNC();
     if (cpu->stop || !cpu_work_list_empty(cpu)) {
-        DEBUG_RETURN(0);
+        return false;
     }
     if (cpu_is_stopped(cpu)) {
-        DEBUG_RETURN(1);
+        return true;
     }
     if (!cpu->halted || cpu_has_work(cpu)) {
-        DEBUG_RETURN(0);
+        return false;
     }
     if (cpus_accel->cpu_thread_is_idle) {
-        DEBUG_RETURN(cpus_accel->cpu_thread_is_idle(cpu));
+        return cpus_accel->cpu_thread_is_idle(cpu);
     }
-    DEBUG_RETURN(1);
+    return true;
 }
 
 bool all_cpu_threads_idle(void)
 {
-    DEBUG_FUNC();
     CPUState *cpu;
 
     CPU_FOREACH(cpu) {
         if (!cpu_thread_is_idle(cpu)) {
-            DEBUG_RETURN(0);
+            return false;
         }
     }
-    DEBUG_RETURN(1);
+    return true;
 }
 
 /***********************************************************/
@@ -204,11 +200,10 @@ void cpu_synchronize_pre_loadvm(CPUState *cpu)
 bool cpus_are_resettable(void)
 {
     // TODO - surely this function never returns false!?
-    DEBUG_FUNC();
     if (cpus_accel->cpus_are_resettable) {
-        DEBUG_RETURN(cpus_accel->cpus_are_resettable());
+        return cpus_accel->cpus_are_resettable();
     }
-    DEBUG_RETURN(1);
+    return true;
 }
 
 void cpu_exec_reset_hold(CPUState *cpu)
@@ -232,7 +227,6 @@ int64_t cpus_get_virtual_clock(void)
      *
      * XXX
      */
-    DEBUG_FUNC();
     if (cpus_accel && cpus_accel->get_virtual_clock) {
         return cpus_accel->get_virtual_clock();
     }
@@ -245,7 +239,6 @@ int64_t cpus_get_virtual_clock(void)
  */
 void cpus_set_virtual_clock(int64_t new_time)
 {
-    DEBUG_FUNC(); // TODO - might need to tweak clock is we add sleeping
     if (cpus_accel && cpus_accel->set_virtual_clock) {
         cpus_accel->set_virtual_clock(new_time);
     }
@@ -258,7 +251,6 @@ void cpus_set_virtual_clock(int64_t new_time)
  */
 int64_t cpus_get_elapsed_ticks(void)
 {
-    DEBUG_FUNC();
     if (cpus_accel->get_elapsed_ticks) {
         return cpus_accel->get_elapsed_ticks();
     }
@@ -276,7 +268,6 @@ static void generic_handle_interrupt(CPUState *cpu, int mask)
 
 void cpu_interrupt(CPUState *cpu, int mask)
 {
-    DEBUG_FUNC();
     if (cpus_accel->handle_interrupt) {
         cpus_accel->handle_interrupt(cpu, mask);
     } else {
@@ -334,19 +325,17 @@ int vm_shutdown(void)
 
 bool cpu_can_run(CPUState *cpu)
 {
-    DEBUG_FUNC();
     if (cpu->stop) {
-        DEBUG_RETURN(0);
+        return false;
     }
     if (cpu_is_stopped(cpu)) {
-        DEBUG_RETURN(0);
+        return false;
     }
-    DEBUG_RETURN(1);
+    return true;
 }
 
 void cpu_handle_guest_debug(CPUState *cpu)
 {
-    DEBUG_FUNC();
     if (replay_running_debug()) {
         if (!cpu->singlestep_enabled) {
             /*
@@ -442,13 +431,11 @@ void qemu_init_cpu_loop(void)
 
 void run_on_cpu(CPUState *cpu, run_on_cpu_func func, run_on_cpu_data data)
 {
-    DEBUG_FUNC();
     do_run_on_cpu(cpu, func, data, &bql);
 }
 
 static void qemu_cpu_stop(CPUState *cpu, bool exit)
 {
-    DEBUG_FUNC();
     g_assert(qemu_cpu_is_self(cpu));
     cpu->stop = false;
     cpu->stopped = true;
@@ -487,7 +474,6 @@ void qemu_wait_io_event(CPUState *cpu)
 
 void cpus_kick_thread(CPUState *cpu)
 {
-    DEBUG_FUNC();
     if (cpu->thread_kicked) {
         return;
     }
@@ -609,7 +595,6 @@ void cpu_thread_signal_destroyed(CPUState *cpu)
 
 void cpu_pause(CPUState *cpu)
 {
-    DEBUG_FUNC();
     if (qemu_cpu_is_self(cpu)) {
         qemu_cpu_stop(cpu, true);
     } else {
@@ -620,7 +605,6 @@ void cpu_pause(CPUState *cpu)
 
 void cpu_resume(CPUState *cpu)
 {
-    DEBUG_FUNC();
     cpu->stop = false;
     cpu->stopped = false;
     qemu_cpu_kick(cpu);

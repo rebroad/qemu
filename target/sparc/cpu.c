@@ -34,6 +34,7 @@
 #include "monitor/hmp.h"
 #include "monitor/monitor-internal.h"
 #include "qapi/qmp/qdict.h"
+#include "system/cpu-timers.h"
 
 /* Prototype for sparc_cpu_parse_opts to avoid implicit declaration */
 static void sparc_cpu_parse_opts(void);
@@ -808,7 +809,6 @@ static bool sparc_cpu_has_work(CPUState *cs)
     static int idle_count = 0;
     static const int IDLE_THRESHOLD = 1000; // Adjust based on testing
     static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
-    static time_t last_debug_time = 0;
     static int max_idle_count = 0;  // Track maximum idle count reached
     static int total_sleeps = 0;    // Track total number of sleeps
     static int total_sleep_us = 0;  // Track total sleep time
@@ -816,7 +816,7 @@ static bool sparc_cpu_has_work(CPUState *cs)
 
     // Known idle addresses (discovered through analysis)
     static const target_ulong SUNOS_IDLE_PC = 0xf01294f8;
-    static const target_ulong PROM_IDLE_PCS[] = {0xffd16750, 0xffd20170, 0xffef0000};
+    static const target_ulong PROM_IDLE_PCS[] = {0xffd16750, 0xffd20170, 0xffd20174, 0xffd2ba10, 0xffef0000};
     static const int NUM_PROM_IDLE_PCS = sizeof(PROM_IDLE_PCS) / sizeof(PROM_IDLE_PCS[0]);
 
     // Check for interrupt requests
@@ -845,6 +845,15 @@ static bool sparc_cpu_has_work(CPUState *cs)
         if (idle_count > max_idle_count) max_idle_count = idle_count;
         sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
         total_sleeps++;
+
+        // Debug: Show when we detect known idle patterns
+        if (idle_count == 1) {
+            if (env->pc == SUNOS_IDLE_PC) {
+                printf("[SPARC-IDLE] SunOS idle detected at PC=0x%08x (sleep_us=%d)\n", env->pc, sleep_us);
+            } else {
+                printf("[SPARC-IDLE] PROM idle detected at PC=0x%08x (sleep_us=%d)\n", env->pc, sleep_us);
+            }
+        }
     } else if (env->pc == last_pc && env->npc == last_npc) {
         // Generic idle detection (any repeated PC/NPC)
         idle_count++;
@@ -860,23 +869,39 @@ static bool sparc_cpu_has_work(CPUState *cs)
     }
 
     // Check for power down state
-    if (cs->halted) { 
-        total_sleeps++; 
-        sleep_us = MAX_SLEEP_US; 
+    if (cs->halted) {
+        total_sleeps++;
+        sleep_us = MAX_SLEEP_US;
     }
 
     total_sleep_us += sleep_us;
-    g_usleep(sleep_us);
 
-    // Print debug info at most once per second
-    time_t current_time = time(NULL);
-    if (current_time != last_debug_time) {
-        if (sparc_cpu_debug && (max_idle_count > 0 || total_sleeps > 0 || calls_since_last_debug > 0)) {
-            printf("SPARC CPU Stats (1s): calls=%d, max_idle=%d, total_sleeps=%d, avg_sleep_us=%d\n",
-                   calls_since_last_debug, max_idle_count, total_sleeps,
-                   total_sleeps > 0 ? total_sleep_us / total_sleeps : 0);
+    // Only sleep if icount is not enabled (when icount is on, we want max speed)
+    if (!icount_enabled() && sleep_us > 0) {
+        g_usleep(sleep_us);
+    }
+
+    // Print debug info at most once per second (MAME-style speed measurement)
+    static int64_t last_report_time_ns = 0;
+    static int64_t last_vm_clock_ns = 0;
+
+    int64_t current_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);  // Host wall-clock
+    int64_t vm_clock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);       // Guest virtual time
+
+    if (current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
+        if (last_report_time_ns > 0 && (max_idle_count > 0 || total_sleeps > 0 || calls_since_last_debug > 0)) {
+            int64_t real_delta_ns = current_time_ns - last_report_time_ns;
+            int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
+
+            // MAME-style speed calculation: (emulated_time / real_time) * 100
+            int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+
+            printf("[SPARC-IDLE] PC=0x%08x, calls=%d, sleeps=%d, sleep_us=%d, speed=%d%%\n",
+                   env->pc, calls_since_last_debug, total_sleeps, total_sleep_us, speed_percent);
+            fflush(stdout);
         }
-        last_debug_time = current_time;
+        last_report_time_ns = current_time_ns;
+        last_vm_clock_ns = vm_clock_ns;
         max_idle_count = total_sleeps = total_sleep_us = calls_since_last_debug = 0;
     }
 

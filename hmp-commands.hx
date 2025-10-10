@@ -735,6 +735,34 @@ SRST
 ERST
 
     {
+        .name       = "sparc-start-idle-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "start collecting idle PC frequencies for learning",
+        .cmd        = hmp_sparc_start_idle_learning,
+    },
+
+SRST
+``sparc-start-idle-learning``
+  Start idle PC learning mode. QEMU will record all PCs while the guest is idle.
+  Keep guest idle for a few seconds, then use sparc-stop-idle-learning.
+ERST
+
+    {
+        .name       = "sparc-stop-idle-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "stop collecting and show top idle PCs",
+        .cmd        = hmp_sparc_stop_idle_learning,
+    },
+
+SRST
+``sparc-stop-idle-learning``
+  Stop idle PC learning mode and display the most frequent PCs.
+  Use these PCs to update the PROM_IDLE_PCS or SUNOS_IDLE_PC arrays.
+ERST
+
+    {
         .name       = "mouse_move",
         .args_type  = "dx_str:s,dy_str:s,dz_str:s?",
         .params     = "dx dy [dz]",

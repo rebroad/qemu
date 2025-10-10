@@ -32,6 +32,7 @@
 #include "qemu/option.h"
 #include "qemu/config-file.h"
 #include "monitor/hmp.h"
+#include "monitor/hmp-target.h"
 #include "monitor/monitor-internal.h"
 #include "qapi/qmp/qdict.h"
 #include "system/cpu-timers.h"
@@ -41,6 +42,18 @@ static void sparc_cpu_parse_opts(void);
 
 // Debug flag for SPARC CPU logging
 static bool sparc_cpu_debug = false;
+
+// Idle PC learning mode
+static bool idle_learning_mode = false;
+#define MAX_IDLE_PC_CANDIDATES 1000
+typedef struct {
+    target_ulong pc;
+    target_ulong npc;
+    uint32_t count;
+} IdlePCCandidate;
+static IdlePCCandidate idle_pc_candidates[MAX_IDLE_PC_CANDIDATES];
+static int num_idle_candidates = 0;
+static uint32_t total_samples_collected = 0;
 
 static QemuOptsList sparc_cpu_opts = {
     .name = "sparc-cpu",
@@ -825,6 +838,31 @@ static bool sparc_cpu_has_work(CPUState *cs)
     int sleep_us = 0;
     calls_since_last_debug++;
 
+    // Learning mode: collect PC/NPC frequencies when user signals idle state
+    if (idle_learning_mode) {
+        total_samples_collected++;
+
+        // Find or add this PC/NPC pair to candidates
+        int found = -1;
+        for (int i = 0; i < num_idle_candidates; i++) {
+            if (idle_pc_candidates[i].pc == env->pc &&
+                idle_pc_candidates[i].npc == env->npc) {
+                found = i;
+                break;
+            }
+        }
+
+        if (found >= 0) {
+            idle_pc_candidates[found].count++;
+        } else if (num_idle_candidates < MAX_IDLE_PC_CANDIDATES) {
+            idle_pc_candidates[num_idle_candidates].pc = env->pc;
+            idle_pc_candidates[num_idle_candidates].npc = env->npc;
+            idle_pc_candidates[num_idle_candidates].count = 1;
+            num_idle_candidates++;
+        }
+        // If we hit max, silently continue counting existing PCs only
+    }
+
     // Check for known idle patterns first (faster detection)
     bool is_known_idle = false;
     if (env->pc == SUNOS_IDLE_PC) {
@@ -914,6 +952,84 @@ void sparc_cpu_set_debug(bool enable)
 {
     sparc_cpu_debug = enable;
     printf("SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
+}
+
+// Idle PC learning mode control functions
+static void sparc_cpu_start_idle_learning(void)
+{
+    printf("🎓 Starting idle PC learning mode...\n");
+    printf("   Keep the guest OS idle for a few seconds, then call sparc-stop-idle-learning\n");
+    idle_learning_mode = true;
+    num_idle_candidates = 0;
+    total_samples_collected = 0;
+    memset(idle_pc_candidates, 0, sizeof(idle_pc_candidates));
+    fflush(stdout);
+}
+
+static void sparc_cpu_stop_idle_learning(void)
+{
+    idle_learning_mode = false;
+
+    printf("🎓 Idle PC learning complete!\n");
+    printf("   Total samples: %u\n", total_samples_collected);
+    printf("   Unique PC/NPC pairs: %d\n", num_idle_candidates);
+
+    if (num_idle_candidates == 0) {
+        printf("   ⚠️  No PCs collected - was the guest actually idle?\n");
+        fflush(stdout);
+        return;
+    }
+
+    if (num_idle_candidates >= MAX_IDLE_PC_CANDIDATES) {
+        printf("   ⚠️  Hit maximum candidate limit! Some PCs may have been dropped.\n");
+    }
+
+    // Sort by count (descending) using simple bubble sort
+    for (int i = 0; i < num_idle_candidates - 1; i++) {
+        for (int j = 0; j < num_idle_candidates - i - 1; j++) {
+            if (idle_pc_candidates[j].count < idle_pc_candidates[j + 1].count) {
+                // Swap entire structures
+                IdlePCCandidate temp = idle_pc_candidates[j];
+                idle_pc_candidates[j] = idle_pc_candidates[j + 1];
+                idle_pc_candidates[j + 1] = temp;
+            }
+        }
+    }
+
+    // Show top 10 most frequent PC/NPC pairs
+    printf("\n   Top idle PC/NPC pairs (by frequency):\n");
+    printf("   Rank  PC         NPC        Count     %%\n");
+    printf("   ----  --------   --------   -------   -----\n");
+    int show_count = num_idle_candidates < 10 ? num_idle_candidates : 10;
+    for (int i = 0; i < show_count; i++) {
+        double percent = (double)idle_pc_candidates[i].count / total_samples_collected * 100.0;
+        printf("   %2d.   0x%08x 0x%08x %7u   %5.1f%%\n", i + 1,
+               (uint32_t)idle_pc_candidates[i].pc,
+               (uint32_t)idle_pc_candidates[i].npc,
+               idle_pc_candidates[i].count,
+               percent);
+    }
+
+    // Show suggested C array (just PCs for now, can add NPC checking later)
+    printf("\n   💡 Suggested idle PCs to add to code:\n");
+    printf("   static const target_ulong LEARNED_IDLE_PCS[] = {");
+    for (int i = 0; i < show_count; i++) {
+        if (i > 0) printf(", ");
+        printf("0x%x", (uint32_t)idle_pc_candidates[i].pc);
+    }
+    printf("};\n");
+
+    // Show patterns
+    printf("\n   🔍 Pattern analysis:\n");
+    int self_loops = 0;
+    for (int i = 0; i < show_count; i++) {
+        if (idle_pc_candidates[i].pc == idle_pc_candidates[i].npc - 4) {
+            self_loops++;
+        }
+    }
+    printf("   Self-loops (PC+4=NPC): %d/%d\n", self_loops, show_count);
+
+    fflush(stdout);
 }
 
 static int sparc_cpu_mmu_index(CPUState *cs, bool ifetch)
@@ -1250,5 +1366,17 @@ void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
     bool enable = qdict_get_bool(qdict, "enable");
     sparc_cpu_set_debug(enable);
     monitor_printf(mon, "SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
+}
+
+void hmp_sparc_start_idle_learning(Monitor *mon, const QDict *qdict)
+{
+    sparc_cpu_start_idle_learning();
+    monitor_printf(mon, "Started idle PC learning mode\n");
+}
+
+void hmp_sparc_stop_idle_learning(Monitor *mon, const QDict *qdict)
+{
+    sparc_cpu_stop_idle_learning();
+    monitor_printf(mon, "Stopped idle PC learning mode\n");
 }
 

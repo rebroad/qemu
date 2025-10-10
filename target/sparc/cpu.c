@@ -816,6 +816,17 @@ static void sparc_restore_state_to_opc(CPUState *cs,
 
 static bool sparc_cpu_has_work(CPUState *cs)
 {
+    // This is only called when cpu->halted is true
+    // For idle detection during normal execution, see sparc_cpu_exec_enter_hook
+
+    // Simple check: do we have pending interrupts?
+    return (cs->interrupt_request & CPU_INTERRUPT_HARD) &&
+           cpu_interrupts_enabled(cpu_env(cs));
+}
+
+// CPU execution enter hook - called before EVERY execution batch
+static void sparc_cpu_exec_enter_hook(CPUState *cs)
+{
     CPUSPARCState *env = cpu_env(cs);
     static target_ulong last_pc = 0;
     static target_ulong last_npc = 0;
@@ -831,12 +842,6 @@ static bool sparc_cpu_has_work(CPUState *cs)
     static const target_ulong SUNOS_IDLE_PC = 0xf01294f8;
     static const target_ulong PROM_IDLE_PCS[] = {0xffd16750, 0xffd20170, 0xffd20174, 0xffd2ba10, 0xffef0000};
     static const int NUM_PROM_IDLE_PCS = sizeof(PROM_IDLE_PCS) / sizeof(PROM_IDLE_PCS[0]);
-
-    // Check for interrupt requests
-    bool has_interrupt = (cs->interrupt_request & CPU_INTERRUPT_HARD) && cpu_interrupts_enabled(env);
-
-    int sleep_us = 0;
-    calls_since_last_debug++;
 
     // Learning mode: collect PC/NPC frequencies when user signals idle state
     if (idle_learning_mode) {
@@ -865,6 +870,9 @@ static bool sparc_cpu_has_work(CPUState *cs)
 
     // Check for known idle patterns first (faster detection)
     bool is_known_idle = false;
+    int sleep_us = 0;
+    calls_since_last_debug++;
+
     if (env->pc == SUNOS_IDLE_PC) {
         is_known_idle = true;
     } else {
@@ -944,7 +952,6 @@ static bool sparc_cpu_has_work(CPUState *cs)
     }
 
     last_pc = env->pc; last_npc = env->npc;
-    return has_interrupt;
 }
 
 // Add function to toggle debug logging
@@ -1250,6 +1257,7 @@ static const TCGCPUOps sparc_tcg_ops = {
     .translate_code = sparc_translate_code,
     .synchronize_from_tb = sparc_cpu_synchronize_from_tb,
     .restore_state_to_opc = sparc_restore_state_to_opc,
+    .cpu_exec_enter = sparc_cpu_exec_enter_hook,
 
 #ifndef CONFIG_USER_ONLY
     .tlb_fill = sparc_cpu_tlb_fill,
@@ -1336,9 +1344,6 @@ static void sparc_cpu_register_opts(void)
 {
     qemu_add_opts(&sparc_cpu_opts);
 }
-
-// Forward declarations for monitor commands
-void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict);
 
 static void sparc_cpu_register_types(void)
 {

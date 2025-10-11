@@ -861,6 +861,7 @@ static bool sparc_cpu_has_work(CPUState *cs)
 // Dynamic idle threshold (learned from busy patterns, persisted across restarts)
 static int idle_threshold = 1000;
 static int max_sleep_us_cap = 10000;  // Runtime-configurable max sleep (from config file)
+static time_t last_config_mtime = 0;  // Track config file mtime for auto-reload
 
 // CPU execution enter hook - called before EVERY execution batch
 static void sparc_cpu_exec_enter_hook(CPUState *cs)
@@ -868,9 +869,6 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     CPUSPARCState *env = cpu_env(cs);
     static target_ulong last_pc = 0;
     static target_ulong last_npc = 0;
-
-    // Track config file modification time for auto-reload
-    static time_t last_config_mtime = 0;
     static int total_sleep_us = 0;  // Track total sleep time per second
     static int min_sleep_us = INT_MAX;  // Track minimum sleep per second
     static int max_sleep_us = 0;  // Track maximum sleep per second
@@ -1191,6 +1189,13 @@ static void save_learned_pcs(void)
 
     fclose(f);
     DEBUG_PRINTF("💾 Saved learned PCs to %s\n", IDLE_PC_SAVE_FILE);
+
+    // Update mtime to prevent immediate reload of our own save
+    struct stat st;
+    if (stat_with_tmp_fallback(IDLE_PC_SAVE_FILE, &st) == 0) {
+        last_config_mtime = st.st_mtime;
+    }
+
     fflush(stdout);
 }
 

@@ -871,7 +871,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     if (learning_mode != LEARNING_OFF) {
         PCCollection *coll = &collections[learning_mode - 1];  // mode-1 since OFF has no collection
         coll->total_samples++;
-        
+
         // Find or add this PC/NPC pair
         int found = -1;
         for (int i = 0; i < coll->num_pcs; i++) {
@@ -988,16 +988,16 @@ void sparc_cpu_set_debug(bool enable)
 static void sparc_cpu_start_learning(LearningMode mode)
 {
     if (mode <= LEARNING_OFF) return;
-    
+
     int idx = mode - 1;  // Array index
     printf("🎓 Starting %s PC learning mode...\n", collections[idx].name);
     learning_mode = mode;
-    
+
     // Reset collection
     collections[idx].num_pcs = 0;
     collections[idx].total_samples = 0;
     memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
-    
+
     if (mode == LEARNING_BUSY) {
         printf("   Keep guest BUSY (compile, run tasks) for 10 seconds\n");
     } else {
@@ -1006,145 +1006,151 @@ static void sparc_cpu_start_learning(LearningMode mode)
     fflush(stdout);
 }
 
-// Wrappers for specific modes
-static void sparc_cpu_start_idle_learning(void) {
-    sparc_cpu_start_learning(LEARNING_SUNOS_IDLE);
-}
 
-static void sparc_cpu_start_prom_idle_learning(void) {
-    sparc_cpu_start_learning(LEARNING_PROM_IDLE);
-}
-
-static void sparc_cpu_start_busy_learning(void) {
-    sparc_cpu_start_learning(LEARNING_BUSY);
-}
-
-static void sparc_cpu_stop_idle_learning(void)
+// Generic stop learning with cross-contamination filtering
+static void sparc_cpu_stop_learning(void)
 {
+    if (learning_mode == LEARNING_OFF) {
+        printf("⚠️  No learning mode active\n");
+        return;
+    }
+
+    LearningMode stopped_mode = learning_mode;
+    PCCollection *coll = &collections[stopped_mode - 1];
+
     learning_mode = LEARNING_OFF;
 
-    printf("🎓 Idle PC learning complete!\n");
-    printf("   Total samples: %u\n", idle_samples_collected);
-    printf("   Unique PC/NPC pairs: %d\n", num_idle_candidates);
+    printf("🎓 %s PC learning complete!\n", coll->name);
+    printf("   Total samples: %u\n", coll->total_samples);
+    printf("   Unique PC/NPC pairs: %d\n", coll->num_pcs);
 
-    if (num_idle_candidates == 0) {
-        printf("   ⚠️  No PCs collected - was the guest actually idle?\n");
+    if (coll->num_pcs == 0) {
+        printf("   ⚠️  No PCs collected!\n");
         fflush(stdout);
         return;
     }
 
-    if (num_idle_candidates >= MAX_IDLE_PC_CANDIDATES) {
-        printf("   ⚠️  Hit maximum candidate limit! Some PCs may have been dropped.\n");
-    }
-
-    // Sort by count (descending) using simple bubble sort
-    for (int i = 0; i < num_idle_candidates - 1; i++) {
-        for (int j = 0; j < num_idle_candidates - i - 1; j++) {
-            if (idle_pc_candidates[j].count < idle_pc_candidates[j + 1].count) {
-                // Swap entire structures
-                IdlePCCandidate temp = idle_pc_candidates[j];
-                idle_pc_candidates[j] = idle_pc_candidates[j + 1];
-                idle_pc_candidates[j + 1] = temp;
+    // Sort by count (descending)
+    for (int i = 0; i < coll->num_pcs - 1; i++) {
+        for (int j = 0; j < coll->num_pcs - i - 1; j++) {
+            if (coll->pcs[j].count < coll->pcs[j + 1].count) {
+                PCCandidate temp = coll->pcs[j];
+                coll->pcs[j] = coll->pcs[j + 1];
+                coll->pcs[j + 1] = temp;
             }
         }
     }
 
-    // Show top 10 most frequent PC/NPC pairs
-    printf("\n   Top idle PC/NPC pairs (by frequency):\n");
+    // Show top 10
+    printf("\n   Top PC/NPC pairs (by frequency):\n");
     printf("   Rank  PC         NPC        Count     %%\n");
     printf("   ----  --------   --------   -------   -----\n");
-    int show_count = num_idle_candidates < 10 ? num_idle_candidates : 10;
+    int show_count = coll->num_pcs < 10 ? coll->num_pcs : 10;
     for (int i = 0; i < show_count; i++) {
-        double percent = (double)idle_pc_candidates[i].count / idle_samples_collected * 100.0;
+        double percent = (double)coll->pcs[i].count / coll->total_samples * 100.0;
         printf("   %2d.   0x%08x 0x%08x %7u   %5.1f%%\n", i + 1,
-               (uint32_t)idle_pc_candidates[i].pc,
-               (uint32_t)idle_pc_candidates[i].npc,
-               idle_pc_candidates[i].count,
-               percent);
+               (uint32_t)coll->pcs[i].pc, (uint32_t)coll->pcs[i].npc,
+               coll->pcs[i].count, percent);
     }
 
-    // Show suggested C array (just PCs for now, can add NPC checking later)
-    printf("\n   💡 Suggested idle PCs to add to code:\n");
-    printf("   static const target_ulong LEARNED_IDLE_PCS[] = {");
+    // If this was BUSY mode, do cross-contamination filtering
+    if (stopped_mode == LEARNING_BUSY) {
+        printf("\n   🔍 Cross-contamination filtering:\n");
+
+        // Check against both idle collections
+        for (int idle_type = 0; idle_type < 2; idle_type++) {  // 0=PROM, 1=SUNOS
+            PCCollection *idle_coll = &collections[idle_type];
+            if (idle_coll->num_pcs == 0) continue;
+
+            int contaminated = 0;
+            PCCandidate removed[10];  // Track removed entries for extended display
+            int num_removed = 0;
+
+            // Find contamination
+            for (int b = 0; b < coll->num_pcs; b++) {
+                for (int i = 0; i < idle_coll->num_pcs; i++) {
+                    if (coll->pcs[b].pc == idle_coll->pcs[i].pc &&
+                        coll->pcs[b].npc == idle_coll->pcs[i].npc) {
+                        printf("   ⚠️  %s contaminated: PC=0x%08x NPC=0x%08x\n",
+                               idle_coll->name, (uint32_t)coll->pcs[b].pc, (uint32_t)coll->pcs[b].npc);
+
+                        // Save for extended display if in top 10
+                        if (num_removed < 10) {
+                            removed[num_removed++] = idle_coll->pcs[i];
+                        }
+
+                        // Mark for removal
+                        idle_coll->pcs[i].count = 0;
+                        contaminated++;
+                    }
+                }
+            }
+
+            if (contaminated > 0) {
+                printf("   Cleaning %s: %d contaminated entries removed\n",
+                       idle_coll->name, contaminated);
+
+                // Create merged list for display (kept + removed, sorted by original rank)
+                typedef struct {
+                    PCCandidate pc;
+                    bool removed;
+                    double percent;
+                } DisplayEntry;
+                DisplayEntry display_list[20];  // Top 10 + up to 10 removed
+                int num_display = 0;
+
+                // Add all entries with their status
+                for (int i = 0; i < idle_coll->num_pcs && num_display < 20; i++) {
+                    display_list[num_display].pc = idle_coll->pcs[i];
+                    display_list[num_display].removed = (idle_coll->pcs[i].count == 0);
+                    display_list[num_display].percent = (double)idle_coll->pcs[i].count / idle_coll->total_samples * 100.0;
+                    num_display++;
+                }
+
+                // Compact idle array (remove count=0)
+                int write_idx = 0;
+                for (int read_idx = 0; read_idx < idle_coll->num_pcs; read_idx++) {
+                    if (idle_coll->pcs[read_idx].count > 0) {
+                        if (write_idx != read_idx) {
+                            idle_coll->pcs[write_idx] = idle_coll->pcs[read_idx];
+                        }
+                        write_idx++;
+                    }
+                }
+                idle_coll->num_pcs = write_idx;
+
+                // Show merged list (descending by original percentage)
+                printf("\n   📋 Updated %s list (showing top %d):\n", idle_coll->name, num_display);
+                printf("   Rank  PC         NPC        Count     %%      \n");
+                printf("   ----  --------   --------   -------   -----  ------\n");
+
+                for (int i = 0; i < num_display; i++) {
+                    printf("   %2d.   0x%08x 0x%08x %7u   %5.1f%%", i + 1,
+                           (uint32_t)display_list[i].pc.pc,
+                           (uint32_t)display_list[i].pc.npc,
+                           display_list[i].pc.count,
+                           display_list[i].percent);
+                    if (display_list[i].removed) {
+                        printf("  🗑️ REMOVED");
+                    }
+                    printf("\n");
+                }
+
+                printf("\n   ✅ %s now has %d clean entries\n", idle_coll->name, idle_coll->num_pcs);
+            } else {
+                printf("   ✅ %s: No contamination found\n", idle_coll->name);
+            }
+        }
+    }
+
+    // Show suggested array
+    printf("\n   💡 Suggested C array:\n");
+    printf("   static const target_ulong %s_PCS[] = {", coll->name);
     for (int i = 0; i < show_count; i++) {
         if (i > 0) printf(", ");
-        printf("0x%x", (uint32_t)idle_pc_candidates[i].pc);
+        printf("0x%x", (uint32_t)coll->pcs[i].pc);
     }
     printf("};\n");
-
-    // Show patterns
-    printf("\n   🔍 Pattern analysis:\n");
-    int self_loops = 0;
-    for (int i = 0; i < show_count; i++) {
-        if (idle_pc_candidates[i].pc == idle_pc_candidates[i].npc - 4) {
-            self_loops++;
-        }
-    }
-    printf("   Self-loops (PC+4=NPC): %d/%d\n", self_loops, show_count);
-
-    fflush(stdout);
-}
-
-static void sparc_cpu_stop_busy_learning(void)
-{
-    learning_mode = LEARNING_OFF;
-
-    printf("🎓 Busy PC learning complete!\n");
-    printf("   Total samples: %u\n", busy_samples_collected);
-    printf("   Unique PC/NPC pairs: %d\n", num_busy_candidates);
-
-    if (num_busy_candidates == 0) {
-        printf("   ⚠️  No PCs collected - was the guest actually busy?\n");
-        fflush(stdout);
-        return;
-    }
-
-    // Cross-contamination analysis: find PCs that appear in BOTH idle and busy
-    int contaminated = 0;
-    printf("\n   🔍 Cross-contamination analysis:\n");
-
-    for (int b = 0; b < num_busy_candidates; b++) {
-        for (int i = 0; i < num_idle_candidates; i++) {
-            if (busy_pc_candidates[b].pc == idle_pc_candidates[i].pc &&
-                busy_pc_candidates[b].npc == idle_pc_candidates[i].npc) {
-                printf("   ⚠️  CONTAMINATION: PC=0x%08x NPC=0x%08x in BOTH idle and busy\n",
-                       (uint32_t)busy_pc_candidates[b].pc,
-                       (uint32_t)busy_pc_candidates[b].npc);
-                // Mark idle entry for removal by setting count to 0
-                idle_pc_candidates[i].count = 0;
-                contaminated++;
-            }
-        }
-    }
-
-    if (contaminated > 0) {
-        printf("   Found %d contaminated entries - cleaning idle list...\n", contaminated);
-
-        // Compact idle array, removing contaminated entries
-        int write_idx = 0;
-        for (int read_idx = 0; read_idx < num_idle_candidates; read_idx++) {
-            if (idle_pc_candidates[read_idx].count > 0) {
-                if (write_idx != read_idx) {
-                    idle_pc_candidates[write_idx] = idle_pc_candidates[read_idx];
-                }
-                write_idx++;
-            }
-        }
-        num_idle_candidates = write_idx;
-
-        printf("   ✅ Idle list cleaned: %d idle-only PCs remain\n", num_idle_candidates);
-
-        // Re-print clean idle list
-        printf("\n   💡 Clean idle PCs (not in busy):\n");
-        printf("   static const target_ulong LEARNED_IDLE_PCS[] = {");
-        for (int i = 0; i < num_idle_candidates && i < 10; i++) {
-            if (i > 0) printf(", ");
-            printf("0x%x", (uint32_t)idle_pc_candidates[i].pc);
-        }
-        printf("};\n");
-    } else {
-        printf("   ✅ No contamination - all busy PCs are distinct from idle PCs\n");
-    }
 
     fflush(stdout);
 }
@@ -1485,25 +1491,25 @@ void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
 
 void hmp_sparc_start_idle_learning(Monitor *mon, const QDict *qdict)
 {
-    sparc_cpu_start_idle_learning();
-    monitor_printf(mon, "Started idle PC learning mode\n");
+    sparc_cpu_start_learning(LEARNING_SUNOS_IDLE);
+    monitor_printf(mon, "Started SunOS idle PC learning mode\n");
 }
 
 void hmp_sparc_stop_idle_learning(Monitor *mon, const QDict *qdict)
 {
-    sparc_cpu_stop_idle_learning();
-    monitor_printf(mon, "Stopped idle PC learning mode\n");
+    sparc_cpu_stop_learning();
+    monitor_printf(mon, "Stopped learning mode\n");
 }
 
 void hmp_sparc_start_busy_learning(Monitor *mon, const QDict *qdict)
 {
-    sparc_cpu_start_busy_learning();
+    sparc_cpu_start_learning(LEARNING_BUSY);
     monitor_printf(mon, "Started busy PC learning mode\n");
 }
 
 void hmp_sparc_stop_busy_learning(Monitor *mon, const QDict *qdict)
 {
-    sparc_cpu_stop_busy_learning();
-    monitor_printf(mon, "Stopped busy PC learning mode\n");
+    sparc_cpu_stop_learning();
+    monitor_printf(mon, "Stopped learning mode\n");
 }
 

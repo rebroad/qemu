@@ -1269,6 +1269,30 @@ static void recalculate_effective_counts(void)
 }
 
 // Save/load learned PCs to/from disk
+// Comparator for sorting PC candidates: count DESC, pc ASC, npc ASC
+static int compare_pc_candidates(const void *a, const void *b)
+{
+    const PCCandidate *ca = (const PCCandidate *)a;
+    const PCCandidate *cb = (const PCCandidate *)b;
+
+    // Primary: count descending (higher counts first)
+    if (ca->count != cb->count) {
+        return (ca->count > cb->count) ? -1 : 1;
+    }
+
+    // Secondary: PC ascending
+    if (ca->pc != cb->pc) {
+        return (ca->pc < cb->pc) ? -1 : 1;
+    }
+
+    // Tertiary: NPC ascending
+    if (ca->npc != cb->npc) {
+        return (ca->npc < cb->npc) ? -1 : 1;
+    }
+
+    return 0;
+}
+
 static void save_learned_pcs(void)
 {
     const char *filename = get_idle_pc_save_file();
@@ -1276,6 +1300,14 @@ static void save_learned_pcs(void)
     if (!f) {
         DEBUG_PRINTF("⚠️  Failed to save learned PCs\n");
         return;
+    }
+
+    // Sort each collection before saving (count DESC, pc ASC, npc ASC)
+    for (int m = 0; m < NUM_COLLECTIONS; m++) {
+        PCCollection *coll = &collections[m];
+        if (coll->num_pcs > 0) {
+            qsort(coll->pcs, coll->num_pcs, sizeof(PCCandidate), compare_pc_candidates);
+        }
     }
 
     // Save format: mode num_pcs max_consecutive_repeats total_samples [pc npc count]...

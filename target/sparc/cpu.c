@@ -863,8 +863,12 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static target_ulong last_npc = 0;
     static int idle_count = 0;
     static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
-    static int max_idle_count = 0;  // Track maximum idle count reached
-    static int total_sleep_us = 0;  // Track total sleep time
+    static int max_idle_count = 0;  // Track maximum idle count reached per second
+    static int min_idle_count = INT_MAX;  // Track minimum idle count (when idle > 0) per second
+    static int total_sleep_us = 0;  // Track total sleep time per second
+    static int min_sleep_us = INT_MAX;  // Track minimum sleep per second
+    static int max_sleep_us = 0;  // Track maximum sleep per second
+    static int sleep_events = 0;     // Count of actual sleep calls per second
     static int calls_since_last_debug = 0;  // Track number of calls since last debug output
     static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
     static int sunos_idle_hits = 0;  // Count SunOS idle detections per second
@@ -956,6 +960,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         // Known idle PC - increment immediately
         idle_count++;
         if (idle_count > max_idle_count) max_idle_count = idle_count;
+        if (idle_count < min_idle_count) min_idle_count = idle_count;
 
         // Count idle type for once-per-second reporting
         if (env->pc == SUNOS_IDLE_PC ||
@@ -969,6 +974,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         // Generic idle detection (any repeated PC/NPC)
         idle_count++;
         if (idle_count > max_idle_count) max_idle_count = idle_count;
+        if (idle_count < min_idle_count) min_idle_count = idle_count;
         if (idle_count > idle_threshold) {
             generic_idle_hits++;
         }
@@ -988,7 +994,13 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
     }
 
-    total_sleep_us += sleep_us;
+    // Track sleep statistics
+    if (sleep_us > 0) {
+        total_sleep_us += sleep_us;
+        sleep_events++;
+        if (sleep_us < min_sleep_us) min_sleep_us = sleep_us;
+        if (sleep_us > max_sleep_us) max_sleep_us = sleep_us;
+    }
 
     // Only sleep if icount is not enabled (when icount is on, we want max speed)
     if (!icount_enabled() && sleep_us > 0) {
@@ -1015,37 +1027,62 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
 
         // Calculate idle percentages
-        double idle_pct = (double)total_idle / total_execs * 100.0;
+        double idle_pct = total_execs > 0 ? (double)total_idle / total_execs * 100.0 : 0.0;
+
+        // Calculate average sleep
+        int avg_sleep_us = sleep_events > 0 ? total_sleep_us / sleep_events : 0;
+        int avg_idle_count = total_idle > 0 ? (min_idle_count + max_idle_count) / 2 : 0;
 
         // Build complete message to avoid interleaving (thread-safe)
-        char msg[384];
-        int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] speed=%d%% idle=%.1f%% (%d/%d)",
-                          speed_percent, idle_pct, total_idle, total_execs);
-        if (sunos_idle_hits > 0) {
-            double sunos_pct = (double)sunos_idle_hits / total_execs * 100.0;
-            pos += snprintf(msg + pos, sizeof(msg) - pos, " sunos=%d(%.1f%%)",
-                           sunos_idle_hits, sunos_pct);
+        char msg[512];
+        int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt) idlecnt:%d/%d/%d",
+                          speed_percent, idle_pct, total_idle, total_execs,
+                          min_sleep_us == INT_MAX ? 0 : min_sleep_us,
+                          avg_sleep_us,
+                          max_sleep_us,
+                          sleep_events,
+                          min_idle_count == INT_MAX ? 0 : min_idle_count,
+                          avg_idle_count,
+                          max_idle_count);
+
+        // Show breakdown if there are different idle types
+        if (total_idle > 0 && (sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits > total_idle / 2)) {
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " [");
+            bool first = true;
+            if (sunos_idle_hits > 0) {
+                double sunos_pct = (double)sunos_idle_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS:%.1f%%", first ? "" : " ", sunos_pct);
+                first = false;
+            }
+            if (prom_idle_hits > 0) {
+                double prom_pct = (double)prom_idle_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP:%.1f%%", first ? "" : " ", prom_pct);
+                first = false;
+            }
+            if (generic_idle_hits > 0) {
+                double generic_pct = (double)generic_idle_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sG:%.1f%%", first ? "" : " ", generic_pct);
+                first = false;
+            }
+            if (halted_hits > 0) {
+                double halted_pct = (double)halted_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sH:%.1f%%", first ? "" : " ", halted_pct);
+            }
+            pos += snprintf(msg + pos, sizeof(msg) - pos, "]");
         }
-        if (prom_idle_hits > 0) {
-            double prom_pct = (double)prom_idle_hits / total_execs * 100.0;
-            pos += snprintf(msg + pos, sizeof(msg) - pos, " prom=%d(%.1f%%)",
-                           prom_idle_hits, prom_pct);
-        }
-        if (generic_idle_hits > 0) {
-            double generic_pct = (double)generic_idle_hits / total_execs * 100.0;
-            pos += snprintf(msg + pos, sizeof(msg) - pos, " generic=%d(%.1f%%)",
-                           generic_idle_hits, generic_pct);
-        }
-        if (halted_hits > 0) {
-            double halted_pct = (double)halted_hits / total_execs * 100.0;
-            pos += snprintf(msg + pos, sizeof(msg) - pos, " halted=%d(%.1f%%)",
-                           halted_hits, halted_pct);
-        }
+
         snprintf(msg + pos, sizeof(msg) - pos, "\n");
         DEBUG_PRINTF("%s", msg);
+
         last_report_time_ns = current_time_ns;
         last_vm_clock_ns = vm_clock_ns;
-        max_idle_count = total_sleep_us = calls_since_last_debug = 0;
+        max_idle_count = 0;
+        min_idle_count = INT_MAX;
+        total_sleep_us = 0;
+        min_sleep_us = INT_MAX;
+        max_sleep_us = 0;
+        sleep_events = 0;
+        calls_since_last_debug = 0;
         sunos_idle_hits = prom_idle_hits = generic_idle_hits = halted_hits = 0;
         total_execs = 0;  // Reset for next second
     }

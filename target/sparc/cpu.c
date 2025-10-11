@@ -858,9 +858,8 @@ static bool sparc_cpu_has_work(CPUState *cs)
            cpu_interrupts_enabled(cpu_env(cs));
 }
 
-// Dynamic idle threshold (learned from busy patterns, persisted across restarts)
-static int idle_threshold = 1000;
-static int max_sleep_us_cap = 10000;  // Runtime-configurable max sleep (from config file)
+// Runtime-configurable settings (persisted across restarts)
+static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
 static time_t last_config_mtime = 0;  // Track config file mtime for auto-reload
 
 // CPU execution enter hook - called before EVERY execution batch
@@ -1221,7 +1220,7 @@ static void save_learned_pcs(void)
     }
 
     // Save format: mode num_pcs max_consecutive_repeats total_samples [pc npc count]...
-    for (int m = 0; m < 2; m++) {  // Only save idle modes (PROM and SUNOS)
+    for (int m = 0; m < NUM_COLLECTIONS; m++) {  // Save ALL collections (PROM, SUNOS, BUSY)
         PCCollection *coll = &collections[m];
         fprintf(f, "%d %d %d %u\n", coll->mode, coll->num_pcs, coll->max_consecutive_repeats, coll->total_samples);
         for (int i = 0; i < coll->num_pcs; i++) {
@@ -1231,10 +1230,6 @@ static void save_learned_pcs(void)
                     coll->pcs[i].count);
         }
     }
-
-    // Save busy collection's max_consecutive_repeats for threshold calculation
-    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
-    fprintf(f, "THRESHOLD %d\n", busy_coll->max_consecutive_repeats);
 
     // Save max_sleep_us_cap (runtime-configurable)
     fprintf(f, "MAX_SLEEP_US %d\n", max_sleep_us_cap);
@@ -1265,13 +1260,9 @@ static void load_learned_pcs(void)
     char line[256];
 
     while (fgets(line, sizeof(line), f)) {
-        // Check for THRESHOLD line
+        // Check for THRESHOLD line (legacy - ignored, now using BUSY collection directly)
         if (sscanf(line, "THRESHOLD %d", &max_repeats) == 1) {
-            // Calculate dynamic threshold from busy learning data
-            // Use busy_max_repeats * 1.5 as safety margin
-            idle_threshold = (max_repeats * 3) / 2;  // 1.5x safety margin
-            DEBUG_PRINTF("   Loaded dynamic threshold: %d (busy_max=%d)\n",
-                        idle_threshold, max_repeats);
+            DEBUG_PRINTF("   Ignored legacy THRESHOLD line (now using BUSY collection)\n");
             continue;
         }
 
@@ -1285,7 +1276,7 @@ static void load_learned_pcs(void)
 
         // Parse mode line (try new format with total_samples first, fall back to old format)
         if (sscanf(line, "%d %d %d %u", &mode, &num_pcs, &max_repeats, &total_samples) == 4) {
-            if (mode < LEARNING_PROM_IDLE || mode > LEARNING_SUNOS_IDLE) continue;
+            if (mode < LEARNING_PROM_IDLE || mode > LEARNING_BUSY) continue;
 
             PCCollection *coll = &collections[mode - 1];
             coll->num_pcs = 0;
@@ -1302,6 +1293,7 @@ static void load_learned_pcs(void)
                     coll->num_pcs++;
                 }
             }
+            
             DEBUG_PRINTF("   Loaded %d %s PCs (samples=%u, max_repeats=%d)\n",
                         coll->num_pcs, coll->name, total_samples, max_repeats);
         } else if (sscanf(line, "%d %d %d", &mode, &num_pcs, &max_repeats) == 3) {
@@ -1522,13 +1514,10 @@ static void sparc_cpu_stop_learning(void)
     }
     DEBUG_PRINTF("};\n");
 
-    // If BUSY learning just finished, calculate and set optimal threshold
+    // BUSY learning complete - data will be used to filter generic idle false positives
     if (stopped_mode == LEARNING_BUSY) {
-        int old_threshold = idle_threshold;
-        idle_threshold = (coll->max_consecutive_repeats * 3) / 2;  // 1.5x safety margin
-        DEBUG_PRINTF("\n   🎯 Updated idle_threshold: %d → %d (busy_max=%d, safety=1.5x)\n",
-                    old_threshold, idle_threshold, coll->max_consecutive_repeats);
-        DEBUG_PRINTF("   This threshold will be used for generic idle detection.\n");
+        DEBUG_PRINTF("\n   🎯 BUSY collection will now filter out false-positive generic idle loops\n");
+        DEBUG_PRINTF("   Max consecutive repeats during busy: %d\n", coll->max_consecutive_repeats);
     }
 
     // Always auto-save after learning (BUSY or otherwise)

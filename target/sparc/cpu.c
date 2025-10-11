@@ -1065,7 +1065,17 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 
         // Build complete message to avoid interleaving (thread-safe)
         char msg[512];
-        int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt) idlecnt:%d/%d/%d sus=%d",
+        int pos;
+
+        // Show learning progress if in learning mode
+        if (learning_mode != LEARNING_OFF) {
+            PCCollection *learn_coll = &collections[learning_mode - 1];
+            double learn_pct = (double)learn_coll->total_samples / LEARNING_AUTO_STOP_SAMPLES * 100.0;
+            pos = snprintf(msg, sizeof(msg), "[LEARNING %s] %d/%d samples (%.1f%%) spd=%d%%",
+                          learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
+                          learn_pct, speed_percent);
+        } else {
+            pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt) idlecnt:%d/%d/%d sus=%d",
                           speed_percent, idle_pct, total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
@@ -1075,6 +1085,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                           avg_idle_count,
                           max_idle_count,
                           sustained_idle_score);
+        }
 
         // Show breakdown if there are different idle types
         if (total_idle > 0 && (sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits > total_idle / 2)) {

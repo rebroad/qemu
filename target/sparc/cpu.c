@@ -1150,8 +1150,6 @@ static void sparc_cpu_stop_learning(void)
             if (idle_coll->num_pcs == 0) continue;
 
             int contaminated = 0;
-            PCCandidate removed[10];  // Track removed entries for extended display
-            int num_removed = 0;
 
             // Find contamination
             for (int b = 0; b < coll->num_pcs; b++) {
@@ -1160,11 +1158,6 @@ static void sparc_cpu_stop_learning(void)
                         coll->pcs[b].npc == idle_coll->pcs[i].npc) {
                         printf("   ⚠️  %s contaminated: PC=0x%08x NPC=0x%08x\n",
                                idle_coll->name, (uint32_t)coll->pcs[b].pc, (uint32_t)coll->pcs[b].npc);
-
-                        // Save for extended display if in top 10
-                        if (num_removed < 10) {
-                            removed[num_removed++] = idle_coll->pcs[i];
-                        }
 
                         // Mark for removal
                         idle_coll->pcs[i].count = 0;
@@ -1586,16 +1579,16 @@ void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
 }
 
+void hmp_sparc_start_prom_learning(Monitor *mon, const QDict *qdict)
+{
+    sparc_cpu_start_learning(LEARNING_PROM_IDLE);
+    monitor_printf(mon, "Started PROM idle PC learning mode\n");
+}
+
 void hmp_sparc_start_idle_learning(Monitor *mon, const QDict *qdict)
 {
     sparc_cpu_start_learning(LEARNING_SUNOS_IDLE);
     monitor_printf(mon, "Started SunOS idle PC learning mode\n");
-}
-
-void hmp_sparc_stop_idle_learning(Monitor *mon, const QDict *qdict)
-{
-    sparc_cpu_stop_learning();
-    monitor_printf(mon, "Stopped learning mode\n");
 }
 
 void hmp_sparc_start_busy_learning(Monitor *mon, const QDict *qdict)
@@ -1604,7 +1597,7 @@ void hmp_sparc_start_busy_learning(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "Started busy PC learning mode\n");
 }
 
-void hmp_sparc_stop_busy_learning(Monitor *mon, const QDict *qdict)
+void hmp_sparc_stop_learning(Monitor *mon, const QDict *qdict)
 {
     sparc_cpu_stop_learning();
     monitor_printf(mon, "Stopped learning mode\n");

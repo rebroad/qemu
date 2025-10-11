@@ -735,31 +735,29 @@ SRST
 ERST
 
     {
+        .name       = "sparc-start-prom-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "start collecting PROM idle PC frequencies",
+        .cmd        = hmp_sparc_start_prom_learning,
+    },
+
+SRST
+``sparc-start-prom-learning``
+  Start PROM idle PC learning mode. Keep guest at PROM 'ok' prompt for 10 seconds.
+ERST
+
+    {
         .name       = "sparc-start-idle-learning",
         .args_type  = "",
         .params     = "",
-        .help       = "start collecting idle PC frequencies for learning",
+        .help       = "start collecting SunOS idle PC frequencies",
         .cmd        = hmp_sparc_start_idle_learning,
     },
 
 SRST
 ``sparc-start-idle-learning``
-  Start idle PC learning mode. QEMU will record all PCs while the guest is idle.
-  Keep guest idle for a few seconds, then use sparc-stop-idle-learning.
-ERST
-
-    {
-        .name       = "sparc-stop-idle-learning",
-        .args_type  = "",
-        .params     = "",
-        .help       = "stop collecting and show top idle PCs",
-        .cmd        = hmp_sparc_stop_idle_learning,
-    },
-
-SRST
-``sparc-stop-idle-learning``
-  Stop idle PC learning mode and display the most frequent PCs.
-  Use these PCs to update the PROM_IDLE_PCS or SUNOS_IDLE_PC arrays.
+  Start SunOS idle PC learning mode. Keep guest idle at login prompt for 10 seconds.
 ERST
 
     {
@@ -773,21 +771,20 @@ ERST
 SRST
 ``sparc-start-busy-learning``
   Start busy PC learning mode. Keep guest busy (compiling, running tasks).
-  After collection, use sparc-stop-busy-learning to filter contamination.
 ERST
 
     {
-        .name       = "sparc-stop-busy-learning",
+        .name       = "sparc-stop-learning",
         .args_type  = "",
         .params     = "",
-        .help       = "stop busy collection and filter idle PCs",
-        .cmd        = hmp_sparc_stop_busy_learning,
+        .help       = "stop any active learning mode and show results",
+        .cmd        = hmp_sparc_stop_learning,
     },
 
 SRST
-``sparc-stop-busy-learning``
-  Stop busy PC learning and remove any PC/NPC pairs that appear in both idle and busy.
-  This ensures only idle-specific PCs remain in the idle list.
+``sparc-stop-learning``
+  Stop whichever learning mode is active (PROM/SunOS idle or busy).
+  Shows top 10 PCs, filters contamination if busy, and auto-saves to file.
 ERST
 
     {

@@ -63,8 +63,8 @@ void hmp_gpa2hpa(Monitor *mon, const QDict *qdict);
 
 void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict);
 void hmp_sparc_start_idle_learning(Monitor *mon, const QDict *qdict);
-void hmp_sparc_stop_idle_learning(Monitor *mon, const QDict *qdict);
+void hmp_sparc_start_prom_learning(Monitor *mon, const QDict *qdict);
 void hmp_sparc_start_busy_learning(Monitor *mon, const QDict *qdict);
-void hmp_sparc_stop_busy_learning(Monitor *mon, const QDict *qdict);
+void hmp_sparc_stop_learning(Monitor *mon, const QDict *qdict);
 
 #endif /* MONITOR_HMP_TARGET_H */

@@ -56,7 +56,7 @@ typedef enum {
 static LearningMode learning_mode = LEARNING_OFF;
 
 #define MAX_PC_CANDIDATES 1000
-#define IDLE_PC_SAVE_FILE "/tmp/qemu-sparc-idle-pcs.dat"
+#define IDLE_PC_SAVE_FILE "qemu-sparc-idle-pcs.dat"  // CWD, or fallback to /tmp
 
 typedef struct {
     target_ulong pc;
@@ -891,19 +891,35 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         }
     }
 
-    // Check for known idle patterns first (faster detection)
+    // Check for learned idle patterns
     bool is_known_idle = false;
     int sleep_us = 0;
     calls_since_last_debug++;
 
-    if (env->pc == SUNOS_IDLE_PC) {
-        is_known_idle = true;
-    } else {
-        // Check PROM idle PCs
-        for (int i = 0; i < NUM_PROM_IDLE_PCS; i++) {
-            if (env->pc == PROM_IDLE_PCS[i]) {
+    // Check both idle collections (PROM and SunOS)
+    for (int idle_type = 0; idle_type < 2 && !is_known_idle; idle_type++) {
+        PCCollection *idle_coll = &collections[idle_type];  // 0=PROM, 1=SUNOS
+
+        if (idle_coll->num_pcs > 0) {
+            // Use learned PCs
+            for (int i = 0; i < idle_coll->num_pcs; i++) {
+                if (env->pc == idle_coll->pcs[i].pc && env->npc == idle_coll->pcs[i].npc) {
+                    is_known_idle = true;
+                    break;
+                }
+            }
+        } else if (idle_type == 0) {
+            // Fallback: hardcoded PROM idle PCs
+            for (int i = 0; i < NUM_PROM_IDLE_PCS; i++) {
+                if (env->pc == PROM_IDLE_PCS[i]) {
+                    is_known_idle = true;
+                    break;
+                }
+            }
+        } else {
+            // Fallback: hardcoded SunOS idle PC
+            if (env->pc == SUNOS_IDLE_PC) {
                 is_known_idle = true;
-                break;
             }
         }
     }
@@ -982,6 +998,77 @@ void sparc_cpu_set_debug(bool enable)
 {
     sparc_cpu_debug = enable;
     printf("SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
+}
+
+// Helper: open file in CWD or fallback to /tmp
+static FILE *fopen_with_tmp_fallback(const char *filename, const char *mode)
+{
+    FILE *f = fopen(filename, mode);
+    if (!f) {
+        char tmp_path[256];
+        snprintf(tmp_path, sizeof(tmp_path), "/tmp/%s", filename);
+        f = fopen(tmp_path, mode);
+    }
+    return f;
+}
+
+// Save/load learned PCs to/from disk
+static void save_learned_pcs(void)
+{
+    FILE *f = fopen_with_tmp_fallback(IDLE_PC_SAVE_FILE, "w");
+    if (!f) {
+        printf("⚠️  Failed to save learned PCs\n");
+        return;
+    }
+
+    // Save format: mode num_pcs [pc npc count]...
+    for (int m = 0; m < 2; m++) {  // Only save idle modes (PROM and SUNOS)
+        PCCollection *coll = &collections[m];
+        fprintf(f, "%d %d\n", coll->mode, coll->num_pcs);
+        for (int i = 0; i < coll->num_pcs; i++) {
+            fprintf(f, "0x%lx 0x%lx %u\n",
+                    (unsigned long)coll->pcs[i].pc,
+                    (unsigned long)coll->pcs[i].npc,
+                    coll->pcs[i].count);
+        }
+    }
+
+    fclose(f);
+    printf("💾 Saved learned PCs to %s\n", IDLE_PC_SAVE_FILE);
+    fflush(stdout);
+}
+
+static void load_learned_pcs(void)
+{
+    FILE *f = fopen_with_tmp_fallback(IDLE_PC_SAVE_FILE, "r");
+    if (!f) {
+        return;  // No saved file, use hardcoded defaults
+    }
+
+    printf("📂 Loading learned PCs from %s...\n", IDLE_PC_SAVE_FILE);
+
+    int mode, num_pcs;
+    while (fscanf(f, "%d %d\n", &mode, &num_pcs) == 2) {
+        if (mode < LEARNING_PROM_IDLE || mode > LEARNING_SUNOS_IDLE) continue;
+
+        PCCollection *coll = &collections[mode - 1];
+        coll->num_pcs = 0;
+
+        for (int i = 0; i < num_pcs && i < MAX_PC_CANDIDATES; i++) {
+            unsigned long pc, npc;
+            unsigned int count;
+            if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
+                coll->pcs[i].pc = pc;
+                coll->pcs[i].npc = npc;
+                coll->pcs[i].count = count;
+                coll->num_pcs++;
+            }
+        }
+        printf("   Loaded %d %s PCs\n", coll->num_pcs, coll->name);
+    }
+
+    fclose(f);
+    fflush(stdout);
 }
 
 // Generic learning control (DRY)
@@ -1152,6 +1239,9 @@ static void sparc_cpu_stop_learning(void)
     }
     printf("};\n");
 
+    // Always auto-save after learning (BUSY or otherwise)
+    save_learned_pcs();
+
     fflush(stdout);
 }
 
@@ -1278,6 +1368,13 @@ static void sparc_cpu_initfn(Object *obj)
         env->def = *scc->cpu_def;
     }
     sparc_cpu_parse_opts();
+
+    // Load learned idle PCs on first CPU init
+    static bool pcs_loaded = false;
+    if (!pcs_loaded) {
+        load_learned_pcs();
+        pcs_loaded = true;
+    }
 }
 
 static void sparc_get_nwindows(Object *obj, Visitor *v, const char *name,

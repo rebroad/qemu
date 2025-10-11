@@ -170,9 +170,9 @@ int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
             if (field->flags & VMS_POINTER) {
                 first_elem = *(void **)first_elem;
                 if (!(first_elem || !n_elems || !size)) {
-                    error_report("Snapshot incompatibility detected in '%s' field '%s'",
+                    error_report("❌ Snapshot incompatibility in '%s' field '%s'",
                                 vmsd->name, field->name);
-                    abort();
+                    return -EINVAL;
                 }
             }
             for (i = 0; i < n_elems; i++) {

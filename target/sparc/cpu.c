@@ -866,6 +866,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static int max_idle_count = 0;  // Track maximum idle count reached
     static int total_sleep_us = 0;  // Track total sleep time
     static int calls_since_last_debug = 0;  // Track number of calls since last debug output
+    static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
     static int sunos_idle_hits = 0;  // Count SunOS idle detections per second
     static int prom_idle_hits = 0;   // Count PROM idle detections per second
     static int generic_idle_hits = 0; // Count generic idle loop detections per second
@@ -920,6 +921,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     bool is_known_idle = false;
     int sleep_us = 0;
     calls_since_last_debug++;
+    total_execs++;  // Count every execution for percentage calculation
 
     // Check both idle collections (PROM and SunOS)
     for (int idle_type = 0; idle_type < 2 && !is_known_idle; idle_type++) {
@@ -1000,38 +1002,48 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     int64_t current_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);  // Host wall-clock
     int64_t vm_clock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);       // Guest virtual time
 
-    if (current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
+    if (total_execs > 0 && last_report_time_ns > 0 && current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
         int total_idle = sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits;
-        if (last_report_time_ns > 0 && total_idle > 0) {
-            int64_t real_delta_ns = current_time_ns - last_report_time_ns;
-            int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
+        int64_t real_delta_ns = current_time_ns - last_report_time_ns;
+        int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
 
-            // MAME-style speed calculation: (emulated_time / real_time) * 100
-            int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+        // MAME-style speed calculation: (emulated_time / real_time) * 100
+        int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
 
-            // Build complete message to avoid interleaving (thread-safe)
-            char msg[256];
-            int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] speed=%d%% total=%d",
-                              speed_percent, total_idle);
-            if (sunos_idle_hits > 0) {
-                pos += snprintf(msg + pos, sizeof(msg) - pos, " sunos=%d", sunos_idle_hits);
-            }
-            if (prom_idle_hits > 0) {
-                pos += snprintf(msg + pos, sizeof(msg) - pos, " prom=%d", prom_idle_hits);
-            }
-            if (generic_idle_hits > 0) {
-                pos += snprintf(msg + pos, sizeof(msg) - pos, " generic=%d", generic_idle_hits);
-            }
-            if (halted_hits > 0) {
-                pos += snprintf(msg + pos, sizeof(msg) - pos, " halted=%d", halted_hits);
-            }
-            snprintf(msg + pos, sizeof(msg) - pos, "\n");
-            DEBUG_PRINTF("%s", msg);
+        // Calculate idle percentages
+        double idle_pct = (double)total_idle / total_execs * 100.0;
+
+        // Build complete message to avoid interleaving (thread-safe)
+        char msg[384];
+        int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] speed=%d%% idle=%.1f%% (%d/%d)",
+                          speed_percent, idle_pct, total_idle, total_execs);
+        if (sunos_idle_hits > 0) {
+            double sunos_pct = (double)sunos_idle_hits / total_execs * 100.0;
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " sunos=%d(%.1f%%)",
+                           sunos_idle_hits, sunos_pct);
         }
+        if (prom_idle_hits > 0) {
+            double prom_pct = (double)prom_idle_hits / total_execs * 100.0;
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " prom=%d(%.1f%%)",
+                           prom_idle_hits, prom_pct);
+        }
+        if (generic_idle_hits > 0) {
+            double generic_pct = (double)generic_idle_hits / total_execs * 100.0;
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " generic=%d(%.1f%%)",
+                           generic_idle_hits, generic_pct);
+        }
+        if (halted_hits > 0) {
+            double halted_pct = (double)halted_hits / total_execs * 100.0;
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " halted=%d(%.1f%%)",
+                           halted_hits, halted_pct);
+        }
+        snprintf(msg + pos, sizeof(msg) - pos, "\n");
+        DEBUG_PRINTF("%s", msg);
         last_report_time_ns = current_time_ns;
         last_vm_clock_ns = vm_clock_ns;
         max_idle_count = total_sleep_us = calls_since_last_debug = 0;
         sunos_idle_hits = prom_idle_hits = generic_idle_hits = halted_hits = 0;
+        total_execs = 0;  // Reset for next second
     }
 
     last_pc = env->pc; last_npc = env->npc;
@@ -1104,7 +1116,7 @@ static void load_learned_pcs(void)
             // Calculate dynamic threshold from busy learning data
             // Use busy_max_repeats * 1.5 as safety margin
             idle_threshold = (max_repeats * 3) / 2;  // 1.5x safety margin
-            DEBUG_PRINTF("   Loaded dynamic threshold: %d (busy_max=%d)\n", 
+            DEBUG_PRINTF("   Loaded dynamic threshold: %d (busy_max=%d)\n",
                         idle_threshold, max_repeats);
             continue;
         }
@@ -1215,9 +1227,28 @@ static void sparc_cpu_stop_learning(void)
             PCCollection *idle_coll = &collections[idle_type];
             if (idle_coll->num_pcs == 0) continue;
 
-            int contaminated = 0;
+            // First pass: save ALL idle data BEFORE marking anything
+            typedef struct {
+                target_ulong pc;
+                target_ulong npc;
+                uint32_t orig_count;
+                double orig_percent;
+                bool removed;
+            } DisplayEntry;
+            DisplayEntry display_list[100];  // Enough for all entries
+            int num_display = 0;
 
-            // Find contamination
+            for (int i = 0; i < idle_coll->num_pcs; i++) {
+                display_list[num_display].pc = idle_coll->pcs[i].pc;
+                display_list[num_display].npc = idle_coll->pcs[i].npc;
+                display_list[num_display].orig_count = idle_coll->pcs[i].count;
+                display_list[num_display].orig_percent = (double)idle_coll->pcs[i].count / idle_coll->total_samples * 100.0;
+                display_list[num_display].removed = false;  // Not yet
+                num_display++;
+            }
+
+            // Second pass: find and mark contamination
+            int contaminated = 0;
             for (int b = 0; b < coll->num_pcs; b++) {
                 for (int i = 0; i < idle_coll->num_pcs; i++) {
                     if (coll->pcs[b].pc == idle_coll->pcs[i].pc &&
@@ -1225,32 +1256,33 @@ static void sparc_cpu_stop_learning(void)
                         DEBUG_PRINTF("   ⚠️  %s contaminated: PC=0x%08x NPC=0x%08x\n",
                                idle_coll->name, (uint32_t)coll->pcs[b].pc, (uint32_t)coll->pcs[b].npc);
 
-                        // Mark for removal
+                        // Mark in idle array for removal
                         idle_coll->pcs[i].count = 0;
+
+                        // Mark in display list as removed
+                        for (int d = 0; d < num_display; d++) {
+                            if (display_list[d].pc == idle_coll->pcs[i].pc &&
+                                display_list[d].npc == idle_coll->pcs[i].npc) {
+                                display_list[d].removed = true;
+                                break;
+                            }
+                        }
                         contaminated++;
                     }
                 }
             }
 
             if (contaminated > 0) {
-                DEBUG_PRINTF("   Cleaning %s: %d contaminated entries removed\n",
-                       idle_coll->name, contaminated);
 
-                // Create merged list for display (kept + removed, sorted by original rank)
-                typedef struct {
-                    PCCandidate pc;
-                    bool removed;
-                    double percent;
-                } DisplayEntry;
-                DisplayEntry display_list[20];  // Top 10 + up to 10 removed
-                int num_display = 0;
-
-                // Add all entries with their status
-                for (int i = 0; i < idle_coll->num_pcs && num_display < 20; i++) {
-                    display_list[num_display].pc = idle_coll->pcs[i];
-                    display_list[num_display].removed = (idle_coll->pcs[i].count == 0);
-                    display_list[num_display].percent = (double)idle_coll->pcs[i].count / idle_coll->total_samples * 100.0;
-                    num_display++;
+                // Sort by descending percentage (NOT by original array order)
+                for (int i = 0; i < num_display - 1; i++) {
+                    for (int j = 0; j < num_display - i - 1; j++) {
+                        if (display_list[j].orig_percent < display_list[j + 1].orig_percent) {
+                            DisplayEntry temp = display_list[j];
+                            display_list[j] = display_list[j + 1];
+                            display_list[j + 1] = temp;
+                        }
+                    }
                 }
 
                 // Compact idle array (remove count=0)
@@ -1265,17 +1297,22 @@ static void sparc_cpu_stop_learning(void)
                 }
                 idle_coll->num_pcs = write_idx;
 
+                DEBUG_PRINTF("   Cleaning %s: %d contaminated entries removed\n",
+                       idle_coll->name, contaminated);
+
                 // Show merged list (descending by original percentage)
-                DEBUG_PRINTF("\n   📋 Updated %s list (showing top %d):\n", idle_coll->name, num_display);
+                int show_max = num_display < 20 ? num_display : 20;
+                DEBUG_PRINTF("\n   📋 Updated %s list (showing top %d, sorted by %%):\n",
+                            idle_coll->name, show_max);
                 DEBUG_PRINTF("   Rank  PC         NPC        Count     %%      \n");
                 DEBUG_PRINTF("   ----  --------   --------   -------   -----  ------\n");
 
-                for (int i = 0; i < num_display; i++) {
+                for (int i = 0; i < show_max; i++) {
                     DEBUG_PRINTF("   %2d.   0x%08x 0x%08x %7u   %5.1f%%", i + 1,
-                           (uint32_t)display_list[i].pc.pc,
-                           (uint32_t)display_list[i].pc.npc,
-                           display_list[i].pc.count,
-                           display_list[i].percent);
+                           (uint32_t)display_list[i].pc,
+                           (uint32_t)display_list[i].npc,
+                           display_list[i].orig_count,
+                           display_list[i].orig_percent);
                     if (display_list[i].removed) {
                         DEBUG_PRINTF("  🗑️ REMOVED");
                     }

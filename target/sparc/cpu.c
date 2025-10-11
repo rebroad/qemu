@@ -84,6 +84,9 @@ static PCCollection collections[NUM_COLLECTIONS] = {
     {.name = "BUSY", .mode = LEARNING_BUSY}
 };
 
+// Forward declarations for learning functions
+static void sparc_cpu_stop_learning(void);
+
 static QemuOptsList sparc_cpu_opts = {
     .name = "sparc-cpu",
     .implied_opt_name = "cpu",

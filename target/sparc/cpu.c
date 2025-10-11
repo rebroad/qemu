@@ -43,29 +43,41 @@ static void sparc_cpu_parse_opts(void);
 // Debug flag for SPARC CPU logging
 static bool sparc_cpu_debug = false;
 
-// Idle PC learning mode
+// PC learning system for idle detection
 typedef enum {
     LEARNING_OFF = 0,
-    LEARNING_IDLE = 1,
-    LEARNING_BUSY = 2
+    LEARNING_PROM_IDLE,
+    LEARNING_SUNOS_IDLE,
+    LEARNING_BUSY
 } LearningMode;
+
+#define NUM_COLLECTIONS 3  // PROM_IDLE, SUNOS_IDLE, BUSY
 
 static LearningMode learning_mode = LEARNING_OFF;
 
-#define MAX_IDLE_PC_CANDIDATES 1000
+#define MAX_PC_CANDIDATES 1000
+#define IDLE_PC_SAVE_FILE "/tmp/qemu-sparc-idle-pcs.dat"
+
 typedef struct {
     target_ulong pc;
     target_ulong npc;
     uint32_t count;
-} IdlePCCandidate;
+} PCCandidate;
 
-static IdlePCCandidate idle_pc_candidates[MAX_IDLE_PC_CANDIDATES];
-static int num_idle_candidates = 0;
-static uint32_t idle_samples_collected = 0;
+typedef struct {
+    PCCandidate pcs[MAX_PC_CANDIDATES];
+    int num_pcs;
+    uint32_t total_samples;
+    const char *name;
+    LearningMode mode;
+} PCCollection;
 
-static IdlePCCandidate busy_pc_candidates[MAX_IDLE_PC_CANDIDATES];
-static int num_busy_candidates = 0;
-static uint32_t busy_samples_collected = 0;
+// Learning collections (array index = mode - 1, since OFF has no collection)
+static PCCollection collections[NUM_COLLECTIONS] = {
+    {.name = "PROM-IDLE", .mode = LEARNING_PROM_IDLE},
+    {.name = "SUNOS-IDLE", .mode = LEARNING_SUNOS_IDLE},
+    {.name = "BUSY", .mode = LEARNING_BUSY}
+};
 
 static QemuOptsList sparc_cpu_opts = {
     .name = "sparc-cpu",
@@ -855,46 +867,27 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static const target_ulong PROM_IDLE_PCS[] = {0xffd16750, 0xffd20170, 0xffd20174, 0xffd2ba10, 0xffef0000};
     static const int NUM_PROM_IDLE_PCS = sizeof(PROM_IDLE_PCS) / sizeof(PROM_IDLE_PCS[0]);
 
-    // Learning mode: collect PC/NPC frequencies
-    if (learning_mode == LEARNING_IDLE) {
-        idle_samples_collected++;
-
+    // Learning mode: collect PC/NPC frequencies (DRY approach)
+    if (learning_mode != LEARNING_OFF) {
+        PCCollection *coll = &collections[learning_mode - 1];  // mode-1 since OFF has no collection
+        coll->total_samples++;
+        
+        // Find or add this PC/NPC pair
         int found = -1;
-        for (int i = 0; i < num_idle_candidates; i++) {
-            if (idle_pc_candidates[i].pc == env->pc &&
-                idle_pc_candidates[i].npc == env->npc) {
+        for (int i = 0; i < coll->num_pcs; i++) {
+            if (coll->pcs[i].pc == env->pc && coll->pcs[i].npc == env->npc) {
                 found = i;
                 break;
             }
         }
 
         if (found >= 0) {
-            idle_pc_candidates[found].count++;
-        } else if (num_idle_candidates < MAX_IDLE_PC_CANDIDATES) {
-            idle_pc_candidates[num_idle_candidates].pc = env->pc;
-            idle_pc_candidates[num_idle_candidates].npc = env->npc;
-            idle_pc_candidates[num_idle_candidates].count = 1;
-            num_idle_candidates++;
-        }
-    } else if (learning_mode == LEARNING_BUSY) {
-        busy_samples_collected++;
-
-        int found = -1;
-        for (int i = 0; i < num_busy_candidates; i++) {
-            if (busy_pc_candidates[i].pc == env->pc &&
-                busy_pc_candidates[i].npc == env->npc) {
-                found = i;
-                break;
-            }
-        }
-
-        if (found >= 0) {
-            busy_pc_candidates[found].count++;
-        } else if (num_busy_candidates < MAX_IDLE_PC_CANDIDATES) {
-            busy_pc_candidates[num_busy_candidates].pc = env->pc;
-            busy_pc_candidates[num_busy_candidates].npc = env->npc;
-            busy_pc_candidates[num_busy_candidates].count = 1;
-            num_busy_candidates++;
+            coll->pcs[found].count++;
+        } else if (coll->num_pcs < MAX_PC_CANDIDATES) {
+            coll->pcs[coll->num_pcs].pc = env->pc;
+            coll->pcs[coll->num_pcs].npc = env->npc;
+            coll->pcs[coll->num_pcs].count = 1;
+            coll->num_pcs++;
         }
     }
 
@@ -991,27 +984,39 @@ void sparc_cpu_set_debug(bool enable)
     printf("SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
 }
 
-// Idle PC learning mode control functions
-static void sparc_cpu_start_idle_learning(void)
+// Generic learning control (DRY)
+static void sparc_cpu_start_learning(LearningMode mode)
 {
-    printf("🎓 Starting IDLE PC learning mode...\n");
-    printf("   Keep the guest OS idle for 5-10 seconds, then call sparc-stop-idle-learning\n");
-    learning_mode = LEARNING_IDLE;
-    num_idle_candidates = 0;
-    idle_samples_collected = 0;
-    memset(idle_pc_candidates, 0, sizeof(idle_pc_candidates));
+    if (mode <= LEARNING_OFF) return;
+    
+    int idx = mode - 1;  // Array index
+    printf("🎓 Starting %s PC learning mode...\n", collections[idx].name);
+    learning_mode = mode;
+    
+    // Reset collection
+    collections[idx].num_pcs = 0;
+    collections[idx].total_samples = 0;
+    memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
+    
+    if (mode == LEARNING_BUSY) {
+        printf("   Keep guest BUSY (compile, run tasks) for 10 seconds\n");
+    } else {
+        printf("   Keep guest IDLE for 10 seconds\n");
+    }
     fflush(stdout);
 }
 
-static void sparc_cpu_start_busy_learning(void)
-{
-    printf("🎓 Starting BUSY PC learning mode...\n");
-    printf("   Keep the guest OS busy for 5-10 seconds, then call sparc-stop-busy-learning\n");
-    learning_mode = LEARNING_BUSY;
-    num_busy_candidates = 0;
-    busy_samples_collected = 0;
-    memset(busy_pc_candidates, 0, sizeof(busy_pc_candidates));
-    fflush(stdout);
+// Wrappers for specific modes
+static void sparc_cpu_start_idle_learning(void) {
+    sparc_cpu_start_learning(LEARNING_SUNOS_IDLE);
+}
+
+static void sparc_cpu_start_prom_idle_learning(void) {
+    sparc_cpu_start_learning(LEARNING_PROM_IDLE);
+}
+
+static void sparc_cpu_start_busy_learning(void) {
+    sparc_cpu_start_learning(LEARNING_BUSY);
 }
 
 static void sparc_cpu_stop_idle_learning(void)

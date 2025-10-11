@@ -87,6 +87,7 @@ static PCCollection collections[NUM_COLLECTIONS] = {
 // Forward declarations for learning functions
 static void sparc_cpu_stop_learning(void);
 static void load_learned_pcs(void);
+static int stat_with_tmp_fallback(const char *filename, struct stat *st);
 
 static QemuOptsList sparc_cpu_opts = {
     .name = "sparc-cpu",
@@ -875,10 +876,13 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static int max_sleep_us = 0;  // Track maximum sleep per second
     static int sleep_events = 0;     // Count of actual sleep calls per second
     static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
+    static int prev_total_execs = 1;  // Previous second's total_execs (for PROM gating calculation)
+    static int prev_prom_idle_hits = 0; // Previous second's PROM idle hits
     static int sunos_idle_hits = 0;  // Count SunOS idle detections per second
     static int prom_idle_hits = 0;   // Count PROM idle detections per second
     static int generic_idle_hits = 0; // Count generic idle loop detections per second
     static int halted_hits = 0;      // Count cpu halted state per second
+    static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
 
     // Known idle addresses (discovered through analysis)
     static const target_ulong SUNOS_IDLE_PC = 0xf01294f8;
@@ -951,6 +955,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                     // Calculate sleep based on frequency: linear mapping, capped at max_sleep_us_cap
                     if (idle_coll->total_samples > 0) {
                         double freq_pct = (double)pc_frequency / idle_coll->total_samples * 100.0;
+                        freq_pct_sum += freq_pct;  // Accumulate for weighted idle % calculation
                         sleep_us = (int)(freq_pct * 1000);  // Direct linear: 1%=10µs, 10%=100µs, 50%=500µs, 100%=1000µs
                         if (sleep_us > max_sleep_us_cap) {
                             sleep_us = max_sleep_us_cap;  // Cap at runtime-configurable limit
@@ -958,21 +963,30 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                     }
 
                     // Count idle type for reporting
-                    if (idle_type == 1) {  // SunOS
+                    if (idle_type == 1) {  // SunOS - always allow sleeping
                         sunos_idle_hits++;
-                    } else {  // PROM
+                    } else {  // PROM - only sleep if >90% of execs were PROM idle in previous second
                         prom_idle_hits++;
+                        // Use PREVIOUS second's data to avoid early-second false readings
+                        double prev_prom_pct = (double)prev_prom_idle_hits / prev_total_execs * 100.0;
+                        if (prev_prom_pct < 90.0) {
+                            sleep_us = 0;  // Don't sleep - we're not truly PROM-idling
+                        }
                     }
                     break;
                 }
             }
         } else if (idle_type == 0) {
-            // Fallback: hardcoded PROM idle PCs (use cap)
+            // Fallback: hardcoded PROM idle PCs (only sleep if >90% PROM idle in previous second)
             for (int i = 0; i < NUM_PROM_IDLE_PCS; i++) {
                 if (env->pc == PROM_IDLE_PCS[i]) {
                     is_known_idle = true;
-                    sleep_us = max_sleep_us_cap;
                     prom_idle_hits++;
+                    // Use PREVIOUS second's data to avoid early-second false readings
+                    double prev_prom_pct = (double)prev_prom_idle_hits / prev_total_execs * 100.0;
+                    if (prev_prom_pct >= 90.0) {
+                        sleep_us = max_sleep_us_cap;
+                    }
                     break;
                 }
             }
@@ -1027,21 +1041,9 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     if (total_execs > 0 && current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
         // Check if config file was updated and reload if needed
         struct stat st;
-        char config_path[256];
-        snprintf(config_path, sizeof(config_path), "%s", IDLE_PC_SAVE_FILE);
-        if (stat(config_path, &st) == 0) {
+        if (stat_with_tmp_fallback(IDLE_PC_SAVE_FILE, &st) == 0) {
             if (st.st_mtime != last_config_mtime) {
                 if (last_config_mtime > 0) {  // Not first time
-                    DEBUG_PRINTF("📂 Config file updated, reloading...\n");
-                    load_learned_pcs();
-                }
-                last_config_mtime = st.st_mtime;
-            }
-        } else {
-            // Try /tmp fallback
-            snprintf(config_path, sizeof(config_path), "/tmp/%s", IDLE_PC_SAVE_FILE);
-            if (stat(config_path, &st) == 0 && st.st_mtime != last_config_mtime) {
-                if (last_config_mtime > 0) {
                     DEBUG_PRINTF("📂 Config file updated, reloading...\n");
                     load_learned_pcs();
                 }
@@ -1056,8 +1058,8 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         // MAME-style speed calculation: (emulated_time / real_time) * 100
         int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
 
-        // Calculate idle percentages
-        double idle_pct = total_execs > 0 ? (double)total_idle / total_execs * 100.0 : 0.0;
+        // Calculate true idle percentage (weighted by PC frequency from learning)
+        double idle_pct = total_idle > 0 ? freq_pct_sum / total_idle : 0.0;
 
         // Calculate average sleep
         int avg_sleep_us = sleep_events > 0 ? total_sleep_us / sleep_events : 0;
@@ -1074,7 +1076,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
                           learn_pct, speed_percent);
         } else {
-            pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt)",
+            pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%% %d/%d sleep:%d/%d/%dµs(%devt)",
                           speed_percent, idle_pct, total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
@@ -1117,8 +1119,12 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         min_sleep_us = INT_MAX;
         max_sleep_us = 0;
         sleep_events = 0;
+        // Save current values as "previous" for next second's PROM gating check
+        prev_total_execs = total_execs > 0 ? total_execs : 1;  // Avoid div by zero
+        prev_prom_idle_hits = prom_idle_hits;
         sunos_idle_hits = prom_idle_hits = generic_idle_hits = halted_hits = 0;
         total_execs = 0;  // Reset for next second
+        freq_pct_sum = 0.0;  // Reset weighted idle % accumulator
     }
 
     last_pc = env->pc; last_npc = env->npc;
@@ -1141,6 +1147,18 @@ static FILE *fopen_with_tmp_fallback(const char *filename, const char *mode)
         f = fopen(tmp_path, mode);
     }
     return f;
+}
+
+// Helper: stat file in CWD or fallback to /tmp
+static int stat_with_tmp_fallback(const char *filename, struct stat *st)
+{
+    if (stat(filename, st) == 0) {
+        return 0;  // Success in CWD
+    }
+    // Try /tmp
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "/tmp/%s", filename);
+    return stat(tmp_path, st);
 }
 
 // Save/load learned PCs to/from disk

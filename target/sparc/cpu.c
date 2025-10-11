@@ -86,6 +86,7 @@ static PCCollection collections[NUM_COLLECTIONS] = {
 
 // Forward declarations for learning functions
 static void sparc_cpu_stop_learning(void);
+static void load_learned_pcs(void);
 
 static QemuOptsList sparc_cpu_opts = {
     .name = "sparc-cpu",
@@ -858,6 +859,7 @@ static bool sparc_cpu_has_work(CPUState *cs)
 
 // Dynamic idle threshold (learned from busy patterns, persisted across restarts)
 static int idle_threshold = 1000;
+static int max_sleep_us_cap = 10000;  // Runtime-configurable max sleep (from config file)
 
 // CPU execution enter hook - called before EVERY execution batch
 static void sparc_cpu_exec_enter_hook(CPUState *cs)
@@ -865,17 +867,13 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     CPUSPARCState *env = cpu_env(cs);
     static target_ulong last_pc = 0;
     static target_ulong last_npc = 0;
-    static int idle_count = 0;
-    static int sustained_idle_score = 0;  // Accumulates over time, decays slowly on activity
-    static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
-    static const int MAX_SUSTAINED_SCORE = 1000;  // Cap for sustained_idle_score
-    static int max_idle_count = 0;  // Track maximum idle count reached per second
-    static int min_idle_count = INT_MAX;  // Track minimum idle count (when idle > 0) per second
+
+    // Track config file modification time for auto-reload
+    static time_t last_config_mtime = 0;
     static int total_sleep_us = 0;  // Track total sleep time per second
     static int min_sleep_us = INT_MAX;  // Track minimum sleep per second
     static int max_sleep_us = 0;  // Track maximum sleep per second
     static int sleep_events = 0;     // Count of actual sleep calls per second
-    static int calls_since_last_debug = 0;  // Track number of calls since last debug output
     static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
     static int sunos_idle_hits = 0;  // Count SunOS idle detections per second
     static int prom_idle_hits = 0;   // Count PROM idle detections per second
@@ -933,97 +931,72 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         }
     }
 
-    // Check for learned idle patterns
+    // Check for learned idle patterns and calculate sleep based on frequency
     bool is_known_idle = false;
     int sleep_us = 0;
-    calls_since_last_debug++;
+    uint32_t pc_frequency = 0;  // How often this PC appeared during learning
     total_execs++;  // Count every execution for percentage calculation
 
-    // Check both idle collections (PROM and SunOS)
+    // Check both idle collections (PROM and SunOS) - use learned frequency!
     for (int idle_type = 0; idle_type < 2 && !is_known_idle; idle_type++) {
         PCCollection *idle_coll = &collections[idle_type];  // 0=PROM, 1=SUNOS
 
         if (idle_coll->num_pcs > 0) {
-            // Use learned PCs
+            // Use learned PCs WITH frequency data
             for (int i = 0; i < idle_coll->num_pcs; i++) {
                 if (env->pc == idle_coll->pcs[i].pc && env->npc == idle_coll->pcs[i].npc) {
                     is_known_idle = true;
+                    pc_frequency = idle_coll->pcs[i].count;
+
+                    // Calculate sleep based on frequency: linear mapping, capped at max_sleep_us_cap
+                    if (idle_coll->total_samples > 0) {
+                        double freq_pct = (double)pc_frequency / idle_coll->total_samples * 100.0;
+                        sleep_us = (int)(freq_pct * 1000);  // Direct linear: 1%=10µs, 10%=100µs, 50%=500µs, 100%=1000µs
+                        if (sleep_us > max_sleep_us_cap) {
+                            sleep_us = max_sleep_us_cap;  // Cap at runtime-configurable limit
+                        }
+                    }
+
+                    // Count idle type for reporting
+                    if (idle_type == 1) {  // SunOS
+                        sunos_idle_hits++;
+                    } else {  // PROM
+                        prom_idle_hits++;
+                    }
                     break;
                 }
             }
         } else if (idle_type == 0) {
-            // Fallback: hardcoded PROM idle PCs
+            // Fallback: hardcoded PROM idle PCs (use cap)
             for (int i = 0; i < NUM_PROM_IDLE_PCS; i++) {
                 if (env->pc == PROM_IDLE_PCS[i]) {
                     is_known_idle = true;
+                    sleep_us = max_sleep_us_cap;
+                    prom_idle_hits++;
                     break;
                 }
             }
         } else {
-            // Fallback: hardcoded SunOS idle PC
+            // Fallback: hardcoded SunOS idle PC (use cap)
             if (env->pc == SUNOS_IDLE_PC) {
                 is_known_idle = true;
+                sleep_us = max_sleep_us_cap;
+                sunos_idle_hits++;
             }
         }
     }
 
-    // Idle detection logic - updates idle_count and hit counters
-    if (is_known_idle) {
-        // Known idle PC - increment immediately
-        idle_count++;
-        if (idle_count > max_idle_count) max_idle_count = idle_count;
-        if (idle_count < min_idle_count) min_idle_count = idle_count;
-
-        // Build sustained idle score (faster ramp for known-idle) - TODO maybe each PC/NPC pair should have its own sustained idle score?
-        sustained_idle_score += 5;
-        if (sustained_idle_score > MAX_SUSTAINED_SCORE) {
-            sustained_idle_score = MAX_SUSTAINED_SCORE;
-        }
-
-        // Count idle type for once-per-second reporting
-        if (env->pc == SUNOS_IDLE_PC ||
-            (collections[LEARNING_SUNOS_IDLE - 1].num_pcs > 0 &&
-             env->pc == collections[LEARNING_SUNOS_IDLE - 1].pcs[0].pc)) {
-            sunos_idle_hits++;
-        } else {
-            prom_idle_hits++;
-        }
-    } else if (env->pc == last_pc && env->npc == last_npc) {
-        // Generic idle detection (any repeated PC/NPC)
-        idle_count++;
-        if (idle_count > max_idle_count) max_idle_count = idle_count;
-        if (idle_count < min_idle_count) min_idle_count = idle_count;
-        if (idle_count > idle_threshold) {
-            generic_idle_hits++;
-            // Build sustained idle score (slower ramp for generic)
-            sustained_idle_score += 2;
-            if (sustained_idle_score > MAX_SUSTAINED_SCORE) {
-                sustained_idle_score = MAX_SUSTAINED_SCORE;
-            }
-        }
-    } else {
-        // Activity detected - reset immediate idle_count but only decay sustained score
-        idle_count = 0;
-        sustained_idle_score -= 1;  // Slow decay
-        if (sustained_idle_score < 0) {
-            sustained_idle_score = 0;
-        }
+    // Generic idle detection (PC/NPC repeat) - only if not already known-idle
+    if (!is_known_idle && env->pc == last_pc && env->npc == last_npc) {
+        generic_idle_hits++;
+        // Generic sleep: just a small delay (not trusted like learned PCs)
+        sleep_us = 1000;  // 1ms for generic repeats
     }
 
     // Check for power down state
     if (cs->halted) {
-        idle_count = MAX_SLEEP_US / 10;  // Max out for halted
-        sustained_idle_score = MAX_SUSTAINED_SCORE;  // Max out sustained score
+        sleep_us = max_sleep_us_cap;
         halted_hits++;
-    }
-
-    // Calculate sleep based on BOTH idle_count and sustained_idle_score
-    // For generic idle (not known-idle), only sleep if above threshold to avoid false positives
-    if (idle_count > 0 && (is_known_idle || cs->halted || idle_count > idle_threshold)) {
-        // Use max of immediate idle_count and sustained score for sleep calculation
-        // This allows longer sleeps even after brief interruptions
-        int effective_idle = idle_count > sustained_idle_score ? idle_count : sustained_idle_score;
-        sleep_us = MIN(effective_idle * 10, MAX_SLEEP_US);
     }
 
     // Track sleep statistics
@@ -1052,6 +1025,30 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     }
 
     if (total_execs > 0 && current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
+        // Check if config file was updated and reload if needed
+        struct stat st;
+        char config_path[256];
+        snprintf(config_path, sizeof(config_path), "%s", IDLE_PC_SAVE_FILE);
+        if (stat(config_path, &st) == 0) {
+            if (st.st_mtime != last_config_mtime) {
+                if (last_config_mtime > 0) {  // Not first time
+                    DEBUG_PRINTF("📂 Config file updated, reloading...\n");
+                    load_learned_pcs();
+                }
+                last_config_mtime = st.st_mtime;
+            }
+        } else {
+            // Try /tmp fallback
+            snprintf(config_path, sizeof(config_path), "/tmp/%s", IDLE_PC_SAVE_FILE);
+            if (stat(config_path, &st) == 0 && st.st_mtime != last_config_mtime) {
+                if (last_config_mtime > 0) {
+                    DEBUG_PRINTF("📂 Config file updated, reloading...\n");
+                    load_learned_pcs();
+                }
+                last_config_mtime = st.st_mtime;
+            }
+        }
+
         int total_idle = sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits;
         int64_t real_delta_ns = current_time_ns - last_report_time_ns;
         int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
@@ -1064,7 +1061,6 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 
         // Calculate average sleep
         int avg_sleep_us = sleep_events > 0 ? total_sleep_us / sleep_events : 0;
-        int avg_idle_count = total_idle > 0 ? (min_idle_count + max_idle_count) / 2 : 0;
 
         // Build complete message to avoid interleaving (thread-safe)
         char msg[512];
@@ -1078,16 +1074,12 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
                           learn_pct, speed_percent);
         } else {
-            pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt) idlecnt:%d/%d/%d sus=%d",
+            pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt)",
                           speed_percent, idle_pct, total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
                           max_sleep_us,
-                          sleep_events,
-                          min_idle_count == INT_MAX ? 0 : min_idle_count,
-                          avg_idle_count,
-                          max_idle_count,
-                          sustained_idle_score);
+                          sleep_events);
         }
 
         // Show breakdown if there are different idle types
@@ -1121,13 +1113,10 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 
         last_report_time_ns = current_time_ns;
         last_vm_clock_ns = vm_clock_ns;
-        max_idle_count = 0;
-        min_idle_count = INT_MAX;
         total_sleep_us = 0;
         min_sleep_us = INT_MAX;
         max_sleep_us = 0;
         sleep_events = 0;
-        calls_since_last_debug = 0;
         sunos_idle_hits = prom_idle_hits = generic_idle_hits = halted_hits = 0;
         total_execs = 0;  // Reset for next second
     }
@@ -1179,6 +1168,9 @@ static void save_learned_pcs(void)
     PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
     fprintf(f, "THRESHOLD %d\n", busy_coll->max_consecutive_repeats);
 
+    // Save max_sleep_us_cap (runtime-configurable)
+    fprintf(f, "MAX_SLEEP_US %d\n", max_sleep_us_cap);
+
     fclose(f);
     DEBUG_PRINTF("💾 Saved learned PCs to %s\n", IDLE_PC_SAVE_FILE);
     fflush(stdout);
@@ -1204,6 +1196,14 @@ static void load_learned_pcs(void)
             idle_threshold = (max_repeats * 3) / 2;  // 1.5x safety margin
             DEBUG_PRINTF("   Loaded dynamic threshold: %d (busy_max=%d)\n",
                         idle_threshold, max_repeats);
+            continue;
+        }
+
+        // Check for MAX_SLEEP_US line (runtime-configurable cap)
+        int sleep_cap;
+        if (sscanf(line, "MAX_SLEEP_US %d", &sleep_cap) == 1) {
+            max_sleep_us_cap = sleep_cap;
+            DEBUG_PRINTF("   Loaded max_sleep_us_cap: %d µs\n", max_sleep_us_cap);
             continue;
         }
 

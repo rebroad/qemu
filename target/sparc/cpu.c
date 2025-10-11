@@ -1002,7 +1002,11 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     int64_t current_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);  // Host wall-clock
     int64_t vm_clock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);       // Guest virtual time
 
-    if (total_execs > 0 && last_report_time_ns > 0 && current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
+    if (last_report_time_ns == 0) {
+        last_report_time_ns = current_time_ns;
+    }
+
+    if (total_execs > 0 && current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
         int total_idle = sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits;
         int64_t real_delta_ns = current_time_ns - last_report_time_ns;
         int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;

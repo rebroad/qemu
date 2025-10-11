@@ -882,9 +882,10 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static int sunos_fallback_hits = 0; // Count SunOS fallback (hardcoded) hits per second
     static int prom_fallback_hits = 0;  // Count PROM fallback (hardcoded) hits per second
     static int generic_idle_hits = 0; // Count generic idle loop detections per second
-    static int busy_filtered_hits = 0; // Count generic repeats filtered by BUSY collection
-    static double busy_freq_sum = 0.0; // Sum of BUSY freq % for filtered hits
-    static int halted_hits = 0;      // Count cpu halted state per second
+    static int antigeneric_hits = 0;  // Count generic repeats rejected by BUSY collection
+    static double antigeneric_freq_sum = 0.0; // Sum of BUSY freq % for antigeneric hits
+    static int busy_hits = 0;         // Count normal busy execs (not idle, not generic)
+    static int halted_hits = 0;       // Count cpu halted state per second
     static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
 
     // Known idle addresses (discovered through analysis)
@@ -1017,11 +1018,11 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         for (int i = 0; i < busy_coll->num_pcs; i++) {
             if (busy_coll->pcs[i].pc == env->pc && busy_coll->pcs[i].npc == env->npc) {
                 is_busy_pc = true;
-                // Track the busy frequency for reporting
+                // Track the busy frequency for reporting (antigeneric = rejected generic idle)
                 if (busy_coll->total_samples > 0) {
                     double busy_freq_pct = (double)busy_coll->pcs[i].count / busy_coll->total_samples * 100.0;
-                    busy_freq_sum += busy_freq_pct;
-                    busy_filtered_hits++;
+                    antigeneric_freq_sum += busy_freq_pct;
+                    antigeneric_hits++;
                 }
                 break;
             }
@@ -1034,6 +1035,9 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             // Generic sleep: just a small delay (not trusted like learned PCs)
             sleep_us = 1000;  // 1ms for generic repeats
         }
+    } else if (!is_known_idle && !cs->halted) {
+        // Normal busy execution (PC changed, not idle, not halted)
+        busy_hits++;
     }
 
     // Check for power down state
@@ -1043,13 +1047,13 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         halted_hits++;
     }
 
-    // Track sleep statistics
+    // Track sleep statistics (including zeros)
+    total_sleep_us += sleep_us;
     if (sleep_us > 0) {
-        total_sleep_us += sleep_us;
         sleep_events++;
-        if (sleep_us < min_sleep_us) min_sleep_us = sleep_us;
         if (sleep_us > max_sleep_us) max_sleep_us = sleep_us;
     }
+    if (sleep_us < min_sleep_us) min_sleep_us = sleep_us;
 
     // Only sleep if icount is not enabled (when icount is on, we want max speed)
     // AND not in learning mode (need unthrottled speed for accurate learning)
@@ -1091,8 +1095,9 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         // Calculate true idle percentage (weighted by PC frequency from learning)
         double idle_pct = total_idle > 0 ? freq_pct_sum / total_idle : 0.0;
 
-        // Calculate average sleep
-        int avg_sleep_us = sleep_events > 0 ? total_sleep_us / sleep_events : 0;
+        // Calculate average sleep PER EXEC (not just per sleep event)
+        // This includes all the execs where sleep_us = 0
+        int avg_sleep_us = total_execs > 0 ? total_sleep_us / total_execs : 0;
 
         // Build complete message to avoid interleaving (thread-safe)
         char msg[512];
@@ -1143,16 +1148,22 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sG:%.1f%%", first ? "" : " ", generic_pct);
                 first = false;
             }
+            if (antigeneric_hits > 0) {
+                double antigen_pct = (double)antigeneric_hits / total_execs * 100.0;
+                double avg_antigen_freq = antigeneric_freq_sum / antigeneric_hits;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sAG:%.1f%%(freq:%.1f%%)",
+                               first ? "" : " ", antigen_pct, avg_antigen_freq);
+                first = false;
+            }
             if (halted_hits > 0) {
                 double halted_pct = (double)halted_hits / total_execs * 100.0;
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sH:%.1f%%", first ? "" : " ", halted_pct);
                 first = false;
             }
-            if (busy_filtered_hits > 0) {
-                double busy_hit_pct = (double)busy_filtered_hits / total_execs * 100.0;
-                double avg_busy_freq = busy_freq_sum / busy_filtered_hits;
-                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sBusy:%.1f%%(freq:%.1f%%)",
-                               first ? "" : " ", busy_hit_pct, avg_busy_freq);
+            if (busy_hits > 0) {
+                double busy_pct = (double)busy_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sB:%.1f%%",
+                               first ? "" : " ", busy_pct);
             }
             pos += snprintf(msg + pos, sizeof(msg) - pos, "]");
         }
@@ -1172,8 +1183,9 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         sunos_idle_hits = prom_idle_hits = 0;
         sunos_fallback_hits = prom_fallback_hits = 0;
         generic_idle_hits = halted_hits = 0;
-        busy_filtered_hits = 0;
-        busy_freq_sum = 0.0;
+        antigeneric_hits = 0;
+        antigeneric_freq_sum = 0.0;
+        busy_hits = 0;
         total_execs = 0;  // Reset for next second
         freq_pct_sum = 0.0;  // Reset weighted idle % accumulator
     }
@@ -1474,14 +1486,6 @@ static void sparc_cpu_stop_learning(void)
         }
     }
 
-    // Show suggested array
-    DEBUG_PRINTF("\n   💡 Suggested C array:\n");
-    DEBUG_PRINTF("   static const target_ulong %s_PCS[] = {", coll->name);
-    for (int i = 0; i < show_count; i++) {
-        if (i > 0) DEBUG_PRINTF(", ");
-        DEBUG_PRINTF("0x%x", (uint32_t)coll->pcs[i].pc);
-    }
-    DEBUG_PRINTF("};\n");
     // Recalculate effective counts if we have busy collection and either PROM or SUNOS idle collection.
     PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
     PCCollection *prom_coll = &collections[LEARNING_PROM_IDLE - 1];

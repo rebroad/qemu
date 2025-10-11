@@ -1064,7 +1064,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 
     // Only sleep if icount is not enabled (when icount is on, we want max speed)
     // AND not in learning mode (need unthrottled speed for accurate learning)
-    if (!icount_enabled() && learning_mode == LEARNING_OFF && sleep_us > 0) {
+    if (learning_mode == LEARNING_OFF && sleep_us > 0) {
         g_usleep(sleep_us);
     }
 

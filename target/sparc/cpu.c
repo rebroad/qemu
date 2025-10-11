@@ -43,6 +43,9 @@ static void sparc_cpu_parse_opts(void);
 // Debug flag for SPARC CPU logging
 static bool sparc_cpu_debug = false;
 
+// Debug output helper - use stderr to not interfere with serial console
+#define DEBUG_PRINTF(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while(0)
+
 // PC learning system for idle detection
 typedef enum {
     LEARNING_OFF = 0,
@@ -858,9 +861,12 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static const int IDLE_THRESHOLD = 1000; // Adjust based on testing
     static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
     static int max_idle_count = 0;  // Track maximum idle count reached
-    static int total_sleeps = 0;    // Track total number of sleeps
     static int total_sleep_us = 0;  // Track total sleep time
     static int calls_since_last_debug = 0;  // Track number of calls since last debug output
+    static int sunos_idle_hits = 0;  // Count SunOS idle detections per second
+    static int prom_idle_hits = 0;   // Count PROM idle detections per second
+    static int generic_idle_hits = 0; // Count generic idle loop detections per second
+    static int halted_hits = 0;      // Count cpu halted state per second
 
     // Known idle addresses (discovered through analysis)
     static const target_ulong SUNOS_IDLE_PC = 0xf01294f8;
@@ -924,20 +930,20 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         }
     }
 
+    // Idle detection logic - updates idle_count and hit counters
     if (is_known_idle) {
-        // Known idle PC - start sleeping immediately
+        // Known idle PC - increment immediately
         idle_count++;
         if (idle_count > max_idle_count) max_idle_count = idle_count;
         sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
-        total_sleeps++;
 
-        // Debug: Show when we detect known idle patterns
-        if (idle_count == 1) {
-            if (env->pc == SUNOS_IDLE_PC) {
-                printf("[SPARC-IDLE] SunOS idle detected at PC=0x%08x (sleep_us=%d)\n", env->pc, sleep_us);
-            } else {
-                printf("[SPARC-IDLE] PROM idle detected at PC=0x%08x (sleep_us=%d)\n", env->pc, sleep_us);
-            }
+        // Count idle type for once-per-second reporting
+        if (env->pc == SUNOS_IDLE_PC ||
+            (collections[LEARNING_SUNOS_IDLE - 1].num_pcs > 0 &&
+             env->pc == collections[LEARNING_SUNOS_IDLE - 1].pcs[0].pc)) {
+            sunos_idle_hits++;
+        } else {
+            prom_idle_hits++;
         }
     } else if (env->pc == last_pc && env->npc == last_npc) {
         // Generic idle detection (any repeated PC/NPC)
@@ -947,7 +953,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             // We're in an idle loop, sleep to reduce CPU usage
             // Sleep time increases with idle duration, up to MAX_SLEEP_US
             sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
-            total_sleeps++;
+            generic_idle_hits++;
         }
     } else {
         idle_count = 0;
@@ -955,8 +961,8 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 
     // Check for power down state
     if (cs->halted) {
-        total_sleeps++;
         sleep_us = MAX_SLEEP_US;
+        halted_hits++;
     }
 
     total_sleep_us += sleep_us;
@@ -974,20 +980,37 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     int64_t vm_clock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);       // Guest virtual time
 
     if (current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
-        if (last_report_time_ns > 0 && (max_idle_count > 0 || total_sleeps > 0 || calls_since_last_debug > 0)) {
+        int total_idle = sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits;
+        if (last_report_time_ns > 0 && total_idle > 0) {
             int64_t real_delta_ns = current_time_ns - last_report_time_ns;
             int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
 
             // MAME-style speed calculation: (emulated_time / real_time) * 100
             int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
 
-            printf("[SPARC-IDLE] PC=0x%08x, calls=%d, sleeps=%d, sleep_us=%d, speed=%d%%\n",
-                   env->pc, calls_since_last_debug, total_sleeps, total_sleep_us, speed_percent);
-            fflush(stdout);
+            // Build complete message to avoid interleaving (thread-safe)
+            char msg[256];
+            int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] speed=%d%% total=%d",
+                              speed_percent, total_idle);
+            if (sunos_idle_hits > 0) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos, " sunos=%d", sunos_idle_hits);
+            }
+            if (prom_idle_hits > 0) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos, " prom=%d", prom_idle_hits);
+            }
+            if (generic_idle_hits > 0) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos, " generic=%d", generic_idle_hits);
+            }
+            if (halted_hits > 0) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos, " halted=%d", halted_hits);
+            }
+            snprintf(msg + pos, sizeof(msg) - pos, "\n");
+            DEBUG_PRINTF("%s", msg);
         }
         last_report_time_ns = current_time_ns;
         last_vm_clock_ns = vm_clock_ns;
-        max_idle_count = total_sleeps = total_sleep_us = calls_since_last_debug = 0;
+        max_idle_count = total_sleep_us = calls_since_last_debug = 0;
+        sunos_idle_hits = prom_idle_hits = generic_idle_hits = halted_hits = 0;
     }
 
     last_pc = env->pc; last_npc = env->npc;
@@ -997,7 +1020,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 void sparc_cpu_set_debug(bool enable)
 {
     sparc_cpu_debug = enable;
-    printf("SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
+    DEBUG_PRINTF("SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
 }
 
 // Helper: open file in CWD or fallback to /tmp
@@ -1017,7 +1040,7 @@ static void save_learned_pcs(void)
 {
     FILE *f = fopen_with_tmp_fallback(IDLE_PC_SAVE_FILE, "w");
     if (!f) {
-        printf("⚠️  Failed to save learned PCs\n");
+        DEBUG_PRINTF("⚠️  Failed to save learned PCs\n");
         return;
     }
 
@@ -1034,7 +1057,7 @@ static void save_learned_pcs(void)
     }
 
     fclose(f);
-    printf("💾 Saved learned PCs to %s\n", IDLE_PC_SAVE_FILE);
+    DEBUG_PRINTF("💾 Saved learned PCs to %s\n", IDLE_PC_SAVE_FILE);
     fflush(stdout);
 }
 
@@ -1045,7 +1068,7 @@ static void load_learned_pcs(void)
         return;  // No saved file, use hardcoded defaults
     }
 
-    printf("📂 Loading learned PCs from %s...\n", IDLE_PC_SAVE_FILE);
+    DEBUG_PRINTF("📂 Loading learned PCs from %s...\n", IDLE_PC_SAVE_FILE);
 
     int mode, num_pcs;
     while (fscanf(f, "%d %d\n", &mode, &num_pcs) == 2) {
@@ -1064,7 +1087,7 @@ static void load_learned_pcs(void)
                 coll->num_pcs++;
             }
         }
-        printf("   Loaded %d %s PCs\n", coll->num_pcs, coll->name);
+        DEBUG_PRINTF("   Loaded %d %s PCs\n", coll->num_pcs, coll->name);
     }
 
     fclose(f);
@@ -1077,7 +1100,7 @@ static void sparc_cpu_start_learning(LearningMode mode)
     if (mode <= LEARNING_OFF) return;
 
     int idx = mode - 1;  // Array index
-    printf("🎓 Starting %s PC learning mode...\n", collections[idx].name);
+    DEBUG_PRINTF("🎓 Starting %s PC learning mode...\n", collections[idx].name);
     learning_mode = mode;
 
     // Reset collection
@@ -1086,9 +1109,9 @@ static void sparc_cpu_start_learning(LearningMode mode)
     memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
 
     if (mode == LEARNING_BUSY) {
-        printf("   Keep guest BUSY (compile, run tasks) for 10 seconds\n");
+        DEBUG_PRINTF("   Keep guest BUSY (compile, run tasks) for 10 seconds\n");
     } else {
-        printf("   Keep guest IDLE for 10 seconds\n");
+        DEBUG_PRINTF("   Keep guest IDLE for 10 seconds\n");
     }
     fflush(stdout);
 }
@@ -1098,7 +1121,7 @@ static void sparc_cpu_start_learning(LearningMode mode)
 static void sparc_cpu_stop_learning(void)
 {
     if (learning_mode == LEARNING_OFF) {
-        printf("⚠️  No learning mode active\n");
+        DEBUG_PRINTF("⚠️  No learning mode active\n");
         return;
     }
 
@@ -1107,12 +1130,12 @@ static void sparc_cpu_stop_learning(void)
 
     learning_mode = LEARNING_OFF;
 
-    printf("🎓 %s PC learning complete!\n", coll->name);
-    printf("   Total samples: %u\n", coll->total_samples);
-    printf("   Unique PC/NPC pairs: %d\n", coll->num_pcs);
+    DEBUG_PRINTF("🎓 %s PC learning complete!\n", coll->name);
+    DEBUG_PRINTF("   Total samples: %u\n", coll->total_samples);
+    DEBUG_PRINTF("   Unique PC/NPC pairs: %d\n", coll->num_pcs);
 
     if (coll->num_pcs == 0) {
-        printf("   ⚠️  No PCs collected!\n");
+        DEBUG_PRINTF("   ⚠️  No PCs collected!\n");
         fflush(stdout);
         return;
     }
@@ -1129,20 +1152,20 @@ static void sparc_cpu_stop_learning(void)
     }
 
     // Show top 10
-    printf("\n   Top PC/NPC pairs (by frequency):\n");
-    printf("   Rank  PC         NPC        Count     %%\n");
-    printf("   ----  --------   --------   -------   -----\n");
+    DEBUG_PRINTF("\n   Top PC/NPC pairs (by frequency):\n");
+    DEBUG_PRINTF("   Rank  PC         NPC        Count     %%\n");
+    DEBUG_PRINTF("   ----  --------   --------   -------   -----\n");
     int show_count = coll->num_pcs < 10 ? coll->num_pcs : 10;
     for (int i = 0; i < show_count; i++) {
         double percent = (double)coll->pcs[i].count / coll->total_samples * 100.0;
-        printf("   %2d.   0x%08x 0x%08x %7u   %5.1f%%\n", i + 1,
+        DEBUG_PRINTF("   %2d.   0x%08x 0x%08x %7u   %5.1f%%\n", i + 1,
                (uint32_t)coll->pcs[i].pc, (uint32_t)coll->pcs[i].npc,
                coll->pcs[i].count, percent);
     }
 
     // If this was BUSY mode, do cross-contamination filtering
     if (stopped_mode == LEARNING_BUSY) {
-        printf("\n   🔍 Cross-contamination filtering:\n");
+        DEBUG_PRINTF("\n   🔍 Cross-contamination filtering:\n");
 
         // Check against both idle collections
         for (int idle_type = 0; idle_type < 2; idle_type++) {  // 0=PROM, 1=SUNOS
@@ -1156,7 +1179,7 @@ static void sparc_cpu_stop_learning(void)
                 for (int i = 0; i < idle_coll->num_pcs; i++) {
                     if (coll->pcs[b].pc == idle_coll->pcs[i].pc &&
                         coll->pcs[b].npc == idle_coll->pcs[i].npc) {
-                        printf("   ⚠️  %s contaminated: PC=0x%08x NPC=0x%08x\n",
+                        DEBUG_PRINTF("   ⚠️  %s contaminated: PC=0x%08x NPC=0x%08x\n",
                                idle_coll->name, (uint32_t)coll->pcs[b].pc, (uint32_t)coll->pcs[b].npc);
 
                         // Mark for removal
@@ -1167,7 +1190,7 @@ static void sparc_cpu_stop_learning(void)
             }
 
             if (contaminated > 0) {
-                printf("   Cleaning %s: %d contaminated entries removed\n",
+                DEBUG_PRINTF("   Cleaning %s: %d contaminated entries removed\n",
                        idle_coll->name, contaminated);
 
                 // Create merged list for display (kept + removed, sorted by original rank)
@@ -1200,37 +1223,37 @@ static void sparc_cpu_stop_learning(void)
                 idle_coll->num_pcs = write_idx;
 
                 // Show merged list (descending by original percentage)
-                printf("\n   📋 Updated %s list (showing top %d):\n", idle_coll->name, num_display);
-                printf("   Rank  PC         NPC        Count     %%      \n");
-                printf("   ----  --------   --------   -------   -----  ------\n");
+                DEBUG_PRINTF("\n   📋 Updated %s list (showing top %d):\n", idle_coll->name, num_display);
+                DEBUG_PRINTF("   Rank  PC         NPC        Count     %%      \n");
+                DEBUG_PRINTF("   ----  --------   --------   -------   -----  ------\n");
 
                 for (int i = 0; i < num_display; i++) {
-                    printf("   %2d.   0x%08x 0x%08x %7u   %5.1f%%", i + 1,
+                    DEBUG_PRINTF("   %2d.   0x%08x 0x%08x %7u   %5.1f%%", i + 1,
                            (uint32_t)display_list[i].pc.pc,
                            (uint32_t)display_list[i].pc.npc,
                            display_list[i].pc.count,
                            display_list[i].percent);
                     if (display_list[i].removed) {
-                        printf("  🗑️ REMOVED");
+                        DEBUG_PRINTF("  🗑️ REMOVED");
                     }
-                    printf("\n");
+                    DEBUG_PRINTF("\n");
                 }
 
-                printf("\n   ✅ %s now has %d clean entries\n", idle_coll->name, idle_coll->num_pcs);
+                DEBUG_PRINTF("\n   ✅ %s now has %d clean entries\n", idle_coll->name, idle_coll->num_pcs);
             } else {
-                printf("   ✅ %s: No contamination found\n", idle_coll->name);
+                DEBUG_PRINTF("   ✅ %s: No contamination found\n", idle_coll->name);
             }
         }
     }
 
     // Show suggested array
-    printf("\n   💡 Suggested C array:\n");
-    printf("   static const target_ulong %s_PCS[] = {", coll->name);
+    DEBUG_PRINTF("\n   💡 Suggested C array:\n");
+    DEBUG_PRINTF("   static const target_ulong %s_PCS[] = {", coll->name);
     for (int i = 0; i < show_count; i++) {
-        if (i > 0) printf(", ");
-        printf("0x%x", (uint32_t)coll->pcs[i].pc);
+        if (i > 0) DEBUG_PRINTF(", ");
+        DEBUG_PRINTF("0x%x", (uint32_t)coll->pcs[i].pc);
     }
-    printf("};\n");
+    DEBUG_PRINTF("};\n");
 
     // Always auto-save after learning (BUSY or otherwise)
     save_learned_pcs();

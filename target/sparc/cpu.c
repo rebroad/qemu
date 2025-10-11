@@ -73,6 +73,7 @@ typedef struct {
     uint32_t total_samples;
     const char *name;
     LearningMode mode;
+    int max_consecutive_repeats;  // Track longest PC/NPC repeat sequence
 } PCCollection;
 
 // Learning collections (array index = mode - 1, since OFF has no collection)
@@ -858,7 +859,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static target_ulong last_pc = 0;
     static target_ulong last_npc = 0;
     static int idle_count = 0;
-    static const int IDLE_THRESHOLD = 1000; // Adjust based on testing
+    static int idle_threshold = 1000;       // Dynamic threshold (learned from busy patterns)
     static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
     static int max_idle_count = 0;  // Track maximum idle count reached
     static int total_sleep_us = 0;  // Track total sleep time
@@ -874,9 +875,25 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static const int NUM_PROM_IDLE_PCS = sizeof(PROM_IDLE_PCS) / sizeof(PROM_IDLE_PCS[0]);
 
     // Learning mode: collect PC/NPC frequencies (DRY approach)
+    static int learning_consecutive_count = 0;
+    static target_ulong learning_last_pc = 0;
+    static target_ulong learning_last_npc = 0;
+
     if (learning_mode != LEARNING_OFF) {
         PCCollection *coll = &collections[learning_mode - 1];  // mode-1 since OFF has no collection
         coll->total_samples++;
+
+        // Track consecutive repeats for threshold calculation
+        if (env->pc == learning_last_pc && env->npc == learning_last_npc) {
+            learning_consecutive_count++;
+            if (learning_consecutive_count > coll->max_consecutive_repeats) {
+                coll->max_consecutive_repeats = learning_consecutive_count;
+            }
+        } else {
+            learning_consecutive_count = 1;
+            learning_last_pc = env->pc;
+            learning_last_npc = env->npc;
+        }
 
         // Find or add this PC/NPC pair
         int found = -1;
@@ -1044,10 +1061,10 @@ static void save_learned_pcs(void)
         return;
     }
 
-    // Save format: mode num_pcs [pc npc count]...
+    // Save format: mode num_pcs max_consecutive_repeats [pc npc count]...
     for (int m = 0; m < 2; m++) {  // Only save idle modes (PROM and SUNOS)
         PCCollection *coll = &collections[m];
-        fprintf(f, "%d %d\n", coll->mode, coll->num_pcs);
+        fprintf(f, "%d %d %d\n", coll->mode, coll->num_pcs, coll->max_consecutive_repeats);
         for (int i = 0; i < coll->num_pcs; i++) {
             fprintf(f, "0x%lx 0x%lx %u\n",
                     (unsigned long)coll->pcs[i].pc,
@@ -1055,6 +1072,10 @@ static void save_learned_pcs(void)
                     coll->pcs[i].count);
         }
     }
+
+    // Save busy collection's max_consecutive_repeats for threshold calculation
+    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+    fprintf(f, "THRESHOLD %d\n", busy_coll->max_consecutive_repeats);
 
     fclose(f);
     DEBUG_PRINTF("💾 Saved learned PCs to %s\n", IDLE_PC_SAVE_FILE);
@@ -1070,24 +1091,42 @@ static void load_learned_pcs(void)
 
     DEBUG_PRINTF("📂 Loading learned PCs from %s...\n", IDLE_PC_SAVE_FILE);
 
-    int mode, num_pcs;
-    while (fscanf(f, "%d %d\n", &mode, &num_pcs) == 2) {
-        if (mode < LEARNING_PROM_IDLE || mode > LEARNING_SUNOS_IDLE) continue;
+    int mode, num_pcs, max_repeats;
+    char line[256];
 
-        PCCollection *coll = &collections[mode - 1];
-        coll->num_pcs = 0;
-
-        for (int i = 0; i < num_pcs && i < MAX_PC_CANDIDATES; i++) {
-            unsigned long pc, npc;
-            unsigned int count;
-            if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
-                coll->pcs[i].pc = pc;
-                coll->pcs[i].npc = npc;
-                coll->pcs[i].count = count;
-                coll->num_pcs++;
-            }
+    while (fgets(line, sizeof(line), f)) {
+        // Check for THRESHOLD line
+        if (sscanf(line, "THRESHOLD %d", &max_repeats) == 1) {
+            // Calculate dynamic threshold from busy learning data
+            // Use busy_max_repeats * 1.5 as safety margin
+            extern int idle_threshold;  // Will be declared in exec_enter_hook
+            idle_threshold = (max_repeats * 3) / 2;  // 1.5x safety margin
+            DEBUG_PRINTF("   Loaded dynamic threshold: %d (busy_max=%d)\n",
+                        idle_threshold, max_repeats);
+            continue;
         }
-        DEBUG_PRINTF("   Loaded %d %s PCs\n", coll->num_pcs, coll->name);
+
+        // Parse mode line
+        if (sscanf(line, "%d %d %d", &mode, &num_pcs, &max_repeats) == 3) {
+            if (mode < LEARNING_PROM_IDLE || mode > LEARNING_SUNOS_IDLE) continue;
+
+            PCCollection *coll = &collections[mode - 1];
+            coll->num_pcs = 0;
+            coll->max_consecutive_repeats = max_repeats;
+
+            for (int i = 0; i < num_pcs && i < MAX_PC_CANDIDATES; i++) {
+                unsigned long pc, npc;
+                unsigned int count;
+                if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
+                    coll->pcs[i].pc = pc;
+                    coll->pcs[i].npc = npc;
+                    coll->pcs[i].count = count;
+                    coll->num_pcs++;
+                }
+            }
+            DEBUG_PRINTF("   Loaded %d %s PCs (max_repeats=%d)\n",
+                        coll->num_pcs, coll->name, max_repeats);
+        }
     }
 
     fclose(f);
@@ -1133,6 +1172,7 @@ static void sparc_cpu_stop_learning(void)
     DEBUG_PRINTF("🎓 %s PC learning complete!\n", coll->name);
     DEBUG_PRINTF("   Total samples: %u\n", coll->total_samples);
     DEBUG_PRINTF("   Unique PC/NPC pairs: %d\n", coll->num_pcs);
+    DEBUG_PRINTF("   Max consecutive repeats: %d\n", coll->max_consecutive_repeats);
 
     if (coll->num_pcs == 0) {
         DEBUG_PRINTF("   ⚠️  No PCs collected!\n");
@@ -1254,6 +1294,16 @@ static void sparc_cpu_stop_learning(void)
         DEBUG_PRINTF("0x%x", (uint32_t)coll->pcs[i].pc);
     }
     DEBUG_PRINTF("};\n");
+
+    // If BUSY learning just finished, calculate and set optimal threshold
+    if (stopped_mode == LEARNING_BUSY) {
+        extern int idle_threshold;  // Declared in sparc_cpu_exec_enter_hook
+        int old_threshold = idle_threshold;
+        idle_threshold = (coll->max_consecutive_repeats * 3) / 2;  // 1.5x safety margin
+        DEBUG_PRINTF("\n   🎯 Updated idle_threshold: %d → %d (busy_max=%d, safety=1.5x)\n",
+                    old_threshold, idle_threshold, coll->max_consecutive_repeats);
+        DEBUG_PRINTF("   This threshold will be used for generic idle detection.\n");
+    }
 
     // Always auto-save after learning (BUSY or otherwise)
     save_learned_pcs();

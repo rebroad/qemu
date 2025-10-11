@@ -44,16 +44,28 @@ static void sparc_cpu_parse_opts(void);
 static bool sparc_cpu_debug = false;
 
 // Idle PC learning mode
-static bool idle_learning_mode = false;
+typedef enum {
+    LEARNING_OFF = 0,
+    LEARNING_IDLE = 1,
+    LEARNING_BUSY = 2
+} LearningMode;
+
+static LearningMode learning_mode = LEARNING_OFF;
+
 #define MAX_IDLE_PC_CANDIDATES 1000
 typedef struct {
     target_ulong pc;
     target_ulong npc;
     uint32_t count;
 } IdlePCCandidate;
+
 static IdlePCCandidate idle_pc_candidates[MAX_IDLE_PC_CANDIDATES];
 static int num_idle_candidates = 0;
-static uint32_t total_samples_collected = 0;
+static uint32_t idle_samples_collected = 0;
+
+static IdlePCCandidate busy_pc_candidates[MAX_IDLE_PC_CANDIDATES];
+static int num_busy_candidates = 0;
+static uint32_t busy_samples_collected = 0;
 
 static QemuOptsList sparc_cpu_opts = {
     .name = "sparc-cpu",
@@ -843,11 +855,10 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static const target_ulong PROM_IDLE_PCS[] = {0xffd16750, 0xffd20170, 0xffd20174, 0xffd2ba10, 0xffef0000};
     static const int NUM_PROM_IDLE_PCS = sizeof(PROM_IDLE_PCS) / sizeof(PROM_IDLE_PCS[0]);
 
-    // Learning mode: collect PC/NPC frequencies when user signals idle state
-    if (idle_learning_mode) {
-        total_samples_collected++;
+    // Learning mode: collect PC/NPC frequencies
+    if (learning_mode == LEARNING_IDLE) {
+        idle_samples_collected++;
 
-        // Find or add this PC/NPC pair to candidates
         int found = -1;
         for (int i = 0; i < num_idle_candidates; i++) {
             if (idle_pc_candidates[i].pc == env->pc &&
@@ -865,7 +876,26 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             idle_pc_candidates[num_idle_candidates].count = 1;
             num_idle_candidates++;
         }
-        // If we hit max, silently continue counting existing PCs only
+    } else if (learning_mode == LEARNING_BUSY) {
+        busy_samples_collected++;
+
+        int found = -1;
+        for (int i = 0; i < num_busy_candidates; i++) {
+            if (busy_pc_candidates[i].pc == env->pc &&
+                busy_pc_candidates[i].npc == env->npc) {
+                found = i;
+                break;
+            }
+        }
+
+        if (found >= 0) {
+            busy_pc_candidates[found].count++;
+        } else if (num_busy_candidates < MAX_IDLE_PC_CANDIDATES) {
+            busy_pc_candidates[num_busy_candidates].pc = env->pc;
+            busy_pc_candidates[num_busy_candidates].npc = env->npc;
+            busy_pc_candidates[num_busy_candidates].count = 1;
+            num_busy_candidates++;
+        }
     }
 
     // Check for known idle patterns first (faster detection)
@@ -964,21 +994,32 @@ void sparc_cpu_set_debug(bool enable)
 // Idle PC learning mode control functions
 static void sparc_cpu_start_idle_learning(void)
 {
-    printf("🎓 Starting idle PC learning mode...\n");
-    printf("   Keep the guest OS idle for a few seconds, then call sparc-stop-idle-learning\n");
-    idle_learning_mode = true;
+    printf("🎓 Starting IDLE PC learning mode...\n");
+    printf("   Keep the guest OS idle for 5-10 seconds, then call sparc-stop-idle-learning\n");
+    learning_mode = LEARNING_IDLE;
     num_idle_candidates = 0;
-    total_samples_collected = 0;
+    idle_samples_collected = 0;
     memset(idle_pc_candidates, 0, sizeof(idle_pc_candidates));
+    fflush(stdout);
+}
+
+static void sparc_cpu_start_busy_learning(void)
+{
+    printf("🎓 Starting BUSY PC learning mode...\n");
+    printf("   Keep the guest OS busy for 5-10 seconds, then call sparc-stop-busy-learning\n");
+    learning_mode = LEARNING_BUSY;
+    num_busy_candidates = 0;
+    busy_samples_collected = 0;
+    memset(busy_pc_candidates, 0, sizeof(busy_pc_candidates));
     fflush(stdout);
 }
 
 static void sparc_cpu_stop_idle_learning(void)
 {
-    idle_learning_mode = false;
+    learning_mode = LEARNING_OFF;
 
     printf("🎓 Idle PC learning complete!\n");
-    printf("   Total samples: %u\n", total_samples_collected);
+    printf("   Total samples: %u\n", idle_samples_collected);
     printf("   Unique PC/NPC pairs: %d\n", num_idle_candidates);
 
     if (num_idle_candidates == 0) {
@@ -1009,7 +1050,7 @@ static void sparc_cpu_stop_idle_learning(void)
     printf("   ----  --------   --------   -------   -----\n");
     int show_count = num_idle_candidates < 10 ? num_idle_candidates : 10;
     for (int i = 0; i < show_count; i++) {
-        double percent = (double)idle_pc_candidates[i].count / total_samples_collected * 100.0;
+        double percent = (double)idle_pc_candidates[i].count / idle_samples_collected * 100.0;
         printf("   %2d.   0x%08x 0x%08x %7u   %5.1f%%\n", i + 1,
                (uint32_t)idle_pc_candidates[i].pc,
                (uint32_t)idle_pc_candidates[i].npc,
@@ -1035,6 +1076,70 @@ static void sparc_cpu_stop_idle_learning(void)
         }
     }
     printf("   Self-loops (PC+4=NPC): %d/%d\n", self_loops, show_count);
+
+    fflush(stdout);
+}
+
+static void sparc_cpu_stop_busy_learning(void)
+{
+    learning_mode = LEARNING_OFF;
+
+    printf("🎓 Busy PC learning complete!\n");
+    printf("   Total samples: %u\n", busy_samples_collected);
+    printf("   Unique PC/NPC pairs: %d\n", num_busy_candidates);
+
+    if (num_busy_candidates == 0) {
+        printf("   ⚠️  No PCs collected - was the guest actually busy?\n");
+        fflush(stdout);
+        return;
+    }
+
+    // Cross-contamination analysis: find PCs that appear in BOTH idle and busy
+    int contaminated = 0;
+    printf("\n   🔍 Cross-contamination analysis:\n");
+
+    for (int b = 0; b < num_busy_candidates; b++) {
+        for (int i = 0; i < num_idle_candidates; i++) {
+            if (busy_pc_candidates[b].pc == idle_pc_candidates[i].pc &&
+                busy_pc_candidates[b].npc == idle_pc_candidates[i].npc) {
+                printf("   ⚠️  CONTAMINATION: PC=0x%08x NPC=0x%08x in BOTH idle and busy\n",
+                       (uint32_t)busy_pc_candidates[b].pc,
+                       (uint32_t)busy_pc_candidates[b].npc);
+                // Mark idle entry for removal by setting count to 0
+                idle_pc_candidates[i].count = 0;
+                contaminated++;
+            }
+        }
+    }
+
+    if (contaminated > 0) {
+        printf("   Found %d contaminated entries - cleaning idle list...\n", contaminated);
+
+        // Compact idle array, removing contaminated entries
+        int write_idx = 0;
+        for (int read_idx = 0; read_idx < num_idle_candidates; read_idx++) {
+            if (idle_pc_candidates[read_idx].count > 0) {
+                if (write_idx != read_idx) {
+                    idle_pc_candidates[write_idx] = idle_pc_candidates[read_idx];
+                }
+                write_idx++;
+            }
+        }
+        num_idle_candidates = write_idx;
+
+        printf("   ✅ Idle list cleaned: %d idle-only PCs remain\n", num_idle_candidates);
+
+        // Re-print clean idle list
+        printf("\n   💡 Clean idle PCs (not in busy):\n");
+        printf("   static const target_ulong LEARNED_IDLE_PCS[] = {");
+        for (int i = 0; i < num_idle_candidates && i < 10; i++) {
+            if (i > 0) printf(", ");
+            printf("0x%x", (uint32_t)idle_pc_candidates[i].pc);
+        }
+        printf("};\n");
+    } else {
+        printf("   ✅ No contamination - all busy PCs are distinct from idle PCs\n");
+    }
 
     fflush(stdout);
 }
@@ -1383,5 +1488,17 @@ void hmp_sparc_stop_idle_learning(Monitor *mon, const QDict *qdict)
 {
     sparc_cpu_stop_idle_learning();
     monitor_printf(mon, "Stopped idle PC learning mode\n");
+}
+
+void hmp_sparc_start_busy_learning(Monitor *mon, const QDict *qdict)
+{
+    sparc_cpu_start_busy_learning();
+    monitor_printf(mon, "Started busy PC learning mode\n");
+}
+
+void hmp_sparc_stop_busy_learning(Monitor *mon, const QDict *qdict)
+{
+    sparc_cpu_stop_busy_learning();
+    monitor_printf(mon, "Stopped busy PC learning mode\n");
 }
 

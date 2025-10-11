@@ -763,6 +763,34 @@ SRST
 ERST
 
     {
+        .name       = "sparc-start-busy-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "start collecting busy PC frequencies for filtering",
+        .cmd        = hmp_sparc_start_busy_learning,
+    },
+
+SRST
+``sparc-start-busy-learning``
+  Start busy PC learning mode. Keep guest busy (compiling, running tasks).
+  After collection, use sparc-stop-busy-learning to filter contamination.
+ERST
+
+    {
+        .name       = "sparc-stop-busy-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "stop busy collection and filter idle PCs",
+        .cmd        = hmp_sparc_stop_busy_learning,
+    },
+
+SRST
+``sparc-stop-busy-learning``
+  Stop busy PC learning and remove any PC/NPC pairs that appear in both idle and busy.
+  This ensures only idle-specific PCs remain in the idle list.
+ERST
+
+    {
         .name       = "mouse_move",
         .args_type  = "dx_str:s,dy_str:s,dz_str:s?",
         .params     = "dx dy [dz]",

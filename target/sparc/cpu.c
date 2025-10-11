@@ -65,7 +65,8 @@ static LearningMode learning_mode = LEARNING_OFF;
 typedef struct {
     target_ulong pc;
     target_ulong npc;
-    uint32_t count;
+    uint32_t count;          // Raw count from learning
+    uint32_t effective_count; // Bayesian-adjusted count (after cross-contamination)
 } PCCandidate;
 
 typedef struct {
@@ -88,6 +89,7 @@ static PCCollection collections[NUM_COLLECTIONS] = {
 static void sparc_cpu_stop_learning(void);
 static void load_learned_pcs(void);
 static int stat_with_tmp_fallback(const char *filename, struct stat *st);
+static void recalculate_effective_counts(void);
 
 static QemuOptsList sparc_cpu_opts = {
     .name = "sparc-cpu",
@@ -951,7 +953,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             for (int i = 0; i < idle_coll->num_pcs; i++) {
                 if (env->pc == idle_coll->pcs[i].pc && env->npc == idle_coll->pcs[i].npc) {
                     is_known_idle = true;
-                    pc_frequency = idle_coll->pcs[i].count;
+                    pc_frequency = idle_coll->pcs[i].effective_count;
 
                     // Calculate sleep based on frequency: linear mapping, capped at max_sleep_us_cap
                     if (idle_coll->total_samples > 0) {
@@ -1210,6 +1212,43 @@ static int stat_with_tmp_fallback(const char *filename, struct stat *st)
     return stat(tmp_path, st);
 }
 
+// Recalculate effective_count for all idle PCs using Bayesian adjustment
+// Call this after loading data or after BUSY learning completes
+static void recalculate_effective_counts(void)
+{
+    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+
+    // Process both idle collections (PROM and SUNOS)
+    for (int idle_type = 0; idle_type < 2; idle_type++) {
+        PCCollection *idle_coll = &collections[idle_type];
+
+        for (int i = 0; i < idle_coll->num_pcs; i++) {
+            // Find if this PC exists in BUSY collection
+            uint32_t busy_count = 0;
+            if (busy_coll->num_pcs > 0 && busy_coll->total_samples > 0) {
+                for (int b = 0; b < busy_coll->num_pcs; b++) {
+                    if (busy_coll->pcs[b].pc == idle_coll->pcs[i].pc &&
+                        busy_coll->pcs[b].npc == idle_coll->pcs[i].npc) {
+                        busy_count = busy_coll->pcs[b].count;
+                        break;
+                    }
+                }
+            }
+
+            // Bayesian adjustment: P(idle|PC) = idle_count / (idle_count + busy_count)
+            // Multiply by total_samples to get effective_count (preserves scale for freq_pct calc)
+            if (busy_count > 0) {
+                uint32_t total_hits = idle_coll->pcs[i].count + busy_count;
+                double probability = (double)idle_coll->pcs[i].count / total_hits;
+                idle_coll->pcs[i].effective_count = (uint32_t)(probability * idle_coll->total_samples);
+            } else {
+                // No contamination - use raw count
+                idle_coll->pcs[i].effective_count = idle_coll->pcs[i].count;
+            }
+        }
+    }
+}
+
 // Save/load learned PCs to/from disk
 static void save_learned_pcs(void)
 {
@@ -1293,7 +1332,7 @@ static void load_learned_pcs(void)
                     coll->num_pcs++;
                 }
             }
-            
+
             DEBUG_PRINTF("   Loaded %d %s PCs (samples=%u, max_repeats=%d)\n",
                         coll->num_pcs, coll->name, total_samples, max_repeats);
         } else if (sscanf(line, "%d %d %d", &mode, &num_pcs, &max_repeats) == 3) {
@@ -1322,6 +1361,10 @@ static void load_learned_pcs(void)
     }
 
     fclose(f);
+
+    // Recalculate effective counts using Bayesian adjustment
+    recalculate_effective_counts();
+
     fflush(stdout);
 }
 
@@ -1348,7 +1391,7 @@ static void sparc_cpu_start_learning(LearningMode mode)
 }
 
 
-// Generic stop learning with cross-contamination filtering
+// Generic stop learning (cross-contamination is now handled dynamically via Bayesian adjustment)
 static void sparc_cpu_stop_learning(void)
 {
     if (learning_mode == LEARNING_OFF) {
@@ -1397,110 +1440,36 @@ static void sparc_cpu_stop_learning(void)
                coll->pcs[i].count, percent);
     }
 
-    // If this was BUSY mode, do cross-contamination filtering
+    // If this was BUSY mode, show adjusted idle PC list
+    // (Bayesian adjustment already applied in recalculate_effective_counts)
     if (stopped_mode == LEARNING_BUSY) {
-        DEBUG_PRINTF("\n   🔍 Cross-contamination filtering:\n");
+        DEBUG_PRINTF("\n   🔍 Bayesian-adjusted idle PCs (after cross-contamination):\n");
 
         // Check against both idle collections
         for (int idle_type = 0; idle_type < 2; idle_type++) {  // 0=PROM, 1=SUNOS
             PCCollection *idle_coll = &collections[idle_type];
             if (idle_coll->num_pcs == 0) continue;
 
-            // First pass: save ALL idle data BEFORE marking anything
-            typedef struct {
-                target_ulong pc;
-                target_ulong npc;
-                uint32_t orig_count;
-                double orig_percent;
-                bool removed;
-            } DisplayEntry;
-            DisplayEntry display_list[100];  // Enough for all entries
-            int num_display = 0;
+            DEBUG_PRINTF("\n   %s (top 20, sorted by effective %%):\n", idle_coll->name);
+            DEBUG_PRINTF("   Rank  PC         NPC        Original  Effective  Adjustment\n");
+            DEBUG_PRINTF("   ----  --------   --------   --------  ---------  ----------\n");
 
-            for (int i = 0; i < idle_coll->num_pcs; i++) {
-                display_list[num_display].pc = idle_coll->pcs[i].pc;
-                display_list[num_display].npc = idle_coll->pcs[i].npc;
-                display_list[num_display].orig_count = idle_coll->pcs[i].count;
-                display_list[num_display].orig_percent = (double)idle_coll->pcs[i].count / idle_coll->total_samples * 100.0;
-                display_list[num_display].removed = false;  // Not yet
-                num_display++;
-            }
+            int show_max = idle_coll->num_pcs < 20 ? idle_coll->num_pcs : 20;
+            for (int i = 0; i < show_max; i++) {
+                double orig_pct = (double)idle_coll->pcs[i].count / idle_coll->total_samples * 100.0;
+                double eff_pct = (double)idle_coll->pcs[i].effective_count / idle_coll->total_samples * 100.0;
 
-            // Second pass: find and mark contamination
-            int contaminated = 0;
-            for (int b = 0; b < coll->num_pcs; b++) {
-                for (int i = 0; i < idle_coll->num_pcs; i++) {
-                    if (coll->pcs[b].pc == idle_coll->pcs[i].pc &&
-                        coll->pcs[b].npc == idle_coll->pcs[i].npc) {
-                        DEBUG_PRINTF("   ⚠️  %s contaminated: PC=0x%08x NPC=0x%08x\n",
-                               idle_coll->name, (uint32_t)coll->pcs[b].pc, (uint32_t)coll->pcs[b].npc);
+                DEBUG_PRINTF("   %2d.   0x%08x 0x%08x %7.1f%%  %8.1f%%", i + 1,
+                       (uint32_t)idle_coll->pcs[i].pc,
+                       (uint32_t)idle_coll->pcs[i].npc,
+                       orig_pct, eff_pct);
 
-                        // Mark in idle array for removal
-                        idle_coll->pcs[i].count = 0;
-
-                        // Mark in display list as removed
-                        for (int d = 0; d < num_display; d++) {
-                            if (display_list[d].pc == idle_coll->pcs[i].pc &&
-                                display_list[d].npc == idle_coll->pcs[i].npc) {
-                                display_list[d].removed = true;
-                                break;
-                            }
-                        }
-                        contaminated++;
-                    }
+                // Show adjustment if there was one
+                if (idle_coll->pcs[i].effective_count != idle_coll->pcs[i].count) {
+                    double reduction_pct = ((orig_pct - eff_pct) / orig_pct) * 100.0;
+                    DEBUG_PRINTF("  ↓%.0f%%", reduction_pct);
                 }
-            }
-
-            if (contaminated > 0) {
-
-                // Sort by descending percentage (NOT by original array order)
-                for (int i = 0; i < num_display - 1; i++) {
-                    for (int j = 0; j < num_display - i - 1; j++) {
-                        if (display_list[j].orig_percent < display_list[j + 1].orig_percent) {
-                            DisplayEntry temp = display_list[j];
-                            display_list[j] = display_list[j + 1];
-                            display_list[j + 1] = temp;
-                        }
-                    }
-                }
-
-                // Compact idle array (remove count=0)
-                int write_idx = 0;
-                for (int read_idx = 0; read_idx < idle_coll->num_pcs; read_idx++) {
-                    if (idle_coll->pcs[read_idx].count > 0) {
-                        if (write_idx != read_idx) {
-                            idle_coll->pcs[write_idx] = idle_coll->pcs[read_idx];
-                        }
-                        write_idx++;
-                    }
-                }
-                idle_coll->num_pcs = write_idx;
-
-                DEBUG_PRINTF("   Cleaning %s: %d contaminated entries removed\n",
-                       idle_coll->name, contaminated);
-
-                // Show merged list (descending by original percentage)
-                int show_max = num_display < 20 ? num_display : 20;
-                DEBUG_PRINTF("\n   📋 Updated %s list (showing top %d, sorted by %%):\n",
-                            idle_coll->name, show_max);
-                DEBUG_PRINTF("   Rank  PC         NPC        Count     %%      \n");
-                DEBUG_PRINTF("   ----  --------   --------   -------   -----  ------\n");
-
-                for (int i = 0; i < show_max; i++) {
-                    DEBUG_PRINTF("   %2d.   0x%08x 0x%08x %7u   %5.1f%%", i + 1,
-                           (uint32_t)display_list[i].pc,
-                           (uint32_t)display_list[i].npc,
-                           display_list[i].orig_count,
-                           display_list[i].orig_percent);
-                    if (display_list[i].removed) {
-                        DEBUG_PRINTF("  🗑️ REMOVED");
-                    }
-                    DEBUG_PRINTF("\n");
-                }
-
-                DEBUG_PRINTF("\n   ✅ %s now has %d clean entries\n", idle_coll->name, idle_coll->num_pcs);
-            } else {
-                DEBUG_PRINTF("   ✅ %s: No contamination found\n", idle_coll->name);
+                DEBUG_PRINTF("\n");
             }
         }
     }
@@ -1513,11 +1482,15 @@ static void sparc_cpu_stop_learning(void)
         DEBUG_PRINTF("0x%x", (uint32_t)coll->pcs[i].pc);
     }
     DEBUG_PRINTF("};\n");
+    // Recalculate effective counts if we have busy collection and either PROM or SUNOS idle collection.
+    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+    PCCollection *prom_coll = &collections[LEARNING_PROM_IDLE - 1];
+    PCCollection *sunos_coll = &collections[LEARNING_SUNOS_IDLE - 1];
 
-    // BUSY learning complete - data will be used to filter generic idle false positives
-    if (stopped_mode == LEARNING_BUSY) {
-        DEBUG_PRINTF("\n   🎯 BUSY collection will now filter out false-positive generic idle loops\n");
-        DEBUG_PRINTF("   Max consecutive repeats during busy: %d\n", coll->max_consecutive_repeats);
+    if (busy_coll->num_pcs > 0 &&
+        (prom_coll->num_pcs > 0 || sunos_coll->num_pcs > 0)) {
+        DEBUG_PRINTF("\n   🎯 Recalculating effective counts with BUSY and IDLE data...\n");
+        recalculate_effective_counts();
     }
 
     // Always auto-save after learning (BUSY or otherwise)

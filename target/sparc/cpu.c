@@ -1254,15 +1254,30 @@ static void recalculate_effective_counts(void)
                 }
             }
 
-            // Bayesian adjustment: P(idle|PC) = idle_count / (idle_count + busy_count)
-            // Multiply by total_samples to get effective_count (preserves scale for freq_pct calc)
+            // Confidence-based adjustment: compare frequency in idle vs busy
+            // If PC appears more in idle → boost confidence (effective > original)
+            // If PC appears more in busy → reduce confidence (effective < original)
             if (busy_count > 0) {
-                uint32_t total_hits = idle_coll->pcs[i].count + busy_count;
-                double probability = (double)idle_coll->pcs[i].count / total_hits;
-                idle_coll->pcs[i].effective_count = (uint32_t)(probability * idle_coll->total_samples);
+                // Calculate frequency rates (appearances per sample)
+                double idle_rate = (double)idle_coll->pcs[i].count / idle_coll->total_samples;
+                double busy_rate = (double)busy_count / busy_coll->total_samples;
+
+                // Confidence: what proportion of total appearances are in idle?
+                // 0.0 = all busy (bad idle indicator)
+                // 0.5 = equal in both (neutral)
+                // 1.0 = all idle (perfect idle indicator)
+                double confidence = idle_rate / (idle_rate + busy_rate);
+
+                // Scale multiplier from 0x to 2x based on confidence
+                // confidence=0.0 → 0x (eliminate completely)
+                // confidence=0.5 → 1x (keep as-is)
+                // confidence=1.0 → 2x (boost strongly)
+                double multiplier = confidence * 2.0;
+
+                idle_coll->pcs[i].effective_count = (uint32_t)(idle_coll->pcs[i].count * multiplier);
             } else {
-                // No contamination - use raw count
-                idle_coll->pcs[i].effective_count = idle_coll->pcs[i].count;
+                // No busy contamination - boost by 2x (very confident idle indicator)
+                idle_coll->pcs[i].effective_count = idle_coll->pcs[i].count * 2;
             }
         }
     }
@@ -1495,9 +1510,9 @@ static void sparc_cpu_stop_learning(void)
     }
 
     // If this was BUSY mode, show adjusted idle PC list
-    // (Bayesian adjustment already applied in recalculate_effective_counts)
+    // (Confidence adjustment already applied in recalculate_effective_counts)
     if (stopped_mode == LEARNING_BUSY) {
-        DEBUG_PRINTF("\n   🔍 Bayesian-adjusted idle PCs (after cross-contamination):\n");
+        DEBUG_PRINTF("\n   🔍 Confidence-adjusted idle PCs (comparing idle vs busy frequency):\n");
 
         // Check against both idle collections
         for (int idle_type = 0; idle_type < 2; idle_type++) {  // 0=PROM, 1=SUNOS
@@ -1520,8 +1535,15 @@ static void sparc_cpu_stop_learning(void)
 
                 // Show adjustment if there was one
                 if (idle_coll->pcs[i].effective_count != idle_coll->pcs[i].count) {
-                    double reduction_pct = ((orig_pct - eff_pct) / orig_pct) * 100.0;
-                    DEBUG_PRINTF("  ↓%.0f%%", reduction_pct);
+                    if (eff_pct < orig_pct) {
+                        // Reduced confidence (more in busy than idle)
+                        double reduction_pct = ((orig_pct - eff_pct) / orig_pct) * 100.0;
+                        DEBUG_PRINTF("  ↓%.0f%%", reduction_pct);
+                    } else {
+                        // Increased confidence (more in idle than busy)
+                        double boost_pct = ((eff_pct - orig_pct) / orig_pct) * 100.0;
+                        DEBUG_PRINTF("  ↑%.0f%%", boost_pct);
+                    }
                 }
                 DEBUG_PRINTF("\n");
             }

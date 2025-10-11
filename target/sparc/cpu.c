@@ -862,7 +862,9 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static target_ulong last_pc = 0;
     static target_ulong last_npc = 0;
     static int idle_count = 0;
+    static int sustained_idle_score = 0;  // Accumulates over time, decays slowly on activity
     static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
+    static const int MAX_SUSTAINED_SCORE = 1000;  // Cap for sustained_idle_score
     static int max_idle_count = 0;  // Track maximum idle count reached per second
     static int min_idle_count = INT_MAX;  // Track minimum idle count (when idle > 0) per second
     static int total_sleep_us = 0;  // Track total sleep time per second
@@ -962,6 +964,12 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         if (idle_count > max_idle_count) max_idle_count = idle_count;
         if (idle_count < min_idle_count) min_idle_count = idle_count;
 
+        // Build sustained idle score (faster ramp for known-idle) - TODO maybe each PC/NPC pair should have its own sustained idle score?
+        sustained_idle_score += 5;
+        if (sustained_idle_score > MAX_SUSTAINED_SCORE) {
+            sustained_idle_score = MAX_SUSTAINED_SCORE;
+        }
+
         // Count idle type for once-per-second reporting
         if (env->pc == SUNOS_IDLE_PC ||
             (collections[LEARNING_SUNOS_IDLE - 1].num_pcs > 0 &&
@@ -977,21 +985,35 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         if (idle_count < min_idle_count) min_idle_count = idle_count;
         if (idle_count > idle_threshold) {
             generic_idle_hits++;
+            // Build sustained idle score (slower ramp for generic)
+            sustained_idle_score += 2;
+            if (sustained_idle_score > MAX_SUSTAINED_SCORE) {
+                sustained_idle_score = MAX_SUSTAINED_SCORE;
+            }
         }
     } else {
+        // Activity detected - reset immediate idle_count but only decay sustained score
         idle_count = 0;
+        sustained_idle_score -= 1;  // Slow decay
+        if (sustained_idle_score < 0) {
+            sustained_idle_score = 0;
+        }
     }
 
     // Check for power down state
     if (cs->halted) {
         idle_count = MAX_SLEEP_US / 10;  // Max out for halted
+        sustained_idle_score = MAX_SUSTAINED_SCORE;  // Max out sustained score
         halted_hits++;
     }
 
-    // Calculate sleep based on idle_count (unified logic)
+    // Calculate sleep based on BOTH idle_count and sustained_idle_score
     // For generic idle (not known-idle), only sleep if above threshold to avoid false positives
     if (idle_count > 0 && (is_known_idle || cs->halted || idle_count > idle_threshold)) {
-        sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
+        // Use max of immediate idle_count and sustained score for sleep calculation
+        // This allows longer sleeps even after brief interruptions
+        int effective_idle = idle_count > sustained_idle_score ? idle_count : sustained_idle_score;
+        sleep_us = MIN(effective_idle * 10, MAX_SLEEP_US);
     }
 
     // Track sleep statistics
@@ -1035,7 +1057,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 
         // Build complete message to avoid interleaving (thread-safe)
         char msg[512];
-        int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt) idlecnt:%d/%d/%d",
+        int pos = snprintf(msg, sizeof(msg), "[SPARC-IDLE] spd=%d%% idle=%.1f%%(%d/%d) sleep:%d/%d/%dµs(%devt) idlecnt:%d/%d/%d sus=%d",
                           speed_percent, idle_pct, total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
@@ -1043,7 +1065,8 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                           sleep_events,
                           min_idle_count == INT_MAX ? 0 : min_idle_count,
                           avg_idle_count,
-                          max_idle_count);
+                          max_idle_count,
+                          sustained_idle_score);
 
         // Show breakdown if there are different idle types
         if (total_idle > 0 && (sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits > total_idle / 2)) {

@@ -60,7 +60,14 @@ static LearningMode learning_mode = LEARNING_OFF;
 
 #define MAX_PC_CANDIDATES 1000
 #define LEARNING_AUTO_STOP_SAMPLES 10000  // Auto-stop learning after 10K samples
-#define IDLE_PC_SAVE_FILE "qemu-sparc-idle-pcs.dat"  // CWD, or fallback to /tmp
+#define IDLE_PC_SAVE_FILE_NORMAL "qemu-sparc-idle-pcs.dat"         // Normal mode
+#define IDLE_PC_SAVE_FILE_ICOUNT "qemu-sparc-idle-pcs-icount.dat"  // icount mode
+
+// Helper to get the appropriate filename based on icount mode
+static inline const char *get_idle_pc_save_file(void)
+{
+    return icount_enabled() ? IDLE_PC_SAVE_FILE_ICOUNT : IDLE_PC_SAVE_FILE_NORMAL;
+}
 
 typedef struct {
     target_ulong pc;
@@ -1075,7 +1082,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     if (total_execs > 0 && current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
         // Check if config file was updated and reload if needed
         struct stat st;
-        if (stat_with_tmp_fallback(IDLE_PC_SAVE_FILE, &st) == 0) {
+        if (stat_with_tmp_fallback(get_idle_pc_save_file(), &st) == 0) {
             if (st.st_mtime != last_config_mtime) {
                 if (last_config_mtime > 0) {  // Not first time
                     DEBUG_PRINTF("📂 Config file updated, reloading...\n");
@@ -1264,7 +1271,8 @@ static void recalculate_effective_counts(void)
 // Save/load learned PCs to/from disk
 static void save_learned_pcs(void)
 {
-    FILE *f = fopen_with_tmp_fallback(IDLE_PC_SAVE_FILE, "w");
+    const char *filename = get_idle_pc_save_file();
+    FILE *f = fopen_with_tmp_fallback(filename, "w");
     if (!f) {
         DEBUG_PRINTF("⚠️  Failed to save learned PCs\n");
         return;
@@ -1286,11 +1294,11 @@ static void save_learned_pcs(void)
     fprintf(f, "MAX_SLEEP_US %d\n", max_sleep_us_cap);
 
     fclose(f);
-    DEBUG_PRINTF("💾 Saved learned PCs to %s\n", IDLE_PC_SAVE_FILE);
+    DEBUG_PRINTF("💾 Saved learned PCs to %s\n", filename);
 
     // Update mtime to prevent immediate reload of our own save
     struct stat st;
-    if (stat_with_tmp_fallback(IDLE_PC_SAVE_FILE, &st) == 0) {
+    if (stat_with_tmp_fallback(filename, &st) == 0) {
         last_config_mtime = st.st_mtime;
     }
 
@@ -1299,12 +1307,14 @@ static void save_learned_pcs(void)
 
 static void load_learned_pcs(void)
 {
-    FILE *f = fopen_with_tmp_fallback(IDLE_PC_SAVE_FILE, "r");
+    const char *filename = get_idle_pc_save_file();
+    FILE *f = fopen_with_tmp_fallback(filename, "r");
     if (!f) {
         return;  // No saved file, use hardcoded defaults
     }
 
-    DEBUG_PRINTF("📂 Loading learned PCs from %s...\n", IDLE_PC_SAVE_FILE);
+    DEBUG_PRINTF("📂 Loading learned PCs from %s%s...\n", filename,
+                icount_enabled() ? " [ICOUNT MODE]" : "");
 
     int mode, num_pcs, max_repeats;
     unsigned int total_samples;

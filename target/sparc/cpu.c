@@ -875,10 +875,14 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static int sleep_events = 0;     // Count of actual sleep calls per second
     static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
     static int prev_total_execs = 1;  // Previous second's total_execs (for PROM gating calculation)
-    static int prev_prom_idle_hits = 0; // Previous second's PROM idle hits
-    static int sunos_idle_hits = 0;  // Count SunOS idle detections per second
-    static int prom_idle_hits = 0;   // Count PROM idle detections per second
+    static int prev_prom_total_hits = 0; // Previous second's total PROM hits (learned + fallback)
+    static int sunos_idle_hits = 0;  // Count SunOS idle detections per second (learned)
+    static int prom_idle_hits = 0;   // Count PROM idle detections per second (learned)
+    static int sunos_fallback_hits = 0; // Count SunOS fallback (hardcoded) hits per second
+    static int prom_fallback_hits = 0;  // Count PROM fallback (hardcoded) hits per second
     static int generic_idle_hits = 0; // Count generic idle loop detections per second
+    static int busy_filtered_hits = 0; // Count generic repeats filtered by BUSY collection
+    static double busy_freq_sum = 0.0; // Sum of BUSY freq % for filtered hits
     static int halted_hits = 0;      // Count cpu halted state per second
     static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
 
@@ -966,7 +970,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                     } else {  // PROM - only sleep if >90% of execs were PROM idle in previous second
                         prom_idle_hits++;
                         // Use PREVIOUS second's data to avoid early-second false readings
-                        double prev_prom_pct = (double)prev_prom_idle_hits / prev_total_execs * 100.0;
+                        double prev_prom_pct = (double)prev_prom_total_hits / prev_total_execs * 100.0;
                         if (prev_prom_pct < 90.0) {
                             sleep_us = 0;  // Don't sleep - we're not truly PROM-idling
                         }
@@ -979,10 +983,15 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             for (int i = 0; i < NUM_PROM_IDLE_PCS; i++) {
                 if (env->pc == PROM_IDLE_PCS[i]) {
                     is_known_idle = true;
-                    prom_idle_hits++;
+                    prom_fallback_hits++;
+                    freq_pct_sum += 100.0;  // Assume 100% frequency for hardcoded values
                     // Use PREVIOUS second's data to avoid early-second false readings
-                    double prev_prom_pct = (double)prev_prom_idle_hits / prev_total_execs * 100.0;
-                    if (prev_prom_pct >= 90.0) {
+                    // On first few seconds, prev_prom_total_hits=0, so allow initial learning period
+                    double prev_prom_pct = (double)prev_prom_total_hits / prev_total_execs * 100.0;
+                    if (prev_prom_total_hits > 0 && prev_prom_pct >= 90.0) {
+                        sleep_us = max_sleep_us_cap;
+                    } else if (prev_prom_total_hits == 0) {
+                        // First second(s) - allow sleep to start building data
                         sleep_us = max_sleep_us_cap;
                     }
                     break;
@@ -993,21 +1002,43 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             if (env->pc == SUNOS_IDLE_PC) {
                 is_known_idle = true;
                 sleep_us = max_sleep_us_cap;
-                sunos_idle_hits++;
+                freq_pct_sum += 100.0;  // Assume 100% frequency for hardcoded values
+                sunos_fallback_hits++;
             }
         }
     }
 
     // Generic idle detection (PC/NPC repeat) - only if not already known-idle
     if (!is_known_idle && env->pc == last_pc && env->npc == last_npc) {
-        generic_idle_hits++;
-        // Generic sleep: just a small delay (not trusted like learned PCs)
-        sleep_us = 1000;  // 1ms for generic repeats
+        // Check if this PC/NPC is in the BUSY collection (filter out busy loops!)
+        bool is_busy_pc = false;
+        PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+        for (int i = 0; i < busy_coll->num_pcs; i++) {
+            if (busy_coll->pcs[i].pc == env->pc && busy_coll->pcs[i].npc == env->npc) {
+                is_busy_pc = true;
+                // Track the busy frequency for reporting
+                if (busy_coll->total_samples > 0) {
+                    double busy_freq_pct = (double)busy_coll->pcs[i].count / busy_coll->total_samples * 100.0;
+                    busy_freq_sum += busy_freq_pct;
+                    busy_filtered_hits++;
+                }
+                break;
+            }
+        }
+
+        // Only treat as idle if NOT in busy collection
+        if (!is_busy_pc) {
+            generic_idle_hits++;
+            freq_pct_sum += 1.0;  // Low confidence (generic repeat)
+            // Generic sleep: just a small delay (not trusted like learned PCs)
+            sleep_us = 1000;  // 1ms for generic repeats
+        }
     }
 
     // Check for power down state
     if (cs->halted) {
         sleep_us = max_sleep_us_cap;
+        freq_pct_sum += 100.0;  // Halted = 100% idle
         halted_hits++;
     }
 
@@ -1049,7 +1080,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             }
         }
 
-        int total_idle = sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits;
+        int total_idle = sunos_idle_hits + prom_idle_hits + sunos_fallback_hits + prom_fallback_hits + generic_idle_hits + halted_hits;
         int64_t real_delta_ns = current_time_ns - last_report_time_ns;
         int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
 
@@ -1082,8 +1113,8 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                           sleep_events);
         }
 
-        // Show breakdown if there are different idle types
-        if (total_idle > 0 && (sunos_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits > total_idle / 2)) {
+        // Show breakdown if there are idle hits
+        if (total_idle > 0) {
             pos += snprintf(msg + pos, sizeof(msg) - pos, " [");
             bool first = true;
             if (sunos_idle_hits > 0) {
@@ -1091,9 +1122,19 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS:%.1f%%", first ? "" : " ", sunos_pct);
                 first = false;
             }
+            if (sunos_fallback_hits > 0) {
+                double sunos_fb_pct = (double)sunos_fallback_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS-fb:%.1f%%", first ? "" : " ", sunos_fb_pct);
+                first = false;
+            }
             if (prom_idle_hits > 0) {
                 double prom_pct = (double)prom_idle_hits / total_execs * 100.0;
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP:%.1f%%", first ? "" : " ", prom_pct);
+                first = false;
+            }
+            if (prom_fallback_hits > 0) {
+                double prom_fb_pct = (double)prom_fallback_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP-fb:%.1f%%", first ? "" : " ", prom_fb_pct);
                 first = false;
             }
             if (generic_idle_hits > 0) {
@@ -1104,6 +1145,13 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
             if (halted_hits > 0) {
                 double halted_pct = (double)halted_hits / total_execs * 100.0;
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sH:%.1f%%", first ? "" : " ", halted_pct);
+                first = false;
+            }
+            if (busy_filtered_hits > 0) {
+                double busy_hit_pct = (double)busy_filtered_hits / total_execs * 100.0;
+                double avg_busy_freq = busy_freq_sum / busy_filtered_hits;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sBusy:%.1f%%(freq:%.1f%%)",
+                               first ? "" : " ", busy_hit_pct, avg_busy_freq);
             }
             pos += snprintf(msg + pos, sizeof(msg) - pos, "]");
         }
@@ -1119,8 +1167,12 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         sleep_events = 0;
         // Save current values as "previous" for next second's PROM gating check
         prev_total_execs = total_execs > 0 ? total_execs : 1;  // Avoid div by zero
-        prev_prom_idle_hits = prom_idle_hits;
-        sunos_idle_hits = prom_idle_hits = generic_idle_hits = halted_hits = 0;
+        prev_prom_total_hits = prom_idle_hits + prom_fallback_hits;  // Combined PROM hits
+        sunos_idle_hits = prom_idle_hits = 0;
+        sunos_fallback_hits = prom_fallback_hits = 0;
+        generic_idle_hits = halted_hits = 0;
+        busy_filtered_hits = 0;
+        busy_freq_sum = 0.0;
         total_execs = 0;  // Reset for next second
         freq_pct_sum = 0.0;  // Reset weighted idle % accumulator
     }

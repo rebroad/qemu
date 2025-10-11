@@ -59,6 +59,7 @@ typedef enum {
 static LearningMode learning_mode = LEARNING_OFF;
 
 #define MAX_PC_CANDIDATES 1000
+#define LEARNING_AUTO_STOP_SAMPLES 10000  // Auto-stop learning after 10K samples
 #define IDLE_PC_SAVE_FILE "qemu-sparc-idle-pcs.dat"  // CWD, or fallback to /tmp
 
 typedef struct {
@@ -892,34 +893,40 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         PCCollection *coll = &collections[learning_mode - 1];  // mode-1 since OFF has no collection
         coll->total_samples++;
 
-        // Track consecutive repeats for threshold calculation
-        if (env->pc == learning_last_pc && env->npc == learning_last_npc) {
-            learning_consecutive_count++;
-            if (learning_consecutive_count > coll->max_consecutive_repeats) {
-                coll->max_consecutive_repeats = learning_consecutive_count;
-            }
+        // Auto-stop at 10K samples
+        if (coll->total_samples >= LEARNING_AUTO_STOP_SAMPLES) {
+            sparc_cpu_stop_learning();
+            // Note: learning_mode is now OFF, will continue to idle detection below
         } else {
-            learning_consecutive_count = 1;
-            learning_last_pc = env->pc;
-            learning_last_npc = env->npc;
-        }
-
-        // Find or add this PC/NPC pair
-        int found = -1;
-        for (int i = 0; i < coll->num_pcs; i++) {
-            if (coll->pcs[i].pc == env->pc && coll->pcs[i].npc == env->npc) {
-                found = i;
-                break;
+            // Track consecutive repeats for threshold calculation
+            if (env->pc == learning_last_pc && env->npc == learning_last_npc) {
+                learning_consecutive_count++;
+                if (learning_consecutive_count > coll->max_consecutive_repeats) {
+                    coll->max_consecutive_repeats = learning_consecutive_count;
+                }
+            } else {
+                learning_consecutive_count = 1;
+                learning_last_pc = env->pc;
+                learning_last_npc = env->npc;
             }
-        }
 
-        if (found >= 0) {
-            coll->pcs[found].count++;
-        } else if (coll->num_pcs < MAX_PC_CANDIDATES) {
-            coll->pcs[coll->num_pcs].pc = env->pc;
-            coll->pcs[coll->num_pcs].npc = env->npc;
-            coll->pcs[coll->num_pcs].count = 1;
-            coll->num_pcs++;
+            // Find or add this PC/NPC pair
+            int found = -1;
+            for (int i = 0; i < coll->num_pcs; i++) {
+                if (coll->pcs[i].pc == env->pc && coll->pcs[i].npc == env->npc) {
+                    found = i;
+                    break;
+                }
+            }
+
+            if (found >= 0) {
+                coll->pcs[found].count++;
+            } else if (coll->num_pcs < MAX_PC_CANDIDATES) {
+                coll->pcs[coll->num_pcs].pc = env->pc;
+                coll->pcs[coll->num_pcs].npc = env->npc;
+                coll->pcs[coll->num_pcs].count = 1;
+                coll->num_pcs++;
+            }
         }
     }
 
@@ -1025,7 +1032,8 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     }
 
     // Only sleep if icount is not enabled (when icount is on, we want max speed)
-    if (!icount_enabled() && sleep_us > 0) {
+    // AND not in learning mode (need unthrottled speed for accurate learning)
+    if (!icount_enabled() && learning_mode == LEARNING_OFF && sleep_us > 0) {
         g_usleep(sleep_us);
     }
 
@@ -1248,7 +1256,9 @@ static void sparc_cpu_stop_learning(void)
 
     learning_mode = LEARNING_OFF;
 
-    DEBUG_PRINTF("🎓 %s PC learning complete!\n", coll->name);
+    bool auto_stopped = (coll->total_samples >= LEARNING_AUTO_STOP_SAMPLES);
+    DEBUG_PRINTF("🎓 %s PC learning complete%s!\n", coll->name,
+                auto_stopped ? " (auto-stopped)" : "");
     DEBUG_PRINTF("   Total samples: %u\n", coll->total_samples);
     DEBUG_PRINTF("   Unique PC/NPC pairs: %d\n", coll->num_pcs);
     DEBUG_PRINTF("   Max consecutive repeats: %d\n", coll->max_consecutive_repeats);

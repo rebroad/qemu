@@ -1220,10 +1220,10 @@ static void save_learned_pcs(void)
         return;
     }
 
-    // Save format: mode num_pcs max_consecutive_repeats [pc npc count]...
+    // Save format: mode num_pcs max_consecutive_repeats total_samples [pc npc count]...
     for (int m = 0; m < 2; m++) {  // Only save idle modes (PROM and SUNOS)
         PCCollection *coll = &collections[m];
-        fprintf(f, "%d %d %d\n", coll->mode, coll->num_pcs, coll->max_consecutive_repeats);
+        fprintf(f, "%d %d %d %u\n", coll->mode, coll->num_pcs, coll->max_consecutive_repeats, coll->total_samples);
         for (int i = 0; i < coll->num_pcs; i++) {
             fprintf(f, "0x%lx 0x%lx %u\n",
                     (unsigned long)coll->pcs[i].pc,
@@ -1261,6 +1261,7 @@ static void load_learned_pcs(void)
     DEBUG_PRINTF("📂 Loading learned PCs from %s...\n", IDLE_PC_SAVE_FILE);
 
     int mode, num_pcs, max_repeats;
+    unsigned int total_samples;
     char line[256];
 
     while (fgets(line, sizeof(line), f)) {
@@ -1282,13 +1283,14 @@ static void load_learned_pcs(void)
             continue;
         }
 
-        // Parse mode line
-        if (sscanf(line, "%d %d %d", &mode, &num_pcs, &max_repeats) == 3) {
+        // Parse mode line (try new format with total_samples first, fall back to old format)
+        if (sscanf(line, "%d %d %d %u", &mode, &num_pcs, &max_repeats, &total_samples) == 4) {
             if (mode < LEARNING_PROM_IDLE || mode > LEARNING_SUNOS_IDLE) continue;
 
             PCCollection *coll = &collections[mode - 1];
             coll->num_pcs = 0;
             coll->max_consecutive_repeats = max_repeats;
+            coll->total_samples = total_samples;  // Restore total_samples!
 
             for (int i = 0; i < num_pcs && i < MAX_PC_CANDIDATES; i++) {
                 unsigned long pc, npc;
@@ -1300,8 +1302,30 @@ static void load_learned_pcs(void)
                     coll->num_pcs++;
                 }
             }
-            DEBUG_PRINTF("   Loaded %d %s PCs (max_repeats=%d)\n",
-                        coll->num_pcs, coll->name, max_repeats);
+            DEBUG_PRINTF("   Loaded %d %s PCs (samples=%u, max_repeats=%d)\n",
+                        coll->num_pcs, coll->name, total_samples, max_repeats);
+        } else if (sscanf(line, "%d %d %d", &mode, &num_pcs, &max_repeats) == 3) {
+            // Old format without total_samples - use sum of counts as estimate
+            if (mode < LEARNING_PROM_IDLE || mode > LEARNING_SUNOS_IDLE) continue;
+
+            PCCollection *coll = &collections[mode - 1];
+            coll->num_pcs = 0;
+            coll->max_consecutive_repeats = max_repeats;
+            coll->total_samples = 0;  // Will calculate below
+
+            for (int i = 0; i < num_pcs && i < MAX_PC_CANDIDATES; i++) {
+                unsigned long pc, npc;
+                unsigned int count;
+                if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
+                    coll->pcs[i].pc = pc;
+                    coll->pcs[i].npc = npc;
+                    coll->pcs[i].count = count;
+                    coll->total_samples += count;  // Sum counts as estimate
+                    coll->num_pcs++;
+                }
+            }
+            DEBUG_PRINTF("   Loaded %d %s PCs (estimated samples=%u, max_repeats=%d) [OLD FORMAT]\n",
+                        coll->num_pcs, coll->name, coll->total_samples, max_repeats);
         }
     }
 

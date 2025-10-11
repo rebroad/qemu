@@ -852,6 +852,9 @@ static bool sparc_cpu_has_work(CPUState *cs)
            cpu_interrupts_enabled(cpu_env(cs));
 }
 
+// Dynamic idle threshold (learned from busy patterns, persisted across restarts)
+static int idle_threshold = 1000;
+
 // CPU execution enter hook - called before EVERY execution batch
 static void sparc_cpu_exec_enter_hook(CPUState *cs)
 {
@@ -859,7 +862,6 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
     static target_ulong last_pc = 0;
     static target_ulong last_npc = 0;
     static int idle_count = 0;
-    static int idle_threshold = 1000;       // Dynamic threshold (learned from busy patterns)
     static const int MAX_SLEEP_US = 10000;  // Maximum sleep time in microseconds
     static int max_idle_count = 0;  // Track maximum idle count reached
     static int total_sleep_us = 0;  // Track total sleep time
@@ -952,7 +954,6 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         // Known idle PC - increment immediately
         idle_count++;
         if (idle_count > max_idle_count) max_idle_count = idle_count;
-        sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
 
         // Count idle type for once-per-second reporting
         if (env->pc == SUNOS_IDLE_PC ||
@@ -966,10 +967,7 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
         // Generic idle detection (any repeated PC/NPC)
         idle_count++;
         if (idle_count > max_idle_count) max_idle_count = idle_count;
-        if (idle_count > IDLE_THRESHOLD) {
-            // We're in an idle loop, sleep to reduce CPU usage
-            // Sleep time increases with idle duration, up to MAX_SLEEP_US
-            sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
+        if (idle_count > idle_threshold) {
             generic_idle_hits++;
         }
     } else {
@@ -978,8 +976,14 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
 
     // Check for power down state
     if (cs->halted) {
-        sleep_us = MAX_SLEEP_US;
+        idle_count = MAX_SLEEP_US / 10;  // Max out for halted
         halted_hits++;
+    }
+
+    // Calculate sleep based on idle_count (unified logic)
+    // For generic idle (not known-idle), only sleep if above threshold to avoid false positives
+    if (idle_count > 0 && (is_known_idle || cs->halted || idle_count > idle_threshold)) {
+        sleep_us = MIN(idle_count * 10, MAX_SLEEP_US);
     }
 
     total_sleep_us += sleep_us;
@@ -1099,9 +1103,8 @@ static void load_learned_pcs(void)
         if (sscanf(line, "THRESHOLD %d", &max_repeats) == 1) {
             // Calculate dynamic threshold from busy learning data
             // Use busy_max_repeats * 1.5 as safety margin
-            extern int idle_threshold;  // Will be declared in exec_enter_hook
             idle_threshold = (max_repeats * 3) / 2;  // 1.5x safety margin
-            DEBUG_PRINTF("   Loaded dynamic threshold: %d (busy_max=%d)\n",
+            DEBUG_PRINTF("   Loaded dynamic threshold: %d (busy_max=%d)\n", 
                         idle_threshold, max_repeats);
             continue;
         }
@@ -1297,7 +1300,6 @@ static void sparc_cpu_stop_learning(void)
 
     // If BUSY learning just finished, calculate and set optimal threshold
     if (stopped_mode == LEARNING_BUSY) {
-        extern int idle_threshold;  // Declared in sparc_cpu_exec_enter_hook
         int old_threshold = idle_threshold;
         idle_threshold = (coll->max_consecutive_repeats * 3) / 2;  // 1.5x safety margin
         DEBUG_PRINTF("\n   🎯 Updated idle_threshold: %d → %d (busy_max=%d, safety=1.5x)\n",

@@ -1458,6 +1458,7 @@ static void sparc_cpu_start_learning(LearningMode mode)
     // Reset collection
     collections[idx].num_pcs = 0;
     collections[idx].total_samples = 0;
+    collections[idx].max_consecutive_repeats = 0;
     memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
 
     if (mode == LEARNING_BUSY) {

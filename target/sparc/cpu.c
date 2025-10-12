@@ -843,23 +843,16 @@ static bool sparc_cpu_has_work(CPUState *cs)
            cpu_interrupts_enabled(cpu_env(cs));
 }
 
-// Runtime-configurable settings (persisted across restarts)
-static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
-static time_t last_config_mtime = 0;  // Track config file mtime for auto-reload
 
 // CPU execution enter hook - delegates to generic idle detector
-static void sparc_cpu_exec_enter_hook(CPUState *cs, TranslationBlock *tb)
+static void sparc_cpu_exec_enter_hook(CPUState *cs)
 {
     cpu_idle_exec_hook(cs);  // Call architecture-agnostic implementation
 }
 
 
 // Add function to toggle debug logging
-void sparc_cpu_set_debug(bool enable)
-{
-    sparc_cpu_debug = enable;
-    DEBUG_PRINTF("SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
-}
+// sparc_cpu_set_debug moved to accel/tcg/cpu-idle.c (now cpu_idle_set_debug)
 
 static int sparc_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
@@ -985,12 +978,8 @@ static void sparc_cpu_initfn(Object *obj)
     }
     sparc_cpu_parse_opts();
 
-    // Load learned idle PCs on first CPU init
-    static bool pcs_loaded = false;
-    if (!pcs_loaded) {
-        load_learned_pcs();
-        pcs_loaded = true;
-    }
+    // Initialize idle detection system (registers fallback PCs, loads learned data)
+    sparc_cpu_register_idle_pcs();
 }
 
 static void sparc_get_nwindows(Object *obj, Visitor *v, const char *name,
@@ -1191,38 +1180,10 @@ static void sparc_cpu_parse_opts(void)
 {
     QemuOpts *opts = qemu_opts_find(&sparc_cpu_opts, NULL);
     if (opts) {
-        sparc_cpu_debug = qemu_opt_get_bool(opts, "debug", false);
+        bool debug = qemu_opt_get_bool(opts, "debug", false);
+        cpu_idle_set_debug(debug);  // Use generic function
     }
 }
 
-void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict)
-{
-    bool enable = qdict_get_bool(qdict, "enable");
-    sparc_cpu_set_debug(enable);
-    monitor_printf(mon, "SPARC CPU debug logging %s\n", enable ? "enabled" : "disabled");
-}
-
-void hmp_sparc_start_prom_learning(Monitor *mon, const QDict *qdict)
-{
-    sparc_cpu_start_learning(LEARNING_PROM_IDLE);
-    monitor_printf(mon, "Started PROM idle PC learning mode\n");
-}
-
-void hmp_sparc_start_idle_learning(Monitor *mon, const QDict *qdict)
-{
-    sparc_cpu_start_learning(LEARNING_SUNOS_IDLE);
-    monitor_printf(mon, "Started SunOS idle PC learning mode\n");
-}
-
-void hmp_sparc_start_busy_learning(Monitor *mon, const QDict *qdict)
-{
-    sparc_cpu_start_learning(LEARNING_BUSY);
-    monitor_printf(mon, "Started busy PC learning mode\n");
-}
-
-void hmp_sparc_stop_learning(Monitor *mon, const QDict *qdict)
-{
-    sparc_cpu_stop_learning();
-    monitor_printf(mon, "Stopped learning mode\n");
-}
+// HMP handlers now in accel/tcg/cpu-idle.c (architecture-agnostic)
 

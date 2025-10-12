@@ -35,7 +35,7 @@ typedef enum {
 
 #define NUM_COLLECTIONS 3  // PROM_IDLE, OS_IDLE, BUSY
 
-static LearningMode learning_mode G_GNUC_UNUSED = LEARNING_OFF;
+static LearningMode learning_mode  = LEARNING_OFF;
 
 #define MAX_PC_CANDIDATES 1000
 #define LEARNING_AUTO_STOP_SAMPLES 10000  // Auto-stop learning after 10K samples
@@ -59,20 +59,20 @@ typedef struct {
 } PCCollection;
 
 /* Learning collections (array index = mode - 1, since OFF has no collection) */
-static PCCollection collections[NUM_COLLECTIONS] G_GNUC_UNUSED = {
+static PCCollection collections[NUM_COLLECTIONS] = {
     {.name = "PROM-IDLE", .mode = LEARNING_PROM_IDLE},
     {.name = "OS-IDLE", .mode = LEARNING_OS_IDLE},
     {.name = "BUSY", .mode = LEARNING_BUSY}
 };
 
 /* Runtime-configurable settings */
-static int max_sleep_us_cap G_GNUC_UNUSED = 10000;  // Max sleep cap (from config file)
-static time_t last_config_mtime G_GNUC_UNUSED = 0;   // Track config file mtime for auto-reload
+static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
+static time_t last_config_mtime = 0;   // Track config file mtime for auto-reload
 
 /* Hardcoded fallback idle PCs (architecture-specific, loaded from target code) */
-static target_ulong *fallback_prom_pcs G_GNUC_UNUSED = NULL;
-static int fallback_prom_pc_count G_GNUC_UNUSED = 0;
-static target_ulong fallback_os_idle_pc G_GNUC_UNUSED = 0;
+static target_ulong *fallback_prom_pcs = NULL;
+static int fallback_prom_pc_count = 0;
+static target_ulong fallback_os_idle_pc = 0;
 
 /**
  * cpu_idle_register_fallback_pcs - Register architecture's hardcoded idle PCs
@@ -89,7 +89,6 @@ void cpu_idle_register_fallback_pcs(target_ulong *prom_pcs, int prom_count,
 }
 
 /* Helper: Get save filename based on architecture and icount mode */
-G_GNUC_UNUSED
 static const char *get_idle_pc_save_file(const char *arch_name, bool for_stat)
 {
     static char filename[256];
@@ -107,8 +106,7 @@ static const char *get_idle_pc_save_file(const char *arch_name, bool for_stat)
     return filename;
 }
 
-/* Helper: fopen with /tmp fallback */
-G_GNUC_UNUSED
+// Helper: open file in CWD or fallback to /tmp
 static FILE *fopen_with_tmp_fallback(const char *filename, const char *mode)
 {
     FILE *f = fopen(filename, mode);
@@ -120,8 +118,7 @@ static FILE *fopen_with_tmp_fallback(const char *filename, const char *mode)
     return f;
 }
 
-/* Helper: stat with /tmp fallback */
-G_GNUC_UNUSED
+// Helper: stat file in CWD or fallback to /tmp
 static int stat_with_tmp_fallback(const char *filename, struct stat *st)
 {
     if (stat(filename, st) == 0) {
@@ -133,19 +130,8 @@ static int stat_with_tmp_fallback(const char *filename, struct stat *st)
     return stat(tmp_path, st);
 }
 
-/* TODO: Add remaining functions from target/sparc/cpu.c:
- * - recalculate_effective_counts()
- * - compare_pc_candidates()
- * - save_learned_pcs()
- * - load_learned_pcs()
- * - cpu_idle_exec_hook() - main detection logic
- * - cpu_idle_start_learning()
- * - cpu_idle_stop_learning()
- * - HMP command handlers
- */
-
-
-
+// Recalculate effective_count for all idle PCs using Bayesian adjustment
+// Call this after loading data or after BUSY learning completes
 static void recalculate_effective_counts(void)
 {
     PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
@@ -200,6 +186,13 @@ static void recalculate_effective_counts(void)
             } else {
                 // No busy contamination - maximum confidence (set to UINT32_MAX)
                 idle_coll->pcs[i].effective_count = UINT32_MAX;
+            }
+        }
+    }
+}
+
+// Save/load learned PCs to/from disk
+// Comparator for sorting PC candidates: count DESC, pc ASC, npc ASC
 static int compare_pc_candidates(const void *a, const void *b)
 {
     const PCCandidate *ca = (const PCCandidate *)a;
@@ -222,6 +215,7 @@ static int compare_pc_candidates(const void *a, const void *b)
 
     return 0;
 }
+
 static void save_learned_pcs(const char *arch_name)
 {
     const char *filename = get_idle_pc_save_file(arch_name);
@@ -265,6 +259,7 @@ static void save_learned_pcs(const char *arch_name)
 
     fflush(stdout);
 }
+
 static void load_learned_pcs(const char *arch_name)
 {
     const char *filename = get_idle_pc_save_file(arch_name);
@@ -373,7 +368,6 @@ static void cpu_idle_start_learning_internal(LearningMode mode)
     }
     fflush(stdout);
 }
-
 
 static void cpu_idle_stop_learning_internal(void)
 {

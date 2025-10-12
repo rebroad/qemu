@@ -17,6 +17,8 @@
 #include "system/cpu-timers.h"
 #include "system/cpu-throttle.h"
 #include "monitor/monitor.h"
+#include "monitor/hmp-target.h"
+#include "qapi/qmp/qdict.h"
 #include <sys/stat.h>
 
 /* Debug output helper - use stderr to not interfere with serial console */
@@ -89,20 +91,11 @@ void cpu_idle_register_fallback_pcs(target_ulong *prom_pcs, int prom_count,
 }
 
 /* Helper: Get save filename based on architecture and icount mode */
-static const char *get_idle_pc_save_file(const char *arch_name, bool for_stat)
+static inline const char *get_idle_pc_save_file(const char *arch_name)
 {
     static char filename[256];
     const char *suffix = icount_enabled() ? "-icount" : "";
-
-    if (for_stat) {
-        /* Try current directory first, then /tmp */
-        snprintf(filename, sizeof(filename), "qemu-%s-idle-pcs%s.dat",
-                arch_name, suffix);
-    } else {
-        snprintf(filename, sizeof(filename), "qemu-%s-idle-pcs%s.dat",
-                arch_name, suffix);
-    }
-
+    snprintf(filename, sizeof(filename), "qemu-%s-idle-pcs%s.dat", arch_name, suffix);
     return filename;
 }
 
@@ -470,7 +463,7 @@ static void cpu_idle_stop_learning_internal(void)
     }
 
     // Always auto-save after learning (BUSY or otherwise)
-    save_learned_pcs();
+    save_learned_pcs("sparc");  // TODO: Get arch name dynamically
 
     fflush(stdout);
 }
@@ -694,7 +687,7 @@ void cpu_idle_exec_hook(CPUState *cs)
             if (st.st_mtime != last_config_mtime) {
                 if (last_config_mtime > 0) {  // Not first time
                     DEBUG_PRINTF("📂 Config file updated, reloading...\n");
-                    load_learned_pcs();
+                    load_learned_pcs(arch_name);
                 }
                 last_config_mtime = st.st_mtime;
             }

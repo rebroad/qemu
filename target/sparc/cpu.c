@@ -1255,29 +1255,38 @@ static void recalculate_effective_counts(void)
             }
 
             // Confidence-based adjustment: compare frequency in idle vs busy
-            // If PC appears more in idle → boost confidence (effective > original)
-            // If PC appears more in busy → reduce confidence (effective < original)
+            // Smooth scaling based on how much more frequent in idle vs busy
+            // multiplier = (idle_rate / busy_rate) - 1.0 gives:
+            //   idle_rate = busy_rate    → 0x (eliminate, appears equally)
+            //   idle_rate = 1.5×busy_rate → 0.5x (slight boost)
+            //   idle_rate = 2×busy_rate   → 1x (keep original)
+            //   idle_rate = 3×busy_rate   → 2x (double)
+            //   idle_rate >> busy_rate    → large boost
             if (busy_count > 0) {
                 // Calculate frequency rates (appearances per sample)
                 double idle_rate = (double)idle_coll->pcs[i].count / idle_coll->total_samples;
                 double busy_rate = (double)busy_count / busy_coll->total_samples;
 
-                // Confidence: what proportion of total appearances are in idle?
-                // 0.0 = all busy (bad idle indicator)
-                // 0.5 = equal in both (neutral)
-                // 1.0 = all idle (perfect idle indicator)
-                double confidence = idle_rate / (idle_rate + busy_rate);
+                // Smooth multiplier: subtract 1 to center around 1x when idle is 2x busy
+                double multiplier = (idle_rate / busy_rate) - 1.0;
 
-                // Scale multiplier from 0x to 2x based on confidence
-                // confidence=0.0 → 0x (eliminate completely)
-                // confidence=0.5 → 1x (keep as-is)
-                // confidence=1.0 → 2x (boost strongly)
-                double multiplier = confidence * 2.0;
+                if (multiplier <= 0.0) {
+                    // Appears equally or more in busy → eliminate
+                    idle_coll->pcs[i].effective_count = 0;
+                } else {
+                    // Boost proportionally
+                    double effective = (double)idle_coll->pcs[i].count * multiplier;
 
-                idle_coll->pcs[i].effective_count = (uint32_t)(idle_coll->pcs[i].count * multiplier);
+                    // Prevent overflow
+                    if (effective > UINT32_MAX) {
+                        idle_coll->pcs[i].effective_count = UINT32_MAX;
+                    } else {
+                        idle_coll->pcs[i].effective_count = (uint32_t)effective;
+                    }
+                }
             } else {
-                // No busy contamination - boost by 2x (very confident idle indicator)
-                idle_coll->pcs[i].effective_count = idle_coll->pcs[i].count * 2;
+                // No busy contamination - maximum confidence (set to UINT32_MAX)
+                idle_coll->pcs[i].effective_count = UINT32_MAX;
             }
         }
     }

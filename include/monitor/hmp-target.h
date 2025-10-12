@@ -61,10 +61,11 @@ void hmp_gva2gpa(Monitor *mon, const QDict *qdict);
 void hmp_gpa2hva(Monitor *mon, const QDict *qdict);
 void hmp_gpa2hpa(Monitor *mon, const QDict *qdict);
 
-void hmp_sparc_cpu_debug(Monitor *mon, const QDict *qdict);
-void hmp_sparc_start_idle_learning(Monitor *mon, const QDict *qdict);
-void hmp_sparc_start_prom_learning(Monitor *mon, const QDict *qdict);
-void hmp_sparc_start_busy_learning(Monitor *mon, const QDict *qdict);
-void hmp_sparc_stop_learning(Monitor *mon, const QDict *qdict);
+/* Architecture-agnostic CPU idle detection HMP commands */
+void hmp_cpu_idle_debug(Monitor *mon, const QDict *qdict);
+void hmp_cpu_idle_start_os_learning(Monitor *mon, const QDict *qdict);
+void hmp_cpu_idle_start_prom_learning(Monitor *mon, const QDict *qdict);
+void hmp_cpu_idle_start_busy_learning(Monitor *mon, const QDict *qdict);
+void hmp_cpu_idle_stop_learning(Monitor *mon, const QDict *qdict);
 
 #endif /* MONITOR_HMP_TARGET_H */

@@ -37,6 +37,7 @@
 #ifndef QEMU_CPU_IDLE_H
 #define QEMU_CPU_IDLE_H
 
+#include "exec/cpu-defs.h"  /* For target_ulong */
 #include "hw/core/cpu.h"
 
 /*
@@ -49,12 +50,17 @@
 /**
  * CPUPCState - Architecture-agnostic program counter state
  *
- * Each architecture must provide current and next instruction pointers.
- * For architectures without an explicit "next PC" register, use PC + instruction_size.
+ * For pattern matching, we want to identify unique execution points.
+ * Architectures handle this differently:
+ *
+ * - SPARC (delayed branch): Uses PC + NPC (both real registers)
+ * - 6502/x86/ARM (immediate): Uses PC only, set next_pc = 0 to disable
+ *
+ * When next_pc is 0, idle detection uses only PC for pattern matching.
  */
 typedef struct {
 	target_ulong pc;       /* Current program counter */
-	target_ulong next_pc;  /* Next program counter (or PC + instr size) */
+	target_ulong next_pc;  /* Next PC (delayed branch archs) or 0 (immediate branch) */
 } CPUPCState;
 
 /**

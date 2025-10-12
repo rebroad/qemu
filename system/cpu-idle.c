@@ -11,6 +11,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "exec/cpu-defs.h"  /* For target_ulong */
 #include "hw/core/cpu.h"
 #include "system/cpu-idle.h"
 #include "system/cpu-timers.h"
@@ -28,13 +29,13 @@ static bool cpu_idle_debug = false;
 typedef enum {
     LEARNING_OFF = 0,
     LEARNING_PROM_IDLE,
-    LEARNING_OS_IDLE,      // Renamed from SUNOS_IDLE to be generic
+    LEARNING_OS_IDLE,      // Renamed from OS_IDLE to be generic
     LEARNING_BUSY
 } LearningMode;
 
 #define NUM_COLLECTIONS 3  // PROM_IDLE, OS_IDLE, BUSY
 
-static LearningMode learning_mode = LEARNING_OFF;
+static LearningMode learning_mode G_GNUC_UNUSED = LEARNING_OFF;
 
 #define MAX_PC_CANDIDATES 1000
 #define LEARNING_AUTO_STOP_SAMPLES 10000  // Auto-stop learning after 10K samples
@@ -58,27 +59,20 @@ typedef struct {
 } PCCollection;
 
 /* Learning collections (array index = mode - 1, since OFF has no collection) */
-static PCCollection collections[NUM_COLLECTIONS] = {
+static PCCollection collections[NUM_COLLECTIONS] G_GNUC_UNUSED = {
     {.name = "PROM-IDLE", .mode = LEARNING_PROM_IDLE},
     {.name = "OS-IDLE", .mode = LEARNING_OS_IDLE},
     {.name = "BUSY", .mode = LEARNING_BUSY}
 };
 
 /* Runtime-configurable settings */
-static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
-static time_t last_config_mtime = 0;   // Track config file mtime for auto-reload
-
-/* Forward declarations */
-static void cpu_idle_stop_learning_internal(void);
-static void load_learned_pcs(const char *arch_name);
-static void save_learned_pcs(const char *arch_name);
-static int stat_with_tmp_fallback(const char *filename, struct stat *st);
-static void recalculate_effective_counts(void);
+static int max_sleep_us_cap G_GNUC_UNUSED = 10000;  // Max sleep cap (from config file)
+static time_t last_config_mtime G_GNUC_UNUSED = 0;   // Track config file mtime for auto-reload
 
 /* Hardcoded fallback idle PCs (architecture-specific, loaded from target code) */
-static target_ulong *fallback_prom_pcs = NULL;
-static int fallback_prom_pc_count = 0;
-static target_ulong fallback_os_idle_pc = 0;
+static target_ulong *fallback_prom_pcs G_GNUC_UNUSED = NULL;
+static int fallback_prom_pc_count G_GNUC_UNUSED = 0;
+static target_ulong fallback_os_idle_pc G_GNUC_UNUSED = 0;
 
 /**
  * cpu_idle_register_fallback_pcs - Register architecture's hardcoded idle PCs
@@ -95,6 +89,7 @@ void cpu_idle_register_fallback_pcs(target_ulong *prom_pcs, int prom_count,
 }
 
 /* Helper: Get save filename based on architecture and icount mode */
+G_GNUC_UNUSED
 static const char *get_idle_pc_save_file(const char *arch_name, bool for_stat)
 {
     static char filename[256];
@@ -113,6 +108,7 @@ static const char *get_idle_pc_save_file(const char *arch_name, bool for_stat)
 }
 
 /* Helper: fopen with /tmp fallback */
+G_GNUC_UNUSED
 static FILE *fopen_with_tmp_fallback(const char *filename, const char *mode)
 {
     FILE *f = fopen(filename, mode);
@@ -125,6 +121,7 @@ static FILE *fopen_with_tmp_fallback(const char *filename, const char *mode)
 }
 
 /* Helper: stat with /tmp fallback */
+G_GNUC_UNUSED
 static int stat_with_tmp_fallback(const char *filename, struct stat *st)
 {
     if (stat(filename, st) == 0) {
@@ -147,40 +144,741 @@ static int stat_with_tmp_fallback(const char *filename, struct stat *st)
  * - HMP command handlers
  */
 
-/* Stub implementations for now */
-void cpu_idle_exec_hook(CPUState *cpu)
+
+
+static void recalculate_effective_counts(void)
 {
-    /* TODO: Move from sparc_cpu_exec_enter_hook() */
+    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+
+    // Process both idle collections (PROM and OS)
+    for (int idle_type = 0; idle_type < 2; idle_type++) {
+        PCCollection *idle_coll = &collections[idle_type];
+
+        for (int i = 0; i < idle_coll->num_pcs; i++) {
+            // Find if this PC exists in BUSY collection
+            uint32_t busy_count = 0;
+            if (busy_coll->num_pcs > 0 && busy_coll->total_samples > 0) {
+                for (int b = 0; b < busy_coll->num_pcs; b++) {
+                    if (busy_coll->pcs[b].pc == idle_coll->pcs[i].pc &&
+                        busy_coll->pcs[b].npc == idle_coll->pcs[i].npc) {
+                        busy_count = busy_coll->pcs[b].count;
+                        break;
+                    }
+                }
+            }
+
+            // Confidence-based adjustment: compare frequency in idle vs busy
+            // Smooth scaling based on how much more frequent in idle vs busy
+            // multiplier = (idle_rate / busy_rate) - 1.0 gives:
+            //   idle_rate = busy_rate    → 0x (eliminate, appears equally)
+            //   idle_rate = 1.5×busy_rate → 0.5x (slight boost)
+            //   idle_rate = 2×busy_rate   → 1x (keep original)
+            //   idle_rate = 3×busy_rate   → 2x (double)
+            //   idle_rate >> busy_rate    → large boost
+            if (busy_count > 0) {
+                // Calculate frequency rates (appearances per sample)
+                double idle_rate = (double)idle_coll->pcs[i].count / idle_coll->total_samples;
+                double busy_rate = (double)busy_count / busy_coll->total_samples;
+
+                // Smooth multiplier: subtract 1 to center around 1x when idle is 2x busy
+                double multiplier = (idle_rate / busy_rate) - 1.0;
+
+                if (multiplier <= 0.0) {
+                    // Appears equally or more in busy → eliminate
+                    idle_coll->pcs[i].effective_count = 0;
+                } else {
+                    // Boost proportionally
+                    double effective = (double)idle_coll->pcs[i].count * multiplier;
+
+                    // Prevent overflow
+                    if (effective > UINT32_MAX) {
+                        idle_coll->pcs[i].effective_count = UINT32_MAX;
+                    } else {
+                        idle_coll->pcs[i].effective_count = (uint32_t)effective;
+                    }
+                }
+            } else {
+                // No busy contamination - maximum confidence (set to UINT32_MAX)
+                idle_coll->pcs[i].effective_count = UINT32_MAX;
+static int compare_pc_candidates(const void *a, const void *b)
+{
+    const PCCandidate *ca = (const PCCandidate *)a;
+    const PCCandidate *cb = (const PCCandidate *)b;
+
+    // Primary: count descending (higher counts first)
+    if (ca->count != cb->count) {
+        return (ca->count > cb->count) ? -1 : 1;
+    }
+
+    // Secondary: PC ascending
+    if (ca->pc != cb->pc) {
+        return (ca->pc < cb->pc) ? -1 : 1;
+    }
+
+    // Tertiary: NPC ascending
+    if (ca->npc != cb->npc) {
+        return (ca->npc < cb->npc) ? -1 : 1;
+    }
+
+    return 0;
+}
+static void save_learned_pcs(const char *arch_name)
+{
+    const char *filename = get_idle_pc_save_file(arch_name);
+    FILE *f = fopen_with_tmp_fallback(filename, "w");
+    if (!f) {
+        DEBUG_PRINTF("⚠️  Failed to save learned PCs\n");
+        return;
+    }
+
+    // Sort each collection before saving (count DESC, pc ASC, npc ASC)
+    for (int m = 0; m < NUM_COLLECTIONS; m++) {
+        PCCollection *coll = &collections[m];
+        if (coll->num_pcs > 0) {
+            qsort(coll->pcs, coll->num_pcs, sizeof(PCCandidate), compare_pc_candidates);
+        }
+    }
+
+    // Save format: mode num_pcs max_consecutive_repeats total_samples [pc npc count]...
+    for (int m = 0; m < NUM_COLLECTIONS; m++) {  // Save ALL collections (PROM, OS, BUSY)
+        PCCollection *coll = &collections[m];
+        fprintf(f, "%d %d %d %u\n", coll->mode, coll->num_pcs, coll->max_consecutive_repeats, coll->total_samples);
+        for (int i = 0; i < coll->num_pcs; i++) {
+            fprintf(f, "0x%lx 0x%lx %u\n",
+                    (unsigned long)coll->pcs[i].pc,
+                    (unsigned long)coll->pcs[i].npc,
+                    coll->pcs[i].count);
+        }
+    }
+
+    // Save max_sleep_us_cap (runtime-configurable)
+    fprintf(f, "MAX_SLEEP_US %d\n", max_sleep_us_cap);
+
+    fclose(f);
+    DEBUG_PRINTF("💾 Saved learned PCs to %s\n", filename);
+
+    // Update mtime to prevent immediate reload of our own save
+    struct stat st;
+    if (stat_with_tmp_fallback(filename, &st) == 0) {
+        last_config_mtime = st.st_mtime;
+    }
+
+    fflush(stdout);
+}
+static void load_learned_pcs(const char *arch_name)
+{
+    const char *filename = get_idle_pc_save_file(arch_name);
+    FILE *f = fopen_with_tmp_fallback(filename, "r");
+    if (!f) {
+        return;  // No saved file, use hardcoded defaults
+    }
+
+    DEBUG_PRINTF("📂 Loading learned PCs from %s%s...\n", filename,
+                icount_enabled() ? " [ICOUNT MODE]" : "");
+
+    int mode, num_pcs, max_repeats;
+    unsigned int total_samples;
+    char line[256];
+
+    while (fgets(line, sizeof(line), f)) {
+        // Check for THRESHOLD line (legacy - ignored, now using BUSY collection directly)
+        if (sscanf(line, "THRESHOLD %d", &max_repeats) == 1) {
+            DEBUG_PRINTF("   Ignored legacy THRESHOLD line (now using BUSY collection)\n");
+            continue;
+        }
+
+        // Check for MAX_SLEEP_US line (runtime-configurable cap)
+        int sleep_cap;
+        if (sscanf(line, "MAX_SLEEP_US %d", &sleep_cap) == 1) {
+            max_sleep_us_cap = sleep_cap;
+            DEBUG_PRINTF("   Loaded max_sleep_us_cap: %d µs\n", max_sleep_us_cap);
+            continue;
+        }
+
+        // Parse mode line (try new format with total_samples first, fall back to old format)
+        if (sscanf(line, "%d %d %d %u", &mode, &num_pcs, &max_repeats, &total_samples) == 4) {
+            if (mode < LEARNING_PROM_IDLE || mode > LEARNING_BUSY) continue;
+
+            PCCollection *coll = &collections[mode - 1];
+            coll->num_pcs = 0;
+            coll->max_consecutive_repeats = max_repeats;
+            coll->total_samples = total_samples;  // Restore total_samples!
+
+            for (int i = 0; i < num_pcs && i < MAX_PC_CANDIDATES; i++) {
+                unsigned long pc, npc;
+                unsigned int count;
+                if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
+                    coll->pcs[i].pc = pc;
+                    coll->pcs[i].npc = npc;
+                    coll->pcs[i].count = count;
+                    coll->num_pcs++;
+                }
+            }
+
+            DEBUG_PRINTF("   Loaded %d %s PCs (samples=%u, max_repeats=%d)\n",
+                        coll->num_pcs, coll->name, total_samples, max_repeats);
+        } else if (sscanf(line, "%d %d %d", &mode, &num_pcs, &max_repeats) == 3) {
+            // Old format without total_samples - use sum of counts as estimate
+            if (mode < LEARNING_PROM_IDLE || mode > LEARNING_OS_IDLE) continue;
+
+            PCCollection *coll = &collections[mode - 1];
+            coll->num_pcs = 0;
+            coll->max_consecutive_repeats = max_repeats;
+            coll->total_samples = 0;  // Will calculate below
+
+            for (int i = 0; i < num_pcs && i < MAX_PC_CANDIDATES; i++) {
+                unsigned long pc, npc;
+                unsigned int count;
+                if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
+                    coll->pcs[i].pc = pc;
+                    coll->pcs[i].npc = npc;
+                    coll->pcs[i].count = count;
+                    coll->total_samples += count;  // Sum counts as estimate
+                    coll->num_pcs++;
+                }
+            }
+            DEBUG_PRINTF("   Loaded %d %s PCs (estimated samples=%u, max_repeats=%d) [OLD FORMAT]\n",
+                        coll->num_pcs, coll->name, coll->total_samples, max_repeats);
+        }
+    }
+
+    fclose(f);
+
+    // Recalculate effective counts using Bayesian adjustment
+    recalculate_effective_counts();
+
+    fflush(stdout);
 }
 
+static void cpu_idle_start_learning_internal(LearningMode mode)
+{
+    if (mode <= LEARNING_OFF) return;
+
+    int idx = mode - 1;  // Array index
+    DEBUG_PRINTF("🎓 Starting %s PC learning mode...\n", collections[idx].name);
+
+    // Reset collection BEFORE setting mode to prevent race condition
+    collections[idx].num_pcs = 0;
+    collections[idx].total_samples = 0;
+    collections[idx].max_consecutive_repeats = 0;
+    memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
+
+    // Now set learning mode (after reset to avoid counting during reset)
+    learning_mode = mode;
+
+    if (mode == LEARNING_BUSY) {
+        DEBUG_PRINTF("   Keep guest BUSY (compile, run tasks) for 10 seconds\n");
+    } else {
+        DEBUG_PRINTF("   Keep guest IDLE for 10 seconds\n");
+    }
+    fflush(stdout);
+}
+
+
+static void cpu_idle_stop_learning_internal(void)
+{
+    if (learning_mode == LEARNING_OFF) {
+        DEBUG_PRINTF("⚠️  No learning mode active\n");
+        return;
+    }
+
+    LearningMode stopped_mode = learning_mode;
+    PCCollection *coll = &collections[stopped_mode - 1];
+
+    learning_mode = LEARNING_OFF;
+
+    bool auto_stopped = (coll->total_samples >= LEARNING_AUTO_STOP_SAMPLES);
+    DEBUG_PRINTF("🎓 %s PC learning complete%s!\n", coll->name,
+                auto_stopped ? " (auto-stopped)" : "");
+    DEBUG_PRINTF("   Total samples: %u\n", coll->total_samples);
+    DEBUG_PRINTF("   Unique PC/NPC pairs: %d\n", coll->num_pcs);
+    DEBUG_PRINTF("   Max consecutive repeats: %d\n", coll->max_consecutive_repeats);
+
+    if (coll->num_pcs == 0) {
+        DEBUG_PRINTF("   ⚠️  No PCs collected!\n");
+        fflush(stdout);
+        return;
+    }
+
+    // Sort by count (descending)
+    for (int i = 0; i < coll->num_pcs - 1; i++) {
+        for (int j = 0; j < coll->num_pcs - i - 1; j++) {
+            if (coll->pcs[j].count < coll->pcs[j + 1].count) {
+                PCCandidate temp = coll->pcs[j];
+                coll->pcs[j] = coll->pcs[j + 1];
+                coll->pcs[j + 1] = temp;
+            }
+        }
+    }
+
+    // Show top 10
+    DEBUG_PRINTF("\n   Top PC/NPC pairs (by frequency):\n");
+    DEBUG_PRINTF("   Rank  PC         NPC        Count     %%\n");
+    DEBUG_PRINTF("   ----  --------   --------   -------   -----\n");
+    int show_count = coll->num_pcs < 10 ? coll->num_pcs : 10;
+    for (int i = 0; i < show_count; i++) {
+        double percent = (double)coll->pcs[i].count / coll->total_samples * 100.0;
+        DEBUG_PRINTF("   %2d.   0x%08x 0x%08x %7u   %5.1f%%\n", i + 1,
+               (uint32_t)coll->pcs[i].pc, (uint32_t)coll->pcs[i].npc,
+               coll->pcs[i].count, percent);
+    }
+
+    // Recalculate effective counts if we have busy collection and either PROM or OS idle collection.
+    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+    PCCollection *prom_coll = &collections[LEARNING_PROM_IDLE - 1];
+    PCCollection *os_coll = &collections[LEARNING_OS_IDLE - 1];
+
+    if (busy_coll->num_pcs > 0 &&
+        (prom_coll->num_pcs > 0 || os_coll->num_pcs > 0)) {
+        DEBUG_PRINTF("\n   🎯 Recalculating effective counts with BUSY and IDLE data...\n");
+        recalculate_effective_counts();
+    }
+
+    // If this was BUSY mode, show adjusted idle PC list
+    // (Confidence adjustment NOW applied - report shows freshly calculated values)
+    if (stopped_mode == LEARNING_BUSY) {
+        DEBUG_PRINTF("\n   🔍 Confidence-adjusted idle PCs (comparing idle vs busy frequency):\n");
+
+        // Check against both idle collections
+        for (int idle_type = 0; idle_type < 2; idle_type++) {  // 0=PROM, 1=OS
+            PCCollection *idle_coll = &collections[idle_type];
+            if (idle_coll->num_pcs == 0) continue;
+
+            DEBUG_PRINTF("\n   %s (top 20, sorted by effective %%):\n", idle_coll->name);
+            DEBUG_PRINTF("   Rank  PC         NPC        Original  Effective  Adjustment\n");
+            DEBUG_PRINTF("   ----  --------   --------   --------  ---------  ----------\n");
+
+            int show_max = idle_coll->num_pcs < 20 ? idle_coll->num_pcs : 20;
+            for (int i = 0; i < show_max; i++) {
+                double orig_pct = (double)idle_coll->pcs[i].count / idle_coll->total_samples * 100.0;
+                double eff_pct = (double)idle_coll->pcs[i].effective_count / idle_coll->total_samples * 100.0;
+
+                DEBUG_PRINTF("   %2d.   0x%08x 0x%08x %7.1f%%  %8.1f%%", i + 1,
+                       (uint32_t)idle_coll->pcs[i].pc,
+                       (uint32_t)idle_coll->pcs[i].npc,
+                       orig_pct, eff_pct);
+
+                // Show adjustment if there was one
+                if (idle_coll->pcs[i].effective_count != idle_coll->pcs[i].count) {
+                    if (eff_pct < orig_pct) {
+                        // Reduced confidence (more in busy than idle)
+                        double reduction_pct = ((orig_pct - eff_pct) / orig_pct) * 100.0;
+                        DEBUG_PRINTF("  ↓%.0f%%", reduction_pct);
+                    } else {
+                        // Increased confidence (more in idle than busy)
+                        double boost_pct = ((eff_pct - orig_pct) / orig_pct) * 100.0;
+                        DEBUG_PRINTF("  ↑%.0f%%", boost_pct);
+                    }
+                }
+                DEBUG_PRINTF("\n");
+            }
+        }
+    }
+
+    // Always auto-save after learning (BUSY or otherwise)
+    save_learned_pcs();
+
+    fflush(stdout);
+}
+
+// CPU execution enter hook - called before EVERY execution batch
+void cpu_idle_exec_hook(CPUState *cs)
+{
+    // Extract architecture name from CPU class
+    const char *arch_name = "sparc";  // TODO: Extract dynamically from cs
+    CPUPCState pc_state;
+    cpu_get_pc_state(cs, &pc_state);
+    static target_ulong last_pc = 0;
+    static target_ulong last_npc = 0;
+    static int total_sleep_us = 0;  // Track total sleep time per second
+    static int min_sleep_us = INT_MAX;  // Track minimum sleep per second
+    static int max_sleep_us = 0;  // Track maximum sleep per second
+    static int sleep_events = 0;     // Count of actual sleep calls per second
+    static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
+    static int prev_total_execs = 1;  // Previous second's total_execs (for PROM gating calculation)
+    static int prev_prom_total_hits = 0; // Previous second's total PROM hits (learned + fallback)
+    static int os_idle_hits = 0;  // Count OS idle detections per second (learned)
+    static int prom_idle_hits = 0;   // Count PROM idle detections per second (learned)
+    static int os_fallback_hits = 0; // Count OS fallback (hardcoded) hits per second
+    static int prom_fallback_hits = 0;  // Count PROM fallback (hardcoded) hits per second
+    static int generic_idle_hits = 0; // Count generic idle loop detections per second
+    static int antigeneric_hits = 0;  // Count generic repeats rejected by BUSY collection
+    static double antigeneric_freq_sum = 0.0; // Sum of BUSY freq % for antigeneric hits
+    static int busy_hits = 0;         // Count normal busy execs (not idle, not generic)
+    static int halted_hits = 0;       // Count cpu halted state per second
+    static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
+
+    // Known idle addresses (discovered through analysis)
+
+    // Learning mode: collect PC/NPC frequencies (DRY approach)
+    static int learning_consecutive_count = 0;
+    static target_ulong learning_last_pc = 0;
+    static target_ulong learning_last_npc = 0;
+
+    if (learning_mode != LEARNING_OFF) {
+        PCCollection *coll = &collections[learning_mode - 1];  // mode-1 since OFF has no collection
+        coll->total_samples++;
+
+        // Auto-stop at 10K samples
+        if (coll->total_samples >= LEARNING_AUTO_STOP_SAMPLES) {
+            cpu_idle_stop_learning_internal();
+            // Note: learning_mode is now OFF, will continue to idle detection below
+        } else {
+            // Track consecutive repeats for threshold calculation
+            if (pc_state.pc == learning_last_pc && pc_state.next_pc == learning_last_npc) {
+                learning_consecutive_count++;
+                if (learning_consecutive_count > coll->max_consecutive_repeats) {
+                    coll->max_consecutive_repeats = learning_consecutive_count;
+                }
+            } else {
+                learning_consecutive_count = 1;
+                learning_last_pc = pc_state.pc;
+                learning_last_npc = pc_state.next_pc;
+            }
+
+            // Find or add this PC/NPC pair
+            int found = -1;
+            for (int i = 0; i < coll->num_pcs; i++) {
+                if (coll->pcs[i].pc == pc_state.pc && coll->pcs[i].npc == pc_state.next_pc) {
+                    found = i;
+                    break;
+                }
+            }
+
+            if (found >= 0) {
+                coll->pcs[found].count++;
+            } else if (coll->num_pcs < MAX_PC_CANDIDATES) {
+                coll->pcs[coll->num_pcs].pc = pc_state.pc;
+                coll->pcs[coll->num_pcs].npc = pc_state.next_pc;
+                coll->pcs[coll->num_pcs].count = 1;
+                coll->num_pcs++;
+            }
+        }
+    }
+
+    // Check for learned idle patterns and calculate sleep based on frequency
+    bool is_known_idle = false;
+    int sleep_us = 0;
+    uint32_t pc_frequency = 0;  // How often this PC appeared during learning
+    total_execs++;  // Count every execution for percentage calculation
+
+    // Check both idle collections (PROM and OS) - use learned frequency!
+    for (int idle_type = 0; idle_type < 2 && !is_known_idle; idle_type++) {
+        PCCollection *idle_coll = &collections[idle_type];  // 0=PROM, 1=OS
+
+        if (idle_coll->num_pcs > 0) {
+            // Use learned PCs WITH frequency data
+            for (int i = 0; i < idle_coll->num_pcs; i++) {
+                if (pc_state.pc == idle_coll->pcs[i].pc && pc_state.next_pc == idle_coll->pcs[i].npc) {
+                    is_known_idle = true;
+                    pc_frequency = idle_coll->pcs[i].effective_count;
+
+                    // Calculate sleep based on frequency: linear mapping, capped at max_sleep_us_cap
+                    if (idle_coll->total_samples > 0) {
+                        double freq_pct = (double)pc_frequency / idle_coll->total_samples * 100.0;
+
+                        // Clamp freq_pct to 100% max (effective_count can be UINT32_MAX for perfect idle indicators)
+                        if (freq_pct > 100.0) freq_pct = 100.0;
+
+                        freq_pct_sum += freq_pct;  // Accumulate for weighted idle % calculation
+                        sleep_us = (int)(freq_pct * 1000);  // Direct linear: 1%=10µs, 10%=100µs, 50%=500µs, 100%=1000µs
+                        if (sleep_us > max_sleep_us_cap) {
+                            sleep_us = max_sleep_us_cap;  // Cap at runtime-configurable limit
+                        }
+                    }
+
+                    // Count idle type for reporting
+                    if (idle_type == 1) {  // OS - always allow sleeping
+                        os_idle_hits++;
+                    } else {  // PROM - only sleep if >90% of execs were PROM idle in previous second
+                        prom_idle_hits++;
+                        // Use PREVIOUS second's data to avoid early-second false readings
+                        double prev_prom_pct = (double)prev_prom_total_hits / prev_total_execs * 100.0;
+                        if (prev_prom_pct < 90.0) {
+                            sleep_us = 0;  // Don't sleep - we're not truly PROM-idling
+                        }
+                    }
+                    break;
+                }
+            }
+        } else if (idle_type == 0) {
+            // Fallback: hardcoded PROM idle PCs (only sleep if >90% PROM idle in previous second)
+            for (int i = 0; i < fallback_prom_pc_count; i++) {
+                if (pc_state.pc == fallback_prom_pcs[i]) {
+                    is_known_idle = true;
+                    prom_fallback_hits++;
+                    freq_pct_sum += 100.0;  // Assume 100% frequency for hardcoded values
+                    // Use PREVIOUS second's data to avoid early-second false readings
+                    // On first few seconds, prev_prom_total_hits=0, so allow initial learning period
+                    double prev_prom_pct = (double)prev_prom_total_hits / prev_total_execs * 100.0;
+                    if (prev_prom_total_hits > 0 && prev_prom_pct >= 90.0) {
+                        sleep_us = max_sleep_us_cap;
+                    } else if (prev_prom_total_hits == 0) {
+                        // First second(s) - allow sleep to start building data
+                        sleep_us = max_sleep_us_cap;
+                    }
+                    break;
+                }
+            }
+        } else {
+            // Fallback: hardcoded OS idle PC (use cap)
+            if (pc_state.pc == fallback_os_idle_pc) {
+                is_known_idle = true;
+                sleep_us = max_sleep_us_cap;
+                freq_pct_sum += 100.0;  // Assume 100% frequency for hardcoded values
+                os_fallback_hits++;
+            }
+        }
+    }
+
+    // Generic idle detection (PC/NPC repeat) - only if not already known-idle
+    if (!is_known_idle && pc_state.pc == last_pc && pc_state.next_pc == last_npc) {
+        // Check if this PC/NPC is in the BUSY collection (filter out busy loops!)
+        bool is_busy_pc = false;
+        PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+        for (int i = 0; i < busy_coll->num_pcs; i++) {
+            if (busy_coll->pcs[i].pc == pc_state.pc && busy_coll->pcs[i].npc == pc_state.next_pc) {
+                is_busy_pc = true;
+                // Track the busy frequency for reporting (antigeneric = rejected generic idle)
+                if (busy_coll->total_samples > 0) {
+                    double busy_freq_pct = (double)busy_coll->pcs[i].count / busy_coll->total_samples * 100.0;
+                    antigeneric_freq_sum += busy_freq_pct;
+                    antigeneric_hits++;
+                }
+                break;
+            }
+        }
+
+        // Only treat as idle if NOT in busy collection
+        if (!is_busy_pc) {
+            generic_idle_hits++;
+            freq_pct_sum += 1.0;  // Low confidence (generic repeat)
+            // Generic sleep: just a small delay (not trusted like learned PCs)
+            sleep_us = 1000;  // 1ms for generic repeats
+        }
+    } else if (!is_known_idle && !cs->halted) {
+        // Normal busy execution (PC changed, not idle, not halted)
+        busy_hits++;
+    }
+
+    // Check for power down state
+    if (cs->halted) {
+        sleep_us = max_sleep_us_cap;
+        freq_pct_sum += 100.0;  // Halted = 100% idle
+        halted_hits++;
+    }
+
+    // Track sleep statistics (including zeros)
+    total_sleep_us += sleep_us;
+    if (sleep_us > 0) {
+        sleep_events++;
+        if (sleep_us > max_sleep_us) max_sleep_us = sleep_us;
+    }
+    if (sleep_us < min_sleep_us) min_sleep_us = sleep_us;
+
+    // Only sleep if icount is not enabled (when icount is on, we want max speed)
+    // AND not in learning mode (need unthrottled speed for accurate learning)
+    if (learning_mode == LEARNING_OFF && sleep_us > 0) {
+        g_usleep(sleep_us);
+    }
+
+    // Print debug info at most once per second (MAME-style speed measurement)
+    static int64_t last_report_time_ns = 0;
+    static int64_t last_vm_clock_ns = 0;
+
+    int64_t current_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);  // Host wall-clock
+    int64_t vm_clock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);       // Guest virtual time
+
+    if (last_report_time_ns == 0) {
+        last_report_time_ns = current_time_ns;
+    }
+
+    if (total_execs > 0 && current_time_ns - last_report_time_ns >= 1000000000) {  // Every second
+        // Check if config file was updated and reload if needed
+        struct stat st;
+        if (stat_with_tmp_fallback(get_idle_pc_save_file(arch_name), &st) == 0) {
+            if (st.st_mtime != last_config_mtime) {
+                if (last_config_mtime > 0) {  // Not first time
+                    DEBUG_PRINTF("📂 Config file updated, reloading...\n");
+                    load_learned_pcs();
+                }
+                last_config_mtime = st.st_mtime;
+            }
+        }
+
+        int total_idle = os_idle_hits + prom_idle_hits + os_fallback_hits + prom_fallback_hits + generic_idle_hits + halted_hits;
+        int64_t real_delta_ns = current_time_ns - last_report_time_ns;
+        int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
+
+        // MAME-style speed calculation: (emulated_time / real_time) * 100
+        int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+
+        // Calculate true idle percentage (weighted by PC frequency from learning)
+        double idle_pct = total_idle > 0 ? freq_pct_sum / total_idle : 0.0;
+
+        // Calculate average sleep PER EXEC (not just per sleep event)
+        // This includes all the execs where sleep_us = 0
+        int avg_sleep_us = total_execs > 0 ? total_sleep_us / total_execs : 0;
+
+        // Build complete message to avoid interleaving (thread-safe)
+        char msg[512];
+        int pos;
+
+        // Show learning progress if in learning mode
+        if (learning_mode != LEARNING_OFF) {
+            PCCollection *learn_coll = &collections[learning_mode - 1];
+            double learn_pct = (double)learn_coll->total_samples / LEARNING_AUTO_STOP_SAMPLES * 100.0;
+            pos = snprintf(msg, sizeof(msg), "[LEARNING %s] %d/%d samples (%.1f%%) spd=%d%%",
+                          learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
+                          learn_pct, speed_percent);
+        } else {
+            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% idle=%.1f%% %d/%d sleep:%d/%d/%dµs(%devt)",
+                          speed_percent, idle_pct, total_idle, total_execs,
+                          min_sleep_us == INT_MAX ? 0 : min_sleep_us,
+                          avg_sleep_us,
+                          max_sleep_us,
+                          sleep_events);
+        }
+
+        // Show breakdown if there are idle hits
+        if (total_idle > 0) {
+            pos += snprintf(msg + pos, sizeof(msg) - pos, " [");
+            bool first = true;
+            if (os_idle_hits > 0) {
+                double os_pct = (double)os_idle_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS:%.1f%%", first ? "" : " ", os_pct);
+                first = false;
+            }
+            if (os_fallback_hits > 0) {
+                double os_fb_pct = (double)os_fallback_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS-fb:%.1f%%", first ? "" : " ", os_fb_pct);
+                first = false;
+            }
+            if (prom_idle_hits > 0) {
+                double prom_pct = (double)prom_idle_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP:%.1f%%", first ? "" : " ", prom_pct);
+                first = false;
+            }
+            if (prom_fallback_hits > 0) {
+                double prom_fb_pct = (double)prom_fallback_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP-fb:%.1f%%", first ? "" : " ", prom_fb_pct);
+                first = false;
+            }
+            if (generic_idle_hits > 0) {
+                double generic_pct = (double)generic_idle_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sG:%.1f%%", first ? "" : " ", generic_pct);
+                first = false;
+            }
+            if (antigeneric_hits > 0) {
+                double antigen_pct = (double)antigeneric_hits / total_execs * 100.0;
+                double avg_antigen_freq = antigeneric_freq_sum / antigeneric_hits;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sAG:%.1f%%(freq:%.1f%%)",
+                               first ? "" : " ", antigen_pct, avg_antigen_freq);
+                first = false;
+            }
+            if (halted_hits > 0) {
+                double halted_pct = (double)halted_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sH:%.1f%%", first ? "" : " ", halted_pct);
+                first = false;
+            }
+            if (busy_hits > 0) {
+                double busy_pct = (double)busy_hits / total_execs * 100.0;
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sB:%.1f%%",
+                               first ? "" : " ", busy_pct);
+            }
+            pos += snprintf(msg + pos, sizeof(msg) - pos, "]");
+        }
+
+        snprintf(msg + pos, sizeof(msg) - pos, "\n");
+        DEBUG_PRINTF("%s", msg);
+
+        last_report_time_ns = current_time_ns;
+        last_vm_clock_ns = vm_clock_ns;
+        total_sleep_us = 0;
+        min_sleep_us = INT_MAX;
+        max_sleep_us = 0;
+        sleep_events = 0;
+        // Save current values as "previous" for next second's PROM gating check
+        prev_total_execs = total_execs > 0 ? total_execs : 1;  // Avoid div by zero
+        prev_prom_total_hits = prom_idle_hits + prom_fallback_hits;  // Combined PROM hits
+        os_idle_hits = prom_idle_hits = 0;
+        os_fallback_hits = prom_fallback_hits = 0;
+        generic_idle_hits = halted_hits = 0;
+        antigeneric_hits = 0;
+        antigeneric_freq_sum = 0.0;
+        busy_hits = 0;
+        total_execs = 0;  // Reset for next second
+        freq_pct_sum = 0.0;  // Reset weighted idle % accumulator
+    }
+
+    last_pc = pc_state.pc; last_npc = pc_state.next_pc;
+}
+
+// Add function to toggle debug logging
 void cpu_idle_set_debug(bool enable)
 {
     cpu_idle_debug = enable;
-    DEBUG_PRINTF("CPU idle detection debug logging %s\n", enable ? "enabled" : "disabled");
+    DEBUG_PRINTF("CPU debug logging %s\n", enable ? "enabled" : "disabled");
 }
+
+void hmp_cpu_idle_debug(Monitor *mon, const QDict *qdict)
+{
+    bool enable = qdict_get_bool(qdict, "enable");
+    cpu_idle_set_debug(enable);
+    monitor_printf(mon, "CPU debug logging %s\n", enable ? "enabled" : "disabled");
+}
+
+void hmp_cpu_idle_start_prom_learning(Monitor *mon, const QDict *qdict)
+{
+    cpu_idle_start_learning_internal(LEARNING_PROM_IDLE);
+    monitor_printf(mon, "Started PROM idle PC learning mode\n");
+}
+
+void hmp_cpu_idle_start_os_learning(Monitor *mon, const QDict *qdict)
+{
+    cpu_idle_start_learning_internal(LEARNING_OS_IDLE);
+    monitor_printf(mon, "Started OS idle PC learning mode\n");
+}
+
+void hmp_cpu_idle_start_busy_learning(Monitor *mon, const QDict *qdict)
+{
+    cpu_idle_start_learning_internal(LEARNING_BUSY);
+    monitor_printf(mon, "Started busy PC learning mode\n");
+}
+
+void hmp_cpu_idle_stop_learning(Monitor *mon, const QDict *qdict)
+{
+    cpu_idle_stop_learning_internal();
+    monitor_printf(mon, "Stopped learning mode\n");
+}
+
+// ============================================================================
+// Public API Wrappers
+// ============================================================================
 
 void cpu_idle_start_prom_learning(void)
 {
-    /* TODO: Implement */
+    cpu_idle_start_learning_internal(LEARNING_PROM_IDLE);
 }
 
 void cpu_idle_start_os_idle_learning(void)
 {
-    /* TODO: Implement */
+    cpu_idle_start_learning_internal(LEARNING_OS_IDLE);
 }
 
 void cpu_idle_start_busy_learning(void)
 {
-    /* TODO: Implement */
+    cpu_idle_start_learning_internal(LEARNING_BUSY);
 }
 
 void cpu_idle_stop_learning(void)
 {
-    /* TODO: Implement */
+    cpu_idle_stop_learning_internal();
 }
 
 void cpu_idle_init(void)
 {
-    /* TODO: Load learned PCs on startup */
+    // Architecture name will be determined at runtime from the first CPU
+    // For now, we'll load in the exec_hook when we have CPU context
+    // This is a no-op stub
 }
-

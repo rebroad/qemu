@@ -721,69 +721,72 @@ SRST
 ERST
 
     {
-        .name       = "sparc-cpu-debug",
+        .name       = "cpu-idle-debug",
         .args_type  = "enable:b",
         .params     = "on|off",
-        .help       = "enable or disable SPARC CPU idle detection debug output",
-        .cmd        = hmp_sparc_cpu_debug,
+        .help       = "enable or disable CPU idle detection debug output",
+        .cmd        = hmp_cpu_idle_debug,
     },
 
 SRST
-``sparc-cpu-debug`` *on*|*off*
-  Enable or disable SPARC CPU idle detection debug output.
-  This shows statistics about idle loop detection and CPU throttling.
+``cpu-idle-debug`` *on*|*off*
+  Enable or disable CPU idle detection debug output (architecture-agnostic).
+  This shows statistics about idle loop detection and power-saving.
 ERST
 
     {
-        .name       = "sparc-start-prom-learning",
+        .name       = "cpu-idle-start-prom-learning",
         .args_type  = "",
         .params     = "",
-        .help       = "start collecting PROM idle PC frequencies",
-        .cmd        = hmp_sparc_start_prom_learning,
+        .help       = "start collecting PROM/firmware idle PC frequencies",
+        .cmd        = hmp_cpu_idle_start_prom_learning,
     },
 
 SRST
-``sparc-start-prom-learning``
-  Start PROM idle PC learning mode. Keep guest at PROM 'ok' prompt for 10 seconds.
+``cpu-idle-start-prom-learning``
+  Start PROM/firmware idle PC learning mode (architecture-agnostic).
+  Keep guest at firmware prompt for 10 seconds. Auto-stops after 10K samples.
 ERST
 
     {
-        .name       = "sparc-start-idle-learning",
+        .name       = "cpu-idle-start-os-learning",
         .args_type  = "",
         .params     = "",
-        .help       = "start collecting SunOS idle PC frequencies",
-        .cmd        = hmp_sparc_start_idle_learning,
+        .help       = "start collecting OS idle PC frequencies",
+        .cmd        = hmp_cpu_idle_start_os_learning,
     },
 
 SRST
-``sparc-start-idle-learning``
-  Start SunOS idle PC learning mode. Keep guest idle at login prompt for 10 seconds.
+``cpu-idle-start-os-learning``
+  Start OS idle PC learning mode (architecture-agnostic).
+  Keep guest idle at login prompt for 10 seconds. Auto-stops after 10K samples.
 ERST
 
     {
-        .name       = "sparc-start-busy-learning",
+        .name       = "cpu-idle-start-busy-learning",
         .args_type  = "",
         .params     = "",
         .help       = "start collecting busy PC frequencies for filtering",
-        .cmd        = hmp_sparc_start_busy_learning,
+        .cmd        = hmp_cpu_idle_start_busy_learning,
     },
 
 SRST
-``sparc-start-busy-learning``
-  Start busy PC learning mode. Keep guest busy (compiling, running tasks).
+``cpu-idle-start-busy-learning``
+  Start busy PC learning mode (architecture-agnostic).
+  Keep guest busy (compiling, running tasks). Auto-stops after 10K samples.
 ERST
 
     {
-        .name       = "sparc-stop-learning",
+        .name       = "cpu-idle-stop-learning",
         .args_type  = "",
         .params     = "",
         .help       = "stop any active learning mode and show results",
-        .cmd        = hmp_sparc_stop_learning,
+        .cmd        = hmp_cpu_idle_stop_learning,
     },
 
 SRST
-``sparc-stop-learning``
-  Stop whichever learning mode is active (PROM/SunOS idle or busy).
+``cpu-idle-stop-learning``
+  Stop whichever learning mode is active (PROM/OS idle or busy) (architecture-agnostic).
   Shows top 10 PCs, filters contamination if busy, and auto-saves to file.
 ERST
 

@@ -1457,13 +1457,15 @@ static void sparc_cpu_start_learning(LearningMode mode)
 
     int idx = mode - 1;  // Array index
     DEBUG_PRINTF("🎓 Starting %s PC learning mode...\n", collections[idx].name);
-    learning_mode = mode;
 
-    // Reset collection
+    // Reset collection BEFORE setting mode to prevent race condition
     collections[idx].num_pcs = 0;
     collections[idx].total_samples = 0;
     collections[idx].max_consecutive_repeats = 0;
     memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
+
+    // Now set learning mode (after reset to avoid counting during reset)
+    learning_mode = mode;
 
     if (mode == LEARNING_BUSY) {
         DEBUG_PRINTF("   Keep guest BUSY (compile, run tasks) for 10 seconds\n");

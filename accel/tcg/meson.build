@@ -3,6 +3,7 @@ common_ss.add(when: 'CONFIG_TCG', if_true: files(
 ))
 tcg_specific_ss = ss.source_set()
 tcg_specific_ss.add(files(
+  'cpu-idle.c',
   'tcg-all.c',
   'cpu-exec.c',
   'tb-maint.c',

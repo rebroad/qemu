@@ -1523,8 +1523,19 @@ static void sparc_cpu_stop_learning(void)
                coll->pcs[i].count, percent);
     }
 
+    // Recalculate effective counts if we have busy collection and either PROM or SUNOS idle collection.
+    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
+    PCCollection *prom_coll = &collections[LEARNING_PROM_IDLE - 1];
+    PCCollection *sunos_coll = &collections[LEARNING_SUNOS_IDLE - 1];
+
+    if (busy_coll->num_pcs > 0 &&
+        (prom_coll->num_pcs > 0 || sunos_coll->num_pcs > 0)) {
+        DEBUG_PRINTF("\n   🎯 Recalculating effective counts with BUSY and IDLE data...\n");
+        recalculate_effective_counts();
+    }
+
     // If this was BUSY mode, show adjusted idle PC list
-    // (Confidence adjustment already applied in recalculate_effective_counts)
+    // (Confidence adjustment NOW applied - report shows freshly calculated values)
     if (stopped_mode == LEARNING_BUSY) {
         DEBUG_PRINTF("\n   🔍 Confidence-adjusted idle PCs (comparing idle vs busy frequency):\n");
 
@@ -1562,17 +1573,6 @@ static void sparc_cpu_stop_learning(void)
                 DEBUG_PRINTF("\n");
             }
         }
-    }
-
-    // Recalculate effective counts if we have busy collection and either PROM or SUNOS idle collection.
-    PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
-    PCCollection *prom_coll = &collections[LEARNING_PROM_IDLE - 1];
-    PCCollection *sunos_coll = &collections[LEARNING_SUNOS_IDLE - 1];
-
-    if (busy_coll->num_pcs > 0 &&
-        (prom_coll->num_pcs > 0 || sunos_coll->num_pcs > 0)) {
-        DEBUG_PRINTF("\n   🎯 Recalculating effective counts with BUSY and IDLE data...\n");
-        recalculate_effective_counts();
     }
 
     // Always auto-save after learning (BUSY or otherwise)

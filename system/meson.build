@@ -9,6 +9,7 @@ specific_ss.add(when: 'CONFIG_SYSTEM_ONLY', if_true: [files(
 system_ss.add(files(
   'balloon.c',
   'bootdevice.c',
+  'cpu-idle.c',
   'cpus.c',
   'cpu-timers.c',
   'datadir.c',

@@ -966,6 +966,10 @@ static void sparc_cpu_exec_enter_hook(CPUState *cs)
                     // Calculate sleep based on frequency: linear mapping, capped at max_sleep_us_cap
                     if (idle_coll->total_samples > 0) {
                         double freq_pct = (double)pc_frequency / idle_coll->total_samples * 100.0;
+
+                        // Clamp freq_pct to 100% max (effective_count can be UINT32_MAX for perfect idle indicators)
+                        if (freq_pct > 100.0) freq_pct = 100.0;
+
                         freq_pct_sum += freq_pct;  // Accumulate for weighted idle % calculation
                         sleep_us = (int)(freq_pct * 1000);  // Direct linear: 1%=10µs, 10%=100µs, 50%=500µs, 100%=1000µs
                         if (sleep_us > max_sleep_us_cap) {

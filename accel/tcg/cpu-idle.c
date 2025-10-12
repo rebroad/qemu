@@ -13,6 +13,7 @@
 #include "qemu/timer.h"
 #include "exec/cpu-defs.h"  /* For target_ulong */
 #include "hw/core/cpu.h"
+#include "qom/object.h"
 #include "system/cpu-idle.h"
 #include "system/cpu-timers.h"
 #include "system/cpu-throttle.h"
@@ -88,6 +89,28 @@ void cpu_idle_register_fallback_pcs(target_ulong *prom_pcs, int prom_count,
     fallback_prom_pcs = prom_pcs;
     fallback_prom_pc_count = prom_count;
     fallback_os_idle_pc = os_idle_pc;
+}
+
+/* Helper: Extract architecture name from CPU typename (e.g., "sparc-cpu" → "sparc") */
+static const char *get_arch_name_from_cpu(CPUState *cpu)
+{
+    static char arch_name[32];
+    const char *typename = object_get_typename(OBJECT(cpu));
+
+    // Extract base name before "-cpu" suffix
+    const char *dash = strstr(typename, "-cpu");
+    if (dash) {
+        size_t len = dash - typename;
+        if (len < sizeof(arch_name)) {
+            memcpy(arch_name, typename, len);
+            arch_name[len] = '\0';
+            return arch_name;
+        }
+    }
+
+    // Fallback: use full typename
+    snprintf(arch_name, sizeof(arch_name), "%s", typename);
+    return arch_name;
 }
 
 /* Helper: Get save filename based on architecture and icount mode */
@@ -463,7 +486,12 @@ static void cpu_idle_stop_learning_internal(void)
     }
 
     // Always auto-save after learning (BUSY or otherwise)
-    save_learned_pcs("sparc");  // TODO: Get arch name dynamically
+    // Use first CPU to get arch name (all CPUs in a session are same architecture)
+    CPUState *first_cpu_state = first_cpu;
+    if (first_cpu_state) {
+        const char *arch_name = get_arch_name_from_cpu(first_cpu_state);
+        save_learned_pcs(arch_name);
+    }
 
     fflush(stdout);
 }
@@ -472,7 +500,7 @@ static void cpu_idle_stop_learning_internal(void)
 void cpu_idle_exec_hook(CPUState *cs)
 {
     // Extract architecture name from CPU class
-    const char *arch_name = "sparc";  // TODO: Extract dynamically from cs
+    const char *arch_name = get_arch_name_from_cpu(cs);
     CPUPCState pc_state;
     cpu_get_pc_state(cs, &pc_state);
     static target_ulong last_pc = 0;
@@ -865,7 +893,12 @@ void cpu_idle_stop_learning(void)
 
 void cpu_idle_init(void)
 {
-    // Architecture name will be determined at runtime from the first CPU
-    // For now, we'll load in the exec_hook when we have CPU context
-    // This is a no-op stub
+    // Load learned PCs from disk (called once during CPU initialization)
+    // Get architecture name from first CPU
+    static bool initialized = false;
+    if (!initialized && first_cpu) {
+        const char *arch_name = get_arch_name_from_cpu(first_cpu);
+        load_learned_pcs(arch_name);
+        initialized = true;
+    }
 }

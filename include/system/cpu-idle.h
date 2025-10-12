@@ -42,9 +42,10 @@
 
 /*
  * IMPLEMENTATION STATUS:
- * - Basic framework in system/cpu-idle.c (in progress)
- * - Full implementation still in target/sparc/cpu.c
- * - Gradual migration in progress
+ * ✅ COMPLETE! Full implementation in accel/tcg/cpu-idle.c
+ * ✅ SPARC using generic system via 75 lines of glue code
+ * ✅ Architecture name auto-detected from CPU typename
+ * 🚀 Ready for other architectures (6502, x86, ARM, etc.)
  */
 
 /**

@@ -72,25 +72,6 @@ static PCCollection collections[NUM_COLLECTIONS] = {
 static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
 static time_t last_config_mtime = 0;   // Track config file mtime for auto-reload
 
-/* Hardcoded fallback idle PCs (architecture-specific, loaded from target code) */
-static target_ulong *fallback_prom_pcs = NULL;
-static int fallback_prom_pc_count = 0;
-static target_ulong fallback_os_idle_pc = 0;
-
-/**
- * cpu_idle_register_fallback_pcs - Register architecture's hardcoded idle PCs
- *
- * Called by architecture-specific code to provide fallback PCs when no
- * learned data is available.
- */
-void cpu_idle_register_fallback_pcs(target_ulong *prom_pcs, int prom_count,
-                                     target_ulong os_idle_pc)
-{
-    fallback_prom_pcs = prom_pcs;
-    fallback_prom_pc_count = prom_count;
-    fallback_os_idle_pc = os_idle_pc;
-}
-
 /* Helper: Extract architecture name from CPU typename (e.g., "sparc-cpu" → "sparc") */
 static const char *get_arch_name_from_cpu(CPUState *cpu)
 {
@@ -499,6 +480,13 @@ static void cpu_idle_stop_learning_internal(void)
 // CPU execution enter hook - called before EVERY execution batch
 void cpu_idle_exec_hook(CPUState *cs)
 {
+    // Auto-initialize on first call
+    static bool initialized = false;
+    if (!initialized) {
+        cpu_idle_init();
+        initialized = true;
+    }
+
     // Extract architecture name from CPU class
     const char *arch_name = get_arch_name_from_cpu(cs);
     CPUPCState pc_state;
@@ -511,11 +499,9 @@ void cpu_idle_exec_hook(CPUState *cs)
     static int sleep_events = 0;     // Count of actual sleep calls per second
     static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
     static int prev_total_execs = 1;  // Previous second's total_execs (for PROM gating calculation)
-    static int prev_prom_total_hits = 0; // Previous second's total PROM hits (learned + fallback)
-    static int os_idle_hits = 0;  // Count OS idle detections per second (learned)
-    static int prom_idle_hits = 0;   // Count PROM idle detections per second (learned)
-    static int os_fallback_hits = 0; // Count OS fallback (hardcoded) hits per second
-    static int prom_fallback_hits = 0;  // Count PROM fallback (hardcoded) hits per second
+    static int prev_prom_total_hits = 0; // Previous second's total PROM hits
+    static int os_idle_hits = 0;  // Count OS idle detections per second
+    static int prom_idle_hits = 0;   // Count PROM idle detections per second
     static int generic_idle_hits = 0; // Count generic idle loop detections per second
     static int antigeneric_hits = 0;  // Count generic repeats rejected by BUSY collection
     static double antigeneric_freq_sum = 0.0; // Sum of BUSY freq % for antigeneric hits
@@ -616,33 +602,6 @@ void cpu_idle_exec_hook(CPUState *cs)
                     break;
                 }
             }
-        } else if (idle_type == 0) {
-            // Fallback: hardcoded PROM idle PCs (only sleep if >90% PROM idle in previous second)
-            for (int i = 0; i < fallback_prom_pc_count; i++) {
-                if (pc_state.pc == fallback_prom_pcs[i]) {
-                    is_known_idle = true;
-                    prom_fallback_hits++;
-                    freq_pct_sum += 100.0;  // Assume 100% frequency for hardcoded values
-                    // Use PREVIOUS second's data to avoid early-second false readings
-                    // On first few seconds, prev_prom_total_hits=0, so allow initial learning period
-                    double prev_prom_pct = (double)prev_prom_total_hits / prev_total_execs * 100.0;
-                    if (prev_prom_total_hits > 0 && prev_prom_pct >= 90.0) {
-                        sleep_us = max_sleep_us_cap;
-                    } else if (prev_prom_total_hits == 0) {
-                        // First second(s) - allow sleep to start building data
-                        sleep_us = max_sleep_us_cap;
-                    }
-                    break;
-                }
-            }
-        } else {
-            // Fallback: hardcoded OS idle PC (use cap)
-            if (pc_state.pc == fallback_os_idle_pc) {
-                is_known_idle = true;
-                sleep_us = max_sleep_us_cap;
-                freq_pct_sum += 100.0;  // Assume 100% frequency for hardcoded values
-                os_fallback_hits++;
-            }
         }
     }
 
@@ -721,7 +680,7 @@ void cpu_idle_exec_hook(CPUState *cs)
             }
         }
 
-        int total_idle = os_idle_hits + prom_idle_hits + os_fallback_hits + prom_fallback_hits + generic_idle_hits + halted_hits;
+        int total_idle = os_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits;
         int64_t real_delta_ns = current_time_ns - last_report_time_ns;
         int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
 
@@ -764,19 +723,9 @@ void cpu_idle_exec_hook(CPUState *cs)
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS:%.1f%%", first ? "" : " ", os_pct);
                 first = false;
             }
-            if (os_fallback_hits > 0) {
-                double os_fb_pct = (double)os_fallback_hits / total_execs * 100.0;
-                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS-fb:%.1f%%", first ? "" : " ", os_fb_pct);
-                first = false;
-            }
             if (prom_idle_hits > 0) {
                 double prom_pct = (double)prom_idle_hits / total_execs * 100.0;
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP:%.1f%%", first ? "" : " ", prom_pct);
-                first = false;
-            }
-            if (prom_fallback_hits > 0) {
-                double prom_fb_pct = (double)prom_fallback_hits / total_execs * 100.0;
-                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP-fb:%.1f%%", first ? "" : " ", prom_fb_pct);
                 first = false;
             }
             if (generic_idle_hits > 0) {
@@ -815,9 +764,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         sleep_events = 0;
         // Save current values as "previous" for next second's PROM gating check
         prev_total_execs = total_execs > 0 ? total_execs : 1;  // Avoid div by zero
-        prev_prom_total_hits = prom_idle_hits + prom_fallback_hits;  // Combined PROM hits
+        prev_prom_total_hits = prom_idle_hits;
         os_idle_hits = prom_idle_hits = 0;
-        os_fallback_hits = prom_fallback_hits = 0;
         generic_idle_hits = halted_hits = 0;
         antigeneric_hits = 0;
         antigeneric_freq_sum = 0.0;

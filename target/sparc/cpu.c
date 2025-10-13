@@ -38,55 +38,17 @@
 #include "system/cpu-timers.h"
 #include "system/cpu-idle.h"
 
-/* Prototype for sparc_cpu_parse_opts to avoid implicit declaration */
-static void sparc_cpu_parse_opts(void);
-
 // ============================================================================
 // CPU Idle Detection - SPARC Architecture Glue Code
 // ============================================================================
 
-// Hardcoded fallback idle PCs for SPARC/SunOS (used when no learned data)
-static target_ulong sparc_prom_idle_pcs[] = {
-    0xffd16750, 0xffd20170, 0xffd20174, 0xffd2ba10, 0xffef0000
-};
-#define SPARC_SUNOS_IDLE_PC 0xf01294f8
-
-// Architecture interface implementation - provides PC/NPC to generic idle detector
+// Architecture interface: extract PC/NPC from SPARC CPU state
 void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
 {
     CPUSPARCState *env = cpu_env(cpu);
     state->pc = env->pc;
-    state->next_pc = env->npc;  // SPARC has real NPC register (delayed branch)
+    state->next_pc = env->npc;  // SPARC has delayed branch architecture
 }
-
-// Register SPARC-specific fallback idle PCs with generic system
-static void sparc_cpu_register_idle_pcs(void)
-{
-    static bool registered = false;
-    if (!registered) {
-        cpu_idle_register_fallback_pcs(
-            sparc_prom_idle_pcs,
-            ARRAY_SIZE(sparc_prom_idle_pcs),
-            SPARC_SUNOS_IDLE_PC
-        );
-        cpu_idle_init();
-        registered = true;
-    }
-}
-
-static QemuOptsList sparc_cpu_opts = {
-    .name = "sparc-cpu",
-    .implied_opt_name = "cpu",
-    .head = QTAILQ_HEAD_INITIALIZER(sparc_cpu_opts.head),
-    .desc = {
-        {
-            .name = "debug",
-            .type = QEMU_OPT_BOOL,
-            .help = "Enable SPARC CPU debug output",
-        },
-        { /* end of list */ }
-    },
-};
 
 static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 {
@@ -839,12 +801,6 @@ static bool sparc_cpu_has_work(CPUState *cs)
            cpu_interrupts_enabled(cpu_env(cs));
 }
 
-// CPU execution enter hook - delegates to generic idle detector
-static void sparc_cpu_exec_enter_hook(CPUState *cs)
-{
-    cpu_idle_exec_hook(cs);  // Call architecture-agnostic implementation
-}
-
 static int sparc_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
     CPUSPARCState *env = cpu_env(cs);
@@ -967,10 +923,6 @@ static void sparc_cpu_initfn(Object *obj)
     if (scc->cpu_def) {
         env->def = *scc->cpu_def;
     }
-    sparc_cpu_parse_opts();
-
-    // Initialize idle detection system (registers fallback PCs, loads learned data)
-    sparc_cpu_register_idle_pcs();
 }
 
 static void sparc_get_nwindows(Object *obj, Visitor *v, const char *name,
@@ -1066,7 +1018,7 @@ static const TCGCPUOps sparc_tcg_ops = {
     .translate_code = sparc_translate_code,
     .synchronize_from_tb = sparc_cpu_synchronize_from_tb,
     .restore_state_to_opc = sparc_restore_state_to_opc,
-    .cpu_exec_enter = sparc_cpu_exec_enter_hook,
+    .cpu_exec_enter = cpu_idle_exec_hook,
 
 #ifndef CONFIG_USER_ONLY
     .tlb_fill = sparc_cpu_tlb_fill,
@@ -1149,11 +1101,6 @@ static void sparc_register_cpudef_type(const struct sparc_def_t *def)
     g_free(typename);
 }
 
-static void sparc_cpu_register_opts(void)
-{
-    qemu_add_opts(&sparc_cpu_opts);
-}
-
 static void sparc_cpu_register_types(void)
 {
     int i;
@@ -1162,19 +1109,9 @@ static void sparc_cpu_register_types(void)
     for (i = 0; i < ARRAY_SIZE(sparc_defs); i++) {
         sparc_register_cpudef_type(&sparc_defs[i]);
     }
-    sparc_cpu_register_opts();
 }
 
 type_init(sparc_cpu_register_types)
-
-static void sparc_cpu_parse_opts(void)
-{
-    QemuOpts *opts = qemu_opts_find(&sparc_cpu_opts, NULL);
-    if (opts) {
-        bool debug = qemu_opt_get_bool(opts, "debug", false);
-        cpu_idle_set_debug(debug);  // Use generic function
-    }
-}
 
 // HMP handlers now in accel/tcg/cpu-idle.c (architecture-agnostic)
 

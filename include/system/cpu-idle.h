@@ -132,21 +132,10 @@ void cpu_idle_stop_learning(void);
 /**
  * cpu_idle_init - Initialize idle detection system
  *
- * Called during QEMU startup. Loads previously learned patterns from disk.
+ * Called automatically on first execution. Loads previously learned patterns
+ * from disk (qemu-<arch>-idle-pcs.dat in current dir or /tmp).
  */
 void cpu_idle_init(void);
-
-/**
- * cpu_idle_register_fallback_pcs - Register hardcoded fallback idle PCs
- * @prom_pcs: Array of PROM/firmware idle PC values
- * @prom_count: Number of PROM idle PCs
- * @os_idle_pc: OS idle loop PC value
- *
- * Called by architecture code to provide fallback idle PCs when no learned
- * data is available. These are used as a starting point before learning.
- */
-void cpu_idle_register_fallback_pcs(target_ulong *prom_pcs, int prom_count,
-									 target_ulong os_idle_pc);
 
 #endif /* QEMU_CPU_IDLE_H */
 

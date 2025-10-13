@@ -1926,58 +1926,68 @@ static void sun4c_hw_init(MachineState *machine, const struct sun4c_hwdef *hwdef
     sysbus_mmio_map(s, 0, hwdef->nvram_base);
     nvram = NVRAM(dev);
 
-    /* TODO: Modernize remaining device init functions */
-    #if 0  /* Disabled until modernized */
-    if (graphic_depth != 8 && graphic_depth != 24) {
-        error_report("Unsupported depth: %d", graphic_depth);
-        exit (1);
-    }
-    tcx_init(hwdef->tcx_base, 0x00100000, graphic_width, graphic_height,
-             graphic_depth);
+    /* Keyboard/Mouse serial port */
+    DeviceState *ms_kb_orgate;
+    dev = qdev_new(TYPE_ESCC);
+    qdev_prop_set_uint32(dev, "disabled", !machine->enable_graphics);
+    qdev_prop_set_uint32(dev, "frequency", ESCC_CLOCK);
+    qdev_prop_set_uint32(dev, "it_shift", 1);
+    qdev_prop_set_chr(dev, "chrB", NULL);
+    qdev_prop_set_chr(dev, "chrA", NULL);
+    qdev_prop_set_uint32(dev, "chnBtype", escc_mouse);
+    qdev_prop_set_uint32(dev, "chnAtype", escc_kbd);
+    s = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(s, &error_fatal);
+    sysbus_mmio_map(s, 0, hwdef->ms_kb_base);
 
-    slavio_serial_ms_kbd_init(hwdef->ms_kb_base, slavio_irq[1],
-                              !machine->enable_graphics, ESCC_CLOCK, 1);
+    /* Logically OR both its IRQs together */
+    ms_kb_orgate = qdev_new(TYPE_OR_IRQ);
+    object_property_set_int(OBJECT(ms_kb_orgate), "num-lines", 2, &error_fatal);
+    qdev_realize_and_unref(ms_kb_orgate, NULL, &error_fatal);
+    sysbus_connect_irq(s, 0, qdev_get_gpio_in(ms_kb_orgate, 0));
+    sysbus_connect_irq(s, 1, qdev_get_gpio_in(ms_kb_orgate, 1));
+    qdev_connect_gpio_out(ms_kb_orgate, 0, slavio_irq[1]);
 
+    /* Floppy and slavio_misc */
     if (hwdef->fd_base != (hwaddr)-1) {
         /* there is zero or one floppy drive */
         memset(fd, 0, sizeof(fd));
         fd[0] = drive_get(IF_FLOPPY, 0, 0);
-        sun4m_fdctrl_init(slavio_irq[1], hwdef->fd_base, fd,
-                          &fdc_tc);
+        sun4m_fdctrl_init(slavio_irq[1], hwdef->fd_base, fd, &fdc_tc);
     } else {
         fdc_tc = *qemu_allocate_irqs(dummy_fdc_tc, NULL, 1);
     }
 
     slavio_misc_init(0, hwdef->aux1_base, 0, slavio_irq[1], fdc_tc);
 
-    if (drive_get_max_bus(IF_SCSI) > 0) {
-        error_report("too many SCSI bus");
-        exit(1);
+    /* Timer (critical for interrupts and timing) */
+    /* sun4c has only 1 CPU, pass cpu_irqs which contains per-PIL IRQs */
+    slavio_timer_init_all(hwdef->counter_base, slavio_irq[1], cpu_irqs, 1);
+
+    /* TODO: Modernize graphics (TCX) */
+    #if 0  /* Graphics disabled until modernized */
+    if (graphic_depth != 8 && graphic_depth != 24) {
+        error_report("Unsupported depth: %d", graphic_depth);
+        exit (1);
     }
-
-    esp_init(hwdef->esp_base, 2,
-             espdma_memory_read, espdma_memory_write,
-             espdma, espdma_irq, &esp_reset, &dma_enable);
-
-    qdev_connect_gpio_out(espdma, 0, esp_reset);
-    qdev_connect_gpio_out(espdma, 1, dma_enable);
+    tcx_init(hwdef->tcx_base, 0x00100000, graphic_width, graphic_height,
+             graphic_depth);
     #endif
 
     kernel_size = sun4m_load_kernel(machine->kernel_filename,
                                     machine->initrd_filename,
                                     machine->ram_size, &initrd_size);
 
-    /* TODO: Modernize nvram_init, fw_cfg_init and other device init calls */
-    (void)kernel_size; (void)initrd_size; (void)nvram; (void)fw_cfg;
+    /* Initialize NVRAM with boot configuration (reuse mac from DMA init above) */
+    nvram_init(nvram, mac.a, machine->kernel_cmdline,
+               machine->boot_config.order, machine->ram_size, kernel_size,
+               graphic_width, graphic_height, graphic_depth,
+               hwdef->nvram_machine_id, "Sun4c");
+
+    /* TODO: Modernize fw_cfg init */
+    (void)initrd_size; (void)fw_cfg;
     
-    /* Note: Graphics, serial, nvram, fw_cfg still stubbed out */
-    /* Machine will attempt to boot but may fail without these devices */
-    
-    #if 0  /* Disabled until device init functions are modernized */
-    nvram_init(nvram, (uint8_t *)&nd_table[0].macaddr, machine->kernel_cmdline,
-               machine->boot_config.order, machine->ram_size, kernel_size, graphic_width,
-               graphic_height, graphic_depth, hwdef->nvram_machine_id,
-               "Sun4c");
+    #if 0  /* fw_cfg disabled until modernized */
 
     fw_cfg = fw_cfg_init(0, 0, CFG_ADDR, CFG_ADDR + 2);
     fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, (uint16_t)1);

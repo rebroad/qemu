@@ -735,6 +735,21 @@ SRST
 ERST
 
     {
+        .name       = "icount-shift",
+        .args_type  = "shift:i",
+        .params     = "shift_value",
+        .help       = "set icount shift value (0-15, -1 for auto mode)",
+        .cmd        = hmp_icount_shift_set,
+    },
+
+SRST
+``icount-shift`` *shift_value*
+  Set the icount shift value dynamically. The shift determines virtual time
+  per instruction (2^shift ns/inst). Lower=faster, higher=slower.
+  Use -1 to re-enable auto-adjust mode. Range: -1 to 15.
+ERST
+
+    {
         .name       = "cpu-idle-start-prom-learning",
         .args_type  = "",
         .params     = "",

@@ -67,5 +67,6 @@ void hmp_cpu_idle_start_os_learning(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_start_prom_learning(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_start_busy_learning(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_stop_learning(Monitor *mon, const QDict *qdict);
+void hmp_icount_shift_set(Monitor *mon, const QDict *qdict);
 
 #endif /* MONITOR_HMP_TARGET_H */

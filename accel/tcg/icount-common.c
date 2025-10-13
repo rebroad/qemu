@@ -51,13 +51,13 @@ static bool icount_sleep = true;
 /* Do not count executed instructions */
 ICountMode use_icount = ICOUNT_DISABLED;
 
-static void icount_enable_precise(void)
+void icount_enable_precise(void)
 {
     /* Fixed conversion of insn to ns via "shift" option */
     use_icount = ICOUNT_PRECISE;
 }
 
-static void icount_enable_adaptive(void)
+void icount_enable_adaptive(void)
 {
     /* Runtime adaptive algorithm to compute shift */
     use_icount = ICOUNT_ADAPTATIVE;
@@ -188,15 +188,23 @@ static void icount_adjust(void)
         && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2
         && timers_state.icount_time_shift > 0) {
         /* The guest is getting too far ahead.  Slow time down.  */
+        int old_shift = timers_state.icount_time_shift;
         qatomic_set(&timers_state.icount_time_shift,
                     timers_state.icount_time_shift - 1);
+        fprintf(stderr, "[ICOUNT-AUTO] Guest ahead by %"PRId64"ns, shift %d→%d (slowing down, %dns→%dns/inst)\n",
+                delta, old_shift, timers_state.icount_time_shift,
+                1 << old_shift, 1 << timers_state.icount_time_shift);
     }
     if (delta < 0
         && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2
         && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT) {
         /* The guest is getting too far behind.  Speed time up.  */
+        int old_shift = timers_state.icount_time_shift;
         qatomic_set(&timers_state.icount_time_shift,
                     timers_state.icount_time_shift + 1);
+        fprintf(stderr, "[ICOUNT-AUTO] Guest behind by %"PRId64"ns, shift %d→%d (speeding up, %dns→%dns/inst)\n",
+                -delta, old_shift, timers_state.icount_time_shift,
+                1 << old_shift, 1 << timers_state.icount_time_shift);
     }
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,
@@ -225,6 +233,16 @@ int64_t icount_round(int64_t count)
 {
     int shift = qatomic_read(&timers_state.icount_time_shift);
     return (count + (1 << shift) - 1) >> shift;
+}
+
+void icount_set_shift(int shift)
+{
+    qatomic_set(&timers_state.icount_time_shift, shift);
+}
+
+int icount_get_shift(void)
+{
+    return qatomic_read(&timers_state.icount_time_shift);
 }
 
 static void icount_warp_rt(void)

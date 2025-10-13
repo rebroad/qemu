@@ -22,6 +22,9 @@
 #include "qapi/qmp/qdict.h"
 #include <sys/stat.h>
 
+/* MAX_ICOUNT_SHIFT from icount-common.c */
+#define MAX_ICOUNT_SHIFT 10
+
 /* Global debug flag */
 static bool cpu_idle_debug = false;
 
@@ -813,6 +816,33 @@ void hmp_cpu_idle_stop_learning(Monitor *mon, const QDict *qdict)
 {
     cpu_idle_stop_learning_internal();
     monitor_printf(mon, "Stopped learning mode\n");
+}
+
+void hmp_icount_shift_set(Monitor *mon, const QDict *qdict)
+{
+    int shift = qdict_get_int(qdict, "shift");
+
+    if (!icount_enabled()) {
+        monitor_printf(mon, "Error: icount not enabled (use -icount at startup)\n");
+        return;
+    }
+
+    if (shift < -1 || shift > MAX_ICOUNT_SHIFT) {
+        monitor_printf(mon, "Error: shift must be -1 (auto) or 0-%d\n", MAX_ICOUNT_SHIFT);
+        return;
+    }
+
+    if (shift == -1) {
+        // Re-enable auto-adjust mode
+        icount_enable_adaptive();
+        monitor_printf(mon, "icount: auto-adjust mode enabled (will dynamically tune shift)\n");
+    } else {
+        // Set fixed shift - disable auto adjust first
+        icount_enable_precise();
+        icount_set_shift(shift);
+        monitor_printf(mon, "icount shift set to %d (2^%d = %d ns/instruction)\n",
+                      shift, shift, 1 << shift);
+    }
 }
 
 // ============================================================================

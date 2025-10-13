@@ -68,6 +68,12 @@ bool icount_configure(QemuOpts *opts, Error **errp);
 /* used by tcg vcpu thread to calc icount budget */
 int64_t icount_round(int64_t count);
 
+/* runtime control of icount shift value and mode */
+void icount_set_shift(int shift);
+int icount_get_shift(void);
+void icount_enable_precise(void);
+void icount_enable_adaptive(void);
+
 /* if the CPUs are idle, start accounting real time to virtual clock. */
 void icount_start_warp_timer(void);
 void icount_account_warp_timer(void);

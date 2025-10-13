@@ -22,11 +22,11 @@
 #include "qapi/qmp/qdict.h"
 #include <sys/stat.h>
 
-/* Debug output helper - use stderr to not interfere with serial console */
-#define DEBUG_PRINTF(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while(0)
-
 /* Global debug flag */
 static bool cpu_idle_debug = false;
+
+/* Debug output helper - use stderr to not interfere with serial console */
+#define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
 
 /* PC learning system for idle detection */
 typedef enum {

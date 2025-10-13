@@ -75,10 +75,7 @@ static const AccelOpsClass *cpus_accel;
 
 bool cpu_is_stopped(CPUState *cpu)
 {
-    if (cpu->stopped || !runstate_is_running()) {
-        return true;
-    }
-    return false;
+    return cpu->stopped || !runstate_is_running();
 }
 
 bool cpu_work_list_empty(CPUState *cpu)
@@ -199,7 +196,6 @@ void cpu_synchronize_pre_loadvm(CPUState *cpu)
 
 bool cpus_are_resettable(void)
 {
-    // TODO - surely this function never returns false!?
     if (cpus_accel->cpus_are_resettable) {
         return cpus_accel->cpus_are_resettable();
     }

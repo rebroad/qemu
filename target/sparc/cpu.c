@@ -835,24 +835,15 @@ static void sparc_restore_state_to_opc(CPUState *cs,
 
 static bool sparc_cpu_has_work(CPUState *cs)
 {
-    // This is only called when cpu->halted is true
-    // For idle detection during normal execution, see sparc_cpu_exec_enter_hook
-
-    // Simple check: do we have pending interrupts?
     return (cs->interrupt_request & CPU_INTERRUPT_HARD) &&
            cpu_interrupts_enabled(cpu_env(cs));
 }
-
 
 // CPU execution enter hook - delegates to generic idle detector
 static void sparc_cpu_exec_enter_hook(CPUState *cs)
 {
     cpu_idle_exec_hook(cs);  // Call architecture-agnostic implementation
 }
-
-
-// Add function to toggle debug logging
-// sparc_cpu_set_debug moved to accel/tcg/cpu-idle.c (now cpu_idle_set_debug)
 
 static int sparc_cpu_mmu_index(CPUState *cs, bool ifetch)
 {

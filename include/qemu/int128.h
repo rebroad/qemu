@@ -1,7 +1,6 @@
 #ifndef INT128_H
 #define INT128_H
 
-#include <assert.h>
 #include "qemu/bswap.h"
 
 /*

@@ -85,6 +85,7 @@
 #include "audio/audio.h"
 #include "system/cpus.h"
 #include "system/cpu-timers.h"
+#include "system/cpu-idle.h"
 #include "migration/colo.h"
 #include "migration/postcopy-ram.h"
 #include "system/kvm.h"
@@ -3385,6 +3386,9 @@ void qemu_init(int argc, char **argv)
             case QEMU_OPTION_no_shutdown:
                 olist = qemu_find_opts("action");
                 qemu_opts_parse_noisily(olist, "shutdown=pause", false);
+                break;
+            case QEMU_OPTION_cpu_idle_debug:
+                cpu_idle_set_debug(true);
                 break;
             case QEMU_OPTION_uuid:
                 if (qemu_uuid_parse(optarg, &qemu_uuid) < 0) {

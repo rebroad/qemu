@@ -1867,17 +1867,17 @@ static void sun4c_hw_init(MachineState *machine, const struct sun4c_hwdef *hwdef
     iommu = iommu_init(hwdef->iommu_base, hwdef->iommu_version,
                        slavio_irq[1]);
 
-    /* TODO: Modernize DMA init - signature has changed */
-    #if 0  /* Disabled until modernized */
-    espdma = sparc32_dma_init(hwdef->dma_base, slavio_irq[2],
-                              iommu, &espdma_irq, 0);
-
-    ledma = sparc32_dma_init(hwdef->dma_base + 16ULL,
-                             slavio_irq[3], iommu, &ledma_irq, 1);
-    #else
-    (void)iommu; (void)espdma; (void)ledma; (void)espdma_irq; (void)ledma_irq;
+    /* Modern DMA creates ESP and LANCE as children */
+    MACAddr mac;
+    void *dma = sparc32_dma_init(hwdef->dma_base,
+                                  hwdef->esp_base, slavio_irq[2],
+                                  hwdef->le_base, slavio_irq[3],
+                                  &mac);
+    
+    /* Suppress unused variable warnings */
+    (void)iommu; (void)dma;
+    (void)espdma; (void)ledma; (void)espdma_irq; (void)ledma_irq;
     (void)esp_reset; (void)dma_enable; (void)fd; (void)fdc_tc;
-    #endif
 
     /* TODO: Modernize device init functions */
     #if 0  /* Disabled until modernized */
@@ -1932,7 +1932,8 @@ static void sun4c_hw_init(MachineState *machine, const struct sun4c_hwdef *hwdef
     /* TODO: Modernize nvram_init, fw_cfg_init and other device init calls */
     (void)kernel_size; (void)initrd_size; (void)nvram; (void)fw_cfg;
     
-    error_report("sun4c machine not fully ported to modern QEMU yet");
+    /* Note: Graphics, serial, nvram, fw_cfg still stubbed out */
+    /* Machine will attempt to boot but may fail without these devices */
     
     #if 0  /* Disabled until device init functions are modernized */
     nvram_init(nvram, (uint8_t *)&nd_table[0].macaddr, machine->kernel_cmdline,

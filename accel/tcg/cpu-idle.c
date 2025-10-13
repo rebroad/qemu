@@ -45,8 +45,8 @@ static LearningMode learning_mode  = LEARNING_OFF;
 
 /* PC candidate structure */
 typedef struct {
-    target_ulong pc;
-    target_ulong npc;
+    uint64_t pc;
+    uint64_t npc;
     uint32_t count;           // Raw count from learning
     uint32_t effective_count; // Confidence-adjusted count
 } PCCandidate;
@@ -491,8 +491,8 @@ void cpu_idle_exec_hook(CPUState *cs)
     const char *arch_name = get_arch_name_from_cpu(cs);
     CPUPCState pc_state;
     cpu_get_pc_state(cs, &pc_state);
-    static target_ulong last_pc = 0;
-    static target_ulong last_npc = 0;
+    static uint64_t last_pc = 0;
+    static uint64_t last_npc = 0;
     static int total_sleep_us = 0;  // Track total sleep time per second
     static int min_sleep_us = INT_MAX;  // Track minimum sleep per second
     static int max_sleep_us = 0;  // Track maximum sleep per second
@@ -513,8 +513,8 @@ void cpu_idle_exec_hook(CPUState *cs)
 
     // Learning mode: collect PC/NPC frequencies (DRY approach)
     static int learning_consecutive_count = 0;
-    static target_ulong learning_last_pc = 0;
-    static target_ulong learning_last_npc = 0;
+    static uint64_t learning_last_pc = 0;
+    static uint64_t learning_last_npc = 0;
 
     if (learning_mode != LEARNING_OFF) {
         PCCollection *coll = &collections[learning_mode - 1];  // mode-1 since OFF has no collection

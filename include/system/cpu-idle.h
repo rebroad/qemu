@@ -37,16 +37,19 @@
 #ifndef QEMU_CPU_IDLE_H
 #define QEMU_CPU_IDLE_H
 
-#include "exec/cpu-defs.h"  /* For target_ulong */
-#include "hw/core/cpu.h"
+#include <stdint.h>
+#include <stdbool.h>
 
 /*
  * IMPLEMENTATION STATUS:
  * ✅ COMPLETE! Full implementation in accel/tcg/cpu-idle.c
- * ✅ SPARC using generic system via 75 lines of glue code
+ * ✅ SPARC using generic system via 7 lines of glue code
  * ✅ Architecture name auto-detected from CPU typename
  * 🚀 Ready for other architectures (6502, x86, ARM, etc.)
  */
+
+/* Forward declarations to avoid pulling in architecture-specific headers */
+typedef struct CPUState CPUState;
 
 /**
  * CPUPCState - Architecture-agnostic program counter state
@@ -58,10 +61,12 @@
  * - 6502/x86/ARM (immediate): Uses PC only, set next_pc = 0 to disable
  *
  * When next_pc is 0, idle detection uses only PC for pattern matching.
+ * 
+ * Note: Uses uint64_t to be architecture-agnostic (works for 32-bit and 64-bit targets)
  */
 typedef struct {
-	target_ulong pc;       /* Current program counter */
-	target_ulong next_pc;  /* Next PC (delayed branch archs) or 0 (immediate branch) */
+	uint64_t pc;       /* Current program counter */
+	uint64_t next_pc;  /* Next PC (delayed branch archs) or 0 (immediate branch) */
 } CPUPCState;
 
 /**

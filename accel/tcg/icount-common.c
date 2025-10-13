@@ -176,48 +176,66 @@ static void icount_adjust(void)
         return;
     }
 
-    seqlock_write_lock(&timers_state.vm_clock_seqlock,
-                       &timers_state.vm_clock_lock);
-    cur_time = REPLAY_CLOCK_LOCKED(REPLAY_CLOCK_VIRTUAL_RT,
-                                   cpu_get_clock_locked());
-    cur_icount = icount_get_locked();
+    // Calculate speed percentage for debug output
+    static int64_t last_real_time_ns = 0;
+    static int64_t last_vm_time_ns = 0;
+    int speed_percent = 0;
 
-    delta = cur_icount - cur_time;
-    /* FIXME: This is a very crude algorithm, somewhat prone to oscillation.  */
-    if (delta > 0
-        && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2
-        && timers_state.icount_time_shift > 0) {
-        /* The guest is getting too far ahead.  Slow time down.  */
-        int old_shift = timers_state.icount_time_shift;
-        qatomic_set(&timers_state.icount_time_shift,
-                    timers_state.icount_time_shift - 1);
-        fprintf(stderr, "[ICOUNT-AUTO] Guest ahead by %"PRId64"ns, shift %d→%d (slowing down, %dns→%dns/inst)\n",
-                delta, old_shift, timers_state.icount_time_shift,
-                1 << old_shift, 1 << timers_state.icount_time_shift);
+    int64_t current_real_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t current_vm_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (last_real_time_ns > 0) {
+        int64_t real_delta_ns = current_real_ns - last_real_time_ns;
+        int64_t vm_delta_ns = current_vm_ns - last_vm_time_ns;
+        if (real_delta_ns > 0) {
+            speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+        }
     }
-    if (delta < 0
-        && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2
-        && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT) {
+    last_real_time_ns = current_real_ns;
+    last_vm_time_ns = current_vm_ns;
+
+    seqlock_write_lock(&timers_state.vm_clock_seqlock, &timers_state.vm_clock_lock);
+    cur_time = REPLAY_CLOCK_LOCKED(REPLAY_CLOCK_VIRTUAL_RT, cpu_get_clock_locked());
+    cur_icount = icount_get_locked();
+    delta = cur_icount - cur_time;
+
+    /* FIXME: This is a very crude algorithm, somewhat prone to oscillation.  */
+    int direction = 0;
+    if (delta > 0 && timers_state.icount_time_shift > 0
+                && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2) {
+        /* The guest is getting too far ahead.  Slow time down.  */
+        direction = -1;
+    } else if (delta < 0 && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT
+                && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2) {
         /* The guest is getting too far behind.  Speed time up.  */
-        int old_shift = timers_state.icount_time_shift;
-        qatomic_set(&timers_state.icount_time_shift,
-                    timers_state.icount_time_shift + 1);
-        fprintf(stderr, "[ICOUNT-AUTO] Guest behind by %"PRId64"ns, shift %d→%d (speeding up, %dns→%dns/inst)\n",
-                -delta, old_shift, timers_state.icount_time_shift,
-                1 << old_shift, 1 << timers_state.icount_time_shift);
+        direction = 1;
+    }
+
+    int old_shift, new_shift;
+    if (direction != 0) {
+        old_shift = timers_state.icount_time_shift;
+        new_shift = old_shift + direction;
+        qatomic_set(&timers_state.icount_time_shift, new_shift);
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char timestamp[20];
+        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", tm_info);
+        const char *ahead_behind = direction < 0 ? "ahead" : "behind";
+        const char *speedword    = direction < 0 ? "slows" : "speeds";
+        int64_t shown_delta = direction < 0 ? delta : -delta;
+        fprintf(stderr, "[%s][ICOUNT-AUTO] spd=%d%% vtime %s %"PRId64"ns, shift %d→%d (%dns→%dns/inst, vtime %s)\n",
+                timestamp, speed_percent, ahead_behind, shown_delta, old_shift, new_shift,
+                1 << old_shift, 1 << new_shift, speedword);
     }
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,
-                    cur_icount - (timers_state.qemu_icount
-                                  << timers_state.icount_time_shift));
-    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
-                         &timers_state.vm_clock_lock);
+                    cur_icount - (timers_state.qemu_icount << timers_state.icount_time_shift));
+    seqlock_write_unlock(&timers_state.vm_clock_seqlock, &timers_state.vm_clock_lock);
 }
 
 static void icount_adjust_rt(void *opaque)
 {
-    timer_mod(timers_state.icount_rt_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL_RT) + 1000);
+    timer_mod(timers_state.icount_rt_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL_RT) + 1000);
     icount_adjust();
 }
 

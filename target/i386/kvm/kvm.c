@@ -5630,7 +5630,6 @@ int kvm_arch_process_async_events(CPUState *cs)
 
 static int kvm_handle_halt(X86CPU *cpu)
 {
-	// REBTODO - similar to sparc_cpu_exec_interrupt or sparc_cpu_has_work
     CPUState *cs = CPU(cpu);
     CPUX86State *env = &cpu->env;
 

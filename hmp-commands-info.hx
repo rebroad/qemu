@@ -827,6 +827,19 @@ SRST
 ERST
 
     {
+        .name       = "icount",
+        .args_type  = "",
+        .params     = "",
+        .help       = "show icount mode and current shift value",
+        .cmd        = hmp_info_icount,
+    },
+
+SRST
+  ``info icount``
+    Display icount mode (disabled/precise/adaptive) and current shift value.
+ERST
+
+    {
         .name       = "dirty_rate",
         .args_type  = "",
         .params     = "",

@@ -818,6 +818,23 @@ void hmp_cpu_idle_stop_learning(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "Stopped learning mode\n");
 }
 
+void hmp_info_icount(Monitor *mon, const QDict *qdict)
+{
+    ICountMode mode = icount_enabled();
+
+    if (mode == ICOUNT_DISABLED) {
+        monitor_printf(mon, "icount: disabled\n");
+        return;
+    }
+
+    int shift = icount_get_shift();
+    const char *mode_str = (mode == ICOUNT_PRECISE) ? "precise (fixed)" : "adaptive (auto)";
+
+    monitor_printf(mon, "icount: %s\n", mode_str);
+    monitor_printf(mon, "  shift: %d (2^%d = %d ns/instruction)\n",
+                  shift, shift, 1 << shift);
+}
+
 void hmp_icount_shift_set(Monitor *mon, const QDict *qdict)
 {
     int shift = qdict_get_int(qdict, "shift");

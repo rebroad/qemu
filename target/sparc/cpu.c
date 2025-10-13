@@ -29,13 +29,6 @@
 #include "tcg/tcg.h"
 #include "fpu/softfloat.h"
 #include "target/sparc/translate.h"
-#include "qemu/option.h"
-#include "qemu/config-file.h"
-#include "monitor/hmp.h"
-#include "monitor/hmp-target.h"
-#include "monitor/monitor-internal.h"
-#include "qapi/qmp/qdict.h"
-#include "system/cpu-timers.h"
 #include "system/cpu-idle.h"
 
 // ============================================================================
@@ -1112,6 +1105,3 @@ static void sparc_cpu_register_types(void)
 }
 
 type_init(sparc_cpu_register_types)
-
-// HMP handlers now in accel/tcg/cpu-idle.c (architecture-agnostic)
-

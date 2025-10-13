@@ -18,7 +18,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/log.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
 #include "qemu/timer.h"
@@ -203,15 +202,14 @@ target_ulong helper_tsubcctv(CPUSPARCState *env, target_ulong src1,
 }
 
 #ifndef TARGET_SPARC64
-void helper_power_down(CPUSPARCState *env) {
-    qemu_log("%s\n", __func__);
+void helper_power_down(CPUSPARCState *env)
+{
     CPUState *cs = env_cpu(env);
 
     cs->halted = 1;
     cs->exception_index = EXCP_HLT;
     env->pc = env->npc;
     env->npc = env->pc + 4;
-
     cpu_loop_exit(cs);
 }
 

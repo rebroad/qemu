@@ -786,7 +786,4 @@ static inline uint64_t sparc64_tstate(CPUSPARCState *env)
 }
 #endif
 
-// Debug control
-void sparc_cpu_set_debug(bool enable);
-
 #endif

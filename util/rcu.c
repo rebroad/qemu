@@ -254,14 +254,6 @@ retry:
 
 static void *call_rcu_thread(void *opaque)
 {
-	static time_t last_print_time = 0;
-	static int sleep_count = 0;
-	time_t current_time = time(NULL);
-	if (current_time != last_print_time) {
-	    printf("%s: sleep_count = %d\n", __func__, sleep_count);
-		last_print_time = current_time;
-		sleep_count = 0;
-	}
     struct rcu_head *node;
 
     rcu_register_thread();
@@ -275,7 +267,7 @@ static void *call_rcu_thread(void *opaque)
          * added before synchronize_rcu() starts.
          */
         while (n == 0 || (n < RCU_CALL_MIN_SIZE && ++tries <= 5)) {
-            g_usleep(10000); sleep_count++;
+            g_usleep(10000);
             if (n == 0) {
                 qemu_event_reset(&rcu_call_ready_event);
                 n = qatomic_read(&rcu_call_count);

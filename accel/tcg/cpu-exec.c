@@ -709,15 +709,11 @@ static inline bool cpu_handle_halt(CPUState *cpu)
         bool leave_halt = tcg_ops->cpu_exec_halt(cpu);
 
         if (!leave_halt) {
-	        qemu_log("%s: 1\n", __func__);
             return true;
-        } else
-	        qemu_log("%s: 1->0\n", __func__);
+        }
 
         cpu->halted = 0;
     }
-#else
-	qemu_log("%s: ?\n", __func__);
 #endif /* !CONFIG_USER_ONLY */
 
     return false;
@@ -854,7 +850,6 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
         } else if (interrupt_request & CPU_INTERRUPT_HALT) {
             replay_interrupt();
             cpu->interrupt_request &= ~CPU_INTERRUPT_HALT;
-	        qemu_log("%s: %d->1\n", __func__, cpu->halted);
             cpu->halted = 1;
             cpu->exception_index = EXCP_HLT;
             bql_unlock();

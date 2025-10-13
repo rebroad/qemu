@@ -216,15 +216,12 @@ static void icount_adjust(void)
         old_shift = timers_state.icount_time_shift;
         new_shift = old_shift + direction;
         qatomic_set(&timers_state.icount_time_shift, new_shift);
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-        char timestamp[20];
-        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", tm_info);
+        int64_t ms = (current_real_ns / 1000000) % 10000;
         const char *ahead_behind = direction < 0 ? "ahead" : "behind";
         const char *speedword    = direction < 0 ? "slows" : "speeds";
         int64_t shown_delta = direction < 0 ? delta : -delta;
-        fprintf(stderr, "[%s][ICOUNT-AUTO] spd=%d%% vtime %s %"PRId64"ns, shift %d→%d (%dns→%dns/inst, vtime %s)\n",
-                timestamp, speed_percent, ahead_behind, shown_delta, old_shift, new_shift,
+        fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %"PRId64"ns, shift %d→%d (%dns→%dns/inst, vtime %s)\n",
+                ms, speed_percent, ahead_behind, shown_delta, old_shift, new_shift,
                 1 << old_shift, 1 << new_shift, speedword);
     }
     timers_state.last_delta = delta;

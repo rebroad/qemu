@@ -158,22 +158,24 @@ struct sun4c_hwdef {
     uint8_t nvram_machine_id;
 };
 
-/* DMA stub functions for sun4c/sun4d */
-int DMA_get_channel_mode (int nchan)
+/* DMA stub functions for sun4c/sun4d - only needed if those machines are enabled */
+#if 0  /* Currently unused - sun4c/sun4d use modern DMA or are disabled */
+static int DMA_get_channel_mode (int nchan)
 {
     return 0;
 }
-int DMA_read_memory (int nchan, void *buf, int pos, int size)
+static int DMA_read_memory (int nchan, void *buf, int pos, int size)
 {
     return 0;
 }
-int DMA_write_memory (int nchan, void *buf, int pos, int size)
+static int DMA_write_memory (int nchan, void *buf, int pos, int size)
 {
     return 0;
 }
-void DMA_hold_DREQ (int nchan) {}
-void DMA_release_DREQ (int nchan) {}
-void DMA_schedule(int nchan) {}
+static void DMA_hold_DREQ (int nchan) {}
+static void DMA_release_DREQ (int nchan) {}
+static void DMA_schedule(int nchan) {}
+#endif
 
 #define TYPE_SUN4M_MACHINE MACHINE_TYPE_NAME("sun4m-common")
 DECLARE_CLASS_CHECKERS(Sun4mMachineClass, SUN4M_MACHINE, TYPE_SUN4M_MACHINE)
@@ -1544,6 +1546,8 @@ static const TypeInfo sun4m_machine_types[] = {
 
 DEFINE_TYPES(sun4m_machine_types)
 
+/* sun4d machines disabled pending device modernization */
+#if 0
 static const struct sun4d_hwdef sun4d_hwdefs[] = {
     /* SS-1000 */
     {
@@ -1599,6 +1603,10 @@ static const struct sun4d_hwdef sun4d_hwdefs[] = {
     },
 };
 
+/* sun4d machines disabled pending device modernization */
+#endif  /* 0 - sun4d_hwdefs */
+
+#if 0  /* sun4d functions disabled */
 static DeviceState *sbi_init(hwaddr addr, qemu_irq **parent_irq)
 {
     DeviceState *dev;
@@ -1764,6 +1772,9 @@ static void sun4d_hw_init(MachineState *machine, const struct sun4d_hwdef *hwdef
     #endif
 }
 
+/* End sun4d functions */
+#endif  /* 0 - sun4d functions */
+
 /* TODO: Convert sun4d machines to modern TypeInfo-based registration */
 #if 0  /* Disabled - needs modern machine class conversion */
 
@@ -1879,7 +1890,43 @@ static void sun4c_hw_init(MachineState *machine, const struct sun4c_hwdef *hwdef
     (void)espdma; (void)ledma; (void)espdma_irq; (void)ledma_irq;
     (void)esp_reset; (void)dma_enable; (void)fd; (void)fdc_tc;
 
-    /* TODO: Modernize device init functions */
+    /* Serial ports for console */
+    DeviceState *serial_orgate;
+    SysBusDevice *s;
+    
+    /* Slavio TTYA (base+4, Linux ttyS0) is the first QEMU serial device
+       Slavio TTYB (base+0, Linux ttyS1) is the second QEMU serial device */
+    dev = qdev_new(TYPE_ESCC);
+    qdev_prop_set_uint32(dev, "disabled", 0);
+    qdev_prop_set_uint32(dev, "frequency", ESCC_CLOCK);
+    qdev_prop_set_uint32(dev, "it_shift", 1);
+    qdev_prop_set_chr(dev, "chrB", serial_hd(1));
+    qdev_prop_set_chr(dev, "chrA", serial_hd(0));
+    qdev_prop_set_uint32(dev, "chnBtype", escc_serial);
+    qdev_prop_set_uint32(dev, "chnAtype", escc_serial);
+
+    s = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(s, &error_fatal);
+    sysbus_mmio_map(s, 0, hwdef->serial_base);
+
+    /* Logically OR both its IRQs together */
+    serial_orgate = qdev_new(TYPE_OR_IRQ);
+    object_property_set_int(OBJECT(serial_orgate), "num-lines", 2, &error_fatal);
+    qdev_realize_and_unref(serial_orgate, NULL, &error_fatal);
+    sysbus_connect_irq(s, 0, qdev_get_gpio_in(serial_orgate, 0));
+    sysbus_connect_irq(s, 1, qdev_get_gpio_in(serial_orgate, 1));
+    qdev_connect_gpio_out(serial_orgate, 0, slavio_irq[1]);
+
+    /* NVRAM (M48T08 - 8KB for sun4c) */
+    dev = qdev_new("sysbus-m48t02");  /* sun4c uses m48t02 (2KB) */
+    qdev_prop_set_int32(dev, "base-year", 1968);
+    s = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(s, &error_fatal);
+    sysbus_connect_irq(s, 0, slavio_irq[0]);
+    sysbus_mmio_map(s, 0, hwdef->nvram_base);
+    nvram = NVRAM(dev);
+
+    /* TODO: Modernize remaining device init functions */
     #if 0  /* Disabled until modernized */
     if (graphic_depth != 8 && graphic_depth != 24) {
         error_report("Unsupported depth: %d", graphic_depth);
@@ -1888,17 +1935,8 @@ static void sun4c_hw_init(MachineState *machine, const struct sun4c_hwdef *hwdef
     tcx_init(hwdef->tcx_base, 0x00100000, graphic_width, graphic_height,
              graphic_depth);
 
-    lance_init(&nd_table[0], hwdef->le_base, ledma, ledma_irq);
-
-    nvram = m48t59_init(slavio_irq[0], hwdef->nvram_base, 0, 0x800, 2);
-
     slavio_serial_ms_kbd_init(hwdef->ms_kb_base, slavio_irq[1],
                               !machine->enable_graphics, ESCC_CLOCK, 1);
-    /* Slavio TTYA (base+4, Linux ttyS0) is the first QEMU serial device
-       Slavio TTYB (base+0, Linux ttyS1) is the second QEMU serial device */
-    escc_init(hwdef->serial_base, slavio_irq[1],
-              slavio_irq[1], serial_hd(0), serial_hd(1),
-              ESCC_CLOCK, 1);
 
     if (hwdef->fd_base != (hwaddr)-1) {
         /* there is zero or one floppy drive */

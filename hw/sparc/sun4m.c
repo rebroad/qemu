@@ -1812,10 +1812,9 @@ static DeviceState *sun4c_intctl_init(hwaddr addr,
     SysBusDevice *s;
     unsigned int i;
 
-    dev = qdev_create(NULL, "sun4c_intctl");
-    qdev_init_nofail(dev);
-
+    dev = qdev_new("sun4c_intctl");
     s = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(s, &error_fatal);
 
     for (i = 0; i < MAX_PILS; i++) {
         sysbus_connect_irq(s, i, parent_irq[i]);
@@ -1825,32 +1824,39 @@ static DeviceState *sun4c_intctl_init(hwaddr addr,
     return dev;
 }
 
-static void sun4c_hw_init(const struct sun4c_hwdef *hwdef, ram_addr_t RAM_size,
-                          const char *boot_device,
-                          const char *kernel_filename,
-                          const char *kernel_cmdline,
-                          const char *initrd_filename, const char *cpu_model)
+static void sun4c_hw_init(MachineState *machine, const struct sun4c_hwdef *hwdef)
 {
     void *iommu, *espdma, *ledma, *nvram;
     qemu_irq *cpu_irqs, slavio_irq[8], espdma_irq, ledma_irq;
     qemu_irq esp_reset, dma_enable;
     qemu_irq fdc_tc;
     unsigned long kernel_size;
+    uint32_t initrd_size;
     DriveInfo *fd[MAX_FD];
     void *fw_cfg;
     DeviceState *dev;
     unsigned int i;
+    const char *cpu_model = machine->cpu_type;
+    HostMemoryBackend *ram_memdev = machine->memdev;
+
+    /* Check memory size */
+    if (machine->ram_size > hwdef->max_mem) {
+        error_report("Too much memory for this machine: %" PRId64 ","
+                     " maximum %" PRId64,
+                     machine->ram_size / MiB, hwdef->max_mem / MiB);
+        exit(1);
+    }
 
     /* init CPU */
-    if (!cpu_model)
-        cpu_model = hwdef->default_cpu_model;
-
     cpu_devinit(cpu_model, 0, hwdef->slavio_base, &cpu_irqs);
 
-    /* set up devices */
-    ram_init(0, RAM_size, hwdef->max_mem);
+    /* Create and map RAM frontend */
+    dev = qdev_new("memory");
+    object_property_set_link(OBJECT(dev), "memdev", OBJECT(ram_memdev), &error_fatal);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, 0);
 
-    prom_init(hwdef->slavio_base, bios_name);
+    prom_init(hwdef->slavio_base, machine->firmware);
 
     dev = sun4c_intctl_init(hwdef->intctl_base, cpu_irqs);
 
@@ -1861,14 +1867,22 @@ static void sun4c_hw_init(const struct sun4c_hwdef *hwdef, ram_addr_t RAM_size,
     iommu = iommu_init(hwdef->iommu_base, hwdef->iommu_version,
                        slavio_irq[1]);
 
+    /* TODO: Modernize DMA init - signature has changed */
+    #if 0  /* Disabled until modernized */
     espdma = sparc32_dma_init(hwdef->dma_base, slavio_irq[2],
                               iommu, &espdma_irq, 0);
 
     ledma = sparc32_dma_init(hwdef->dma_base + 16ULL,
                              slavio_irq[3], iommu, &ledma_irq, 1);
+    #else
+    (void)iommu; (void)espdma; (void)ledma; (void)espdma_irq; (void)ledma_irq;
+    (void)esp_reset; (void)dma_enable; (void)fd; (void)fdc_tc;
+    #endif
 
+    /* TODO: Modernize device init functions */
+    #if 0  /* Disabled until modernized */
     if (graphic_depth != 8 && graphic_depth != 24) {
-        fprintf(stderr, "qemu: Unsupported depth: %d\n", graphic_depth);
+        error_report("Unsupported depth: %d", graphic_depth);
         exit (1);
     }
     tcx_init(hwdef->tcx_base, 0x00100000, graphic_width, graphic_height,
@@ -1879,11 +1893,11 @@ static void sun4c_hw_init(const struct sun4c_hwdef *hwdef, ram_addr_t RAM_size,
     nvram = m48t59_init(slavio_irq[0], hwdef->nvram_base, 0, 0x800, 2);
 
     slavio_serial_ms_kbd_init(hwdef->ms_kb_base, slavio_irq[1],
-                              display_type == DT_NOGRAPHIC, ESCC_CLOCK, 1);
+                              !machine->enable_graphics, ESCC_CLOCK, 1);
     /* Slavio TTYA (base+4, Linux ttyS0) is the first QEMU serial device
        Slavio TTYB (base+0, Linux ttyS1) is the second QEMU serial device */
     escc_init(hwdef->serial_base, slavio_irq[1],
-              slavio_irq[1], serial_hds[0], serial_hds[1],
+              slavio_irq[1], serial_hd(0), serial_hd(1),
               ESCC_CLOCK, 1);
 
     if (hwdef->fd_base != (hwaddr)-1) {
@@ -1899,7 +1913,7 @@ static void sun4c_hw_init(const struct sun4c_hwdef *hwdef, ram_addr_t RAM_size,
     slavio_misc_init(0, hwdef->aux1_base, 0, slavio_irq[1], fdc_tc);
 
     if (drive_get_max_bus(IF_SCSI) > 0) {
-        fprintf(stderr, "qemu: too many SCSI bus\n");
+        error_report("too many SCSI bus");
         exit(1);
     }
 
@@ -1909,56 +1923,56 @@ static void sun4c_hw_init(const struct sun4c_hwdef *hwdef, ram_addr_t RAM_size,
 
     qdev_connect_gpio_out(espdma, 0, esp_reset);
     qdev_connect_gpio_out(espdma, 1, dma_enable);
+    #endif
 
-    kernel_size = sun4m_load_kernel(kernel_filename, initrd_filename,
-                                    RAM_size);
+    kernel_size = sun4m_load_kernel(machine->kernel_filename,
+                                    machine->initrd_filename,
+                                    machine->ram_size, &initrd_size);
 
-    nvram_init(nvram, (uint8_t *)&nd_table[0].macaddr, kernel_cmdline,
-               boot_device, RAM_size, kernel_size, graphic_width,
+    /* TODO: Modernize nvram_init, fw_cfg_init and other device init calls */
+    (void)kernel_size; (void)initrd_size; (void)nvram; (void)fw_cfg;
+    
+    error_report("sun4c machine not fully ported to modern QEMU yet");
+    
+    #if 0  /* Disabled until device init functions are modernized */
+    nvram_init(nvram, (uint8_t *)&nd_table[0].macaddr, machine->kernel_cmdline,
+               machine->boot_config.order, machine->ram_size, kernel_size, graphic_width,
                graphic_height, graphic_depth, hwdef->nvram_machine_id,
                "Sun4c");
 
     fw_cfg = fw_cfg_init(0, 0, CFG_ADDR, CFG_ADDR + 2);
-    fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, (uint16_t)max_cpus);
+    fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, (uint16_t)1);
     fw_cfg_add_i32(fw_cfg, FW_CFG_ID, 1);
-    fw_cfg_add_i64(fw_cfg, FW_CFG_RAM_SIZE, (uint64_t)ram_size);
+    fw_cfg_add_i64(fw_cfg, FW_CFG_RAM_SIZE, (uint64_t)machine->ram_size);
     fw_cfg_add_i16(fw_cfg, FW_CFG_MACHINE_ID, hwdef->machine_id);
     fw_cfg_add_i16(fw_cfg, FW_CFG_SUN4M_DEPTH, graphic_depth);
     fw_cfg_add_i32(fw_cfg, FW_CFG_KERNEL_ADDR, KERNEL_LOAD_ADDR);
     fw_cfg_add_i32(fw_cfg, FW_CFG_KERNEL_SIZE, kernel_size);
-    if (kernel_cmdline) {
+    if (machine->kernel_cmdline) {
         fw_cfg_add_i32(fw_cfg, FW_CFG_KERNEL_CMDLINE, CMDLINE_ADDR);
-        pstrcpy_targphys("cmdline", CMDLINE_ADDR, TARGET_PAGE_SIZE, kernel_cmdline);
-        fw_cfg_add_string(fw_cfg, FW_CFG_CMDLINE_DATA, kernel_cmdline);
+        pstrcpy_targphys("cmdline", CMDLINE_ADDR, TARGET_PAGE_SIZE, machine->kernel_cmdline);
+        fw_cfg_add_string(fw_cfg, FW_CFG_CMDLINE_DATA, machine->kernel_cmdline);
     } else {
         fw_cfg_add_i32(fw_cfg, FW_CFG_KERNEL_CMDLINE, 0);
     }
     fw_cfg_add_i32(fw_cfg, FW_CFG_INITRD_ADDR, INITRD_LOAD_ADDR);
     fw_cfg_add_i32(fw_cfg, FW_CFG_INITRD_SIZE, 0); // not used
-    fw_cfg_add_i16(fw_cfg, FW_CFG_BOOT_DEVICE, boot_device[0]);
+    fw_cfg_add_i16(fw_cfg, FW_CFG_BOOT_DEVICE, machine->boot_config.order[0]);
     qemu_register_boot_set(fw_cfg_boot_set, fw_cfg);
+    #endif
 }
+
+/* TODO: Convert sun4c machine to modern TypeInfo-based registration */
+#if 0  /* Disabled - needs modern machine class conversion */
 
 /* SPARCstation 2 hardware initialisation */
-static void ss2_init(QEMUMachineInitArgs *args)
+static void ss2_init(MachineState *machine)
 {
-    ram_addr_t RAM_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_device;
-    sun4c_hw_init(&sun4c_hwdefs[0], RAM_size, boot_device, kernel_filename,
-                  kernel_cmdline, initrd_filename, cpu_model);
+    sun4c_hw_init(machine, &sun4c_hwdefs[0]);
 }
 
-static QEMUMachine ss2_machine = {
-    .name = "SS-2",
-    .desc = "Sun4c platform, SPARCstation 2",
-    .init = ss2_init,
-    .block_default_type = IF_SCSI,
-    DEFAULT_MACHINE_OPTIONS,
-};
+/* This needs to be converted to modern DEFINE_TYPES pattern like sun4m machines */
+#endif  /* 0 */
 
 static void sun4m_register_types(void)
 {

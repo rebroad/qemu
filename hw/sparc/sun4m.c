@@ -1962,17 +1962,34 @@ static void sun4c_hw_init(MachineState *machine, const struct sun4c_hwdef *hwdef
     #endif
 }
 
-/* TODO: Convert sun4c machine to modern TypeInfo-based registration */
-#if 0  /* Disabled - needs modern machine class conversion */
-
-/* SPARCstation 2 hardware initialisation */
+/* SPARCstation 2 (sun4c) machine */
 static void ss2_init(MachineState *machine)
 {
     sun4c_hw_init(machine, &sun4c_hwdefs[0]);
 }
 
-/* This needs to be converted to modern DEFINE_TYPES pattern like sun4m machines */
-#endif  /* 0 */
+static void ss2_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->desc = "Sun4c platform, SPARCstation 2";
+    mc->init = ss2_init;
+    mc->block_default_type = IF_SCSI;
+    mc->default_boot_order = "c";
+    mc->default_cpu_type = SPARC_CPU_TYPE_NAME("TI-MicroSparc-I");
+    mc->default_ram_size = 64 * MiB;
+    mc->default_ram_id = "sun4c.ram";
+}
+
+static const TypeInfo sun4c_machine_types[] = {
+    {
+        .name           = MACHINE_TYPE_NAME("SS-2"),
+        .parent         = TYPE_MACHINE,
+        .class_init     = ss2_class_init,
+    }
+};
+
+DEFINE_TYPES(sun4c_machine_types)
 
 static void sun4m_register_types(void)
 {

@@ -25,8 +25,9 @@
 /* MAX_ICOUNT_SHIFT from icount-common.c */
 #define MAX_ICOUNT_SHIFT 10
 
-/* Global debug flag */
-static bool cpu_idle_debug = false;
+/* Global control flags */
+static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
+static bool cpu_idle_debug = false;    // Controls debug output
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -483,6 +484,11 @@ static void cpu_idle_stop_learning_internal(void)
 // CPU execution enter hook - called before EVERY execution batch
 void cpu_idle_exec_hook(CPUState *cs)
 {
+    // Early exit if idle detection is disabled
+    if (!cpu_idle_enabled) {
+        return;
+    }
+
     // Auto-initialize on first call
     static bool initialized = false;
     if (!initialized) {
@@ -780,18 +786,31 @@ void cpu_idle_exec_hook(CPUState *cs)
     last_pc = pc_state.pc; last_npc = pc_state.next_pc;
 }
 
-// Add function to toggle debug logging
+// Functions to control idle detection and debug output
+void cpu_idle_set_enabled(bool enable)
+{
+    cpu_idle_enabled = enable;
+    fprintf(stderr, "CPU idle detection %s\n", enable ? "enabled" : "disabled");
+}
+
 void cpu_idle_set_debug(bool enable)
 {
     cpu_idle_debug = enable;
-    DEBUG_PRINTF("CPU debug logging %s\n", enable ? "enabled" : "disabled");
+    DEBUG_PRINTF("CPU idle debug output %s\n", enable ? "enabled" : "disabled");
+}
+
+void hmp_cpu_idle(Monitor *mon, const QDict *qdict)
+{
+    bool enable = qdict_get_bool(qdict, "enable");
+    cpu_idle_set_enabled(enable);
+    monitor_printf(mon, "CPU idle detection %s\n", enable ? "enabled" : "disabled");
 }
 
 void hmp_cpu_idle_debug(Monitor *mon, const QDict *qdict)
 {
     bool enable = qdict_get_bool(qdict, "enable");
     cpu_idle_set_debug(enable);
-    monitor_printf(mon, "CPU debug logging %s\n", enable ? "enabled" : "disabled");
+    monitor_printf(mon, "CPU idle debug output %s\n", enable ? "enabled" : "disabled");
 }
 
 void hmp_cpu_idle_start_prom_learning(Monitor *mon, const QDict *qdict)

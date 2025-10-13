@@ -4737,6 +4737,15 @@ SRST
     changes to the disk image.
 ERST
 
+DEF("cpu-idle", 0, QEMU_OPTION_cpu_idle, \
+    "-cpu-idle       enable CPU idle detection and power-saving\n", QEMU_ARCH_ALL)
+SRST
+``-cpu-idle``
+    Enable CPU idle detection and power-saving system. QEMU will detect
+    guest idle loops and strategically sleep to reduce host CPU usage.
+    Use ``-cpu-idle-debug`` to see detailed statistics.
+ERST
+
 DEF("cpu-idle-debug", 0, QEMU_OPTION_cpu_idle_debug, \
     "-cpu-idle-debug enable CPU idle detection debug output\n", QEMU_ARCH_ALL)
 SRST
@@ -4744,6 +4753,7 @@ SRST
     Enable debug output for CPU idle detection system. Shows per-second
     statistics including idle percentage, sleep time, and breakdown of
     different idle detection methods (PROM, OS, generic, halted state).
+    Implies ``-cpu-idle``.
 ERST
 
 DEF("action", HAS_ARG, QEMU_OPTION_action,

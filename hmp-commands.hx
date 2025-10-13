@@ -721,6 +721,20 @@ SRST
 ERST
 
     {
+        .name       = "cpu-idle",
+        .args_type  = "enable:b",
+        .params     = "on|off",
+        .help       = "enable or disable CPU idle detection and power-saving",
+        .cmd        = hmp_cpu_idle,
+    },
+
+SRST
+``cpu-idle`` *on*|*off*
+  Enable or disable CPU idle detection and power-saving system (architecture-agnostic).
+  When enabled, QEMU detects guest idle loops and sleeps to reduce host CPU usage.
+ERST
+
+    {
         .name       = "cpu-idle-debug",
         .args_type  = "enable:b",
         .params     = "on|off",

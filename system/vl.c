@@ -3387,7 +3387,11 @@ void qemu_init(int argc, char **argv)
                 olist = qemu_find_opts("action");
                 qemu_opts_parse_noisily(olist, "shutdown=pause", false);
                 break;
+            case QEMU_OPTION_cpu_idle:
+                cpu_idle_set_enabled(true);
+                break;
             case QEMU_OPTION_cpu_idle_debug:
+                cpu_idle_set_enabled(true);  // Debug implies enabled
                 cpu_idle_set_debug(true);
                 break;
             case QEMU_OPTION_uuid:

@@ -62,6 +62,7 @@ void hmp_gpa2hva(Monitor *mon, const QDict *qdict);
 void hmp_gpa2hpa(Monitor *mon, const QDict *qdict);
 
 /* Architecture-agnostic CPU idle detection HMP commands */
+void hmp_cpu_idle(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_debug(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_start_os_learning(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_start_prom_learning(Monitor *mon, const QDict *qdict);

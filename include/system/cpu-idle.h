@@ -94,6 +94,14 @@ void cpu_get_pc_state(CPUState *cpu, CPUPCState *state);
 void cpu_idle_exec_hook(CPUState *cpu);
 
 /**
+ * cpu_idle_set_enabled - Enable/disable idle detection
+ * @enable: true to enable, false to disable
+ *
+ * Controls whether idle detection and power-saving is active.
+ */
+void cpu_idle_set_enabled(bool enable);
+
+/**
  * cpu_idle_set_debug - Enable/disable debug output
  * @enable: true to enable, false to disable
  *

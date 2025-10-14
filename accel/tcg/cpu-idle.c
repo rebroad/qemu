@@ -723,7 +723,7 @@ void cpu_idle_exec_hook(CPUState *cs)
         int old_sleep_cap = current_sleep_cap;
         bool icount_auto_mode = (icount_enabled() == ICOUNT_ADAPTATIVE);
         bool icount_maxed = icount_enabled() && (icount_get_shift() >= MAX_ICOUNT_SHIFT);
-        bool host_has_capacity = (wait_pct > 50);
+        bool host_has_capacity = (vcpu_wait_pct > 50);
         bool icount_can_help = icount_auto_mode && host_has_capacity && !icount_maxed;
         bool should_auto_tune = auto_tune_sleep && !icount_can_help;
 

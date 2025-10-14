@@ -244,53 +244,53 @@ static void icount_adjust(void)
     cur_icount = icount_get_locked();
     delta = cur_icount - cur_time;
 
-    /* Derivative-based control with velocity prediction
+    /* Logarithmic control for exponential shift effects
      *
-     * Instead of just looking at position (delta), we look at velocity (d_delta/dt)
-     * to predict future behavior and calculate optimal shift adjustment.
+     * Since shift changes have exponential effects (each shift doubles/halves virtual time rate),
+     * we need to use logarithmic math to calculate the correct magnitude of adjustment.
+     *
+     * Key insight: speed_percent tells us the current speed ratio
+     *   speed_percent = (vm_time_rate / real_time_rate) × 100
+     *
+     * To reach 100% speed, we need to adjust shift by:
+     *   shift_adjustment = log2(current_speed / target_speed)
      */
 
-    // Calculate velocity (rate of change of delta)
-    int64_t delta_velocity = delta - timers_state.last_delta;
-
-    // Predict where delta will be in 1 second if we don't adjust
-    int64_t predicted_delta = delta + delta_velocity;
-
     int direction = 0;
-    int magnitude = 1;  // How many shifts to change (can be >1 for large errors)
+    int magnitude = 0;
 
-    // Calculate how far off we are and will be
-    int64_t current_error = delta < 0 ? -delta : delta;
-    int64_t predicted_error = predicted_delta < 0 ? -predicted_delta : predicted_delta;
+    // Only adjust if we're significantly off target (outside wobble zone)
+    // and not getting better on our own
+    int64_t abs_delta = delta < 0 ? -delta : delta;
 
-    // Determine direction and magnitude based on both current error and predicted error
-    if (delta > 0 && timers_state.icount_time_shift > 0) {
-        // Virtual time is ahead
-        if (predicted_error > current_error || current_error > ICOUNT_WOBBLE * 2) {
-            // Getting worse or already very bad - slow down
+    if (abs_delta > ICOUNT_WOBBLE && speed_percent > 0 && speed_percent != 100) {
+        // Calculate how many shifts needed to reach 100% speed
+        // Formula: shift_adjustment = log2(current_speed / 100)
+        double speed_ratio = (double)speed_percent / 100.0;
+
+        if (speed_percent > 100) {
+            // Running too fast (virtual time ahead) - need to decrease shift
             direction = -1;
-
-            // Calculate magnitude: for every 1 second of error, add 1 shift adjustment
-            // This allows faster recovery from large errors
-            magnitude = 1 + (int)(current_error / NANOSECONDS_PER_SECOND);
-            if (magnitude > 3) magnitude = 3;  // Cap at 3 shifts per adjustment
-            if (timers_state.icount_time_shift - magnitude < 0) {
+            // How many shifts to halve back to 100%?
+            magnitude = (int)(log2(speed_ratio) + 0.5);  // Round to nearest
+            if (magnitude < 1) magnitude = 1;
+            if (magnitude > timers_state.icount_time_shift) {
                 magnitude = timers_state.icount_time_shift;  // Don't go below 0
             }
-        }
-    } else if (delta < 0 && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT) {
-        // Virtual time is behind
-        if (predicted_error > current_error || current_error > ICOUNT_WOBBLE * 2) {
-            // Getting worse or already very bad - speed up
+        } else {
+            // Running too slow (virtual time behind) - need to increase shift
             direction = 1;
-
-            // Calculate magnitude
-            magnitude = 1 + (int)(current_error / NANOSECONDS_PER_SECOND);
-            if (magnitude > 3) magnitude = 3;  // Cap at 3 shifts per adjustment
-            if (timers_state.icount_time_shift + magnitude > MAX_ICOUNT_SHIFT) {
+            // How many shifts to double up to 100%?
+            magnitude = (int)(log2(1.0 / speed_ratio) + 0.5);  // Round to nearest
+            if (magnitude < 1) magnitude = 1;
+            if (magnitude > MAX_ICOUNT_SHIFT - timers_state.icount_time_shift) {
                 magnitude = MAX_ICOUNT_SHIFT - timers_state.icount_time_shift;
             }
         }
+
+        // Conservative adjustment: only use 50% of calculated magnitude to avoid overshoot
+        magnitude = (magnitude + 1) / 2;  // Round up when dividing
+        if (magnitude < 1) magnitude = 1;
     }
 
     int old_shift, new_shift;

@@ -481,7 +481,7 @@ static void cpu_idle_stop_learning_internal(void)
     fflush(stdout);
 }
 
-// CPU execution enter hook - called before EVERY execution batch
+// CPU execution enter hook - called before EVERY Translation Block execution
 void cpu_idle_exec_hook(CPUState *cs)
 {
     // Early exit if idle detection is disabled
@@ -696,6 +696,11 @@ void cpu_idle_exec_hook(CPUState *cs)
         // MAME-style speed calculation: (emulated_time / real_time) * 100
         int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
 
+        // icount-independent metric: instructions executed per real second
+        // This shows actual work done regardless of time manipulation
+        double real_seconds = (double)real_delta_ns / 1000000000.0;
+        int insns_per_sec = real_seconds > 0 ? (int)(total_execs / real_seconds) : 0;
+
         // Calculate true idle percentage (weighted by PC frequency from learning)
         double idle_pct = total_idle > 0 ? freq_pct_sum / total_idle : 0.0;
 
@@ -711,12 +716,12 @@ void cpu_idle_exec_hook(CPUState *cs)
         if (learning_mode != LEARNING_OFF) {
             PCCollection *learn_coll = &collections[learning_mode - 1];
             double learn_pct = (double)learn_coll->total_samples / LEARNING_AUTO_STOP_SAMPLES * 100.0;
-            pos = snprintf(msg, sizeof(msg), "[LEARNING %s] %d/%d samples (%.1f%%) spd=%d%%",
+            pos = snprintf(msg, sizeof(msg), "[LEARNING %s] %d/%d samples (%.1f%%) spd=%d%% exec=%dK/s",
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
-                          learn_pct, speed_percent);
+                          learn_pct, speed_percent, insns_per_sec / 1000);
         } else {
-            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% idle=%.1f%% %d/%d sleep:%d/%d/%dµs(%devt)",
-                          speed_percent, idle_pct, total_idle, total_execs,
+            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%dK/s idle=%.1f%% %d/%d sleep:%d/%d/%dµs(%devt)",
+                          speed_percent, insns_per_sec / 1000, idle_pct, total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
                           max_sleep_us,

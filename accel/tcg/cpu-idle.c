@@ -11,6 +11,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"  /* For wait time stats */
 #include "exec/cpu-defs.h"  /* For target_ulong */
 #include "hw/core/cpu.h"
 #include "qom/object.h"
@@ -702,7 +703,18 @@ void cpu_idle_exec_hook(CPUState *cs)
         // This shows actual work done regardless of time manipulation
         double real_seconds = (double)real_delta_ns / 1000000000.0;
         int insns_per_sec = real_seconds > 0 ? (int)(total_execs / real_seconds) : 0;
-        
+
+        // Get main loop wait stats atomically to detect emulator capacity
+        int64_t wait_time_ns = 0;
+        int64_t wait_calls = 0;
+        qemu_get_wait_stats(&wait_time_ns, &wait_calls);
+
+        int wait_time_ms = (int)(wait_time_ns / 1000000);
+        int avg_wait_ms = wait_calls > 0 ? (int)(wait_time_ns / wait_calls / 1000000) : 0;
+        int wait_pct = real_delta_ns > 0 ? (int)((double)wait_time_ns / (double)real_delta_ns * 100.0) : 0;
+
+        qemu_reset_wait_stats();  // Reset for next second
+
         // Auto-tune sleep cap to maintain time sync (alternative to icount!)
         // Only do this when NOT using icount (icount handles time sync itself)
         int old_sleep_cap = current_sleep_cap;
@@ -710,13 +722,13 @@ void cpu_idle_exec_hook(CPUState *cs)
             // If guest is falling behind real time, reduce sleep to let it catch up
             // If guest is ahead, increase sleep to slow it down
             // Target: speed_percent close to 100%
-            
+
             if (speed_percent < 95) {
                 // Guest is slow - reduce sleep by 10%
                 current_sleep_cap = (current_sleep_cap * 90) / 100;
                 if (current_sleep_cap < 100) current_sleep_cap = 100;  // Min 100µs
             } else if (speed_percent > 105) {
-                // Guest is fast - increase sleep by 10%  
+                // Guest is fast - increase sleep by 10%
                 current_sleep_cap = (current_sleep_cap * 110) / 100;
                 if (current_sleep_cap > max_sleep_us_cap) current_sleep_cap = max_sleep_us_cap;
             }
@@ -741,12 +753,20 @@ void cpu_idle_exec_hook(CPUState *cs)
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
                           learn_pct, speed_percent, insns_per_sec / 1000);
         } else {
-            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%dK/s idle=%.1f%% %d/%d sleep:%d/%d/%dµs(%devt)",
+            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%dK/s idle=%.1f%% %d/%d sleep:%d/%d/%dµs(%devt) wait:%dms(%d%%)",
                           speed_percent, insns_per_sec / 1000, idle_pct, total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
                           max_sleep_us,
-                          sleep_events);
+                          sleep_events,
+                          wait_time_ms,
+                          wait_pct);
+
+            // Warning if wait time is very low (approaching capacity limit)
+            if (wait_pct < 10 && icount_enabled()) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos, " ⚠️ MAXED OUT!");
+            }
+
             // Show sleep cap adjustment if it changed
             if (auto_tune_sleep && old_sleep_cap != current_sleep_cap) {
                 pos += snprintf(msg + pos, sizeof(msg) - pos, " sleepcap:%d→%dµs",

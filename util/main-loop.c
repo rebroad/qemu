@@ -290,6 +290,24 @@ static void glib_pollfds_poll(void)
 
 #define MAX_MAIN_LOOP_SPIN (1000)
 
+// Track main loop wait time for capacity monitoring
+// Using atomics instead of mutex - these are just statistics, perfect consistency not critical
+static int64_t total_wait_time_ns = 0;
+static int64_t wait_calls = 0;
+
+void qemu_get_wait_stats(int64_t *out_wait_time_ns, int64_t *out_wait_calls)
+{
+    // Read both atomically (but not necessarily from exact same moment - that's OK for stats)
+    *out_wait_calls = qatomic_read_i64(&wait_calls);
+    *out_wait_time_ns = qatomic_read_i64(&total_wait_time_ns);
+}
+
+void qemu_reset_wait_stats(void)
+{
+    qatomic_set_i64(&total_wait_time_ns, 0);
+    qatomic_set_i64(&wait_calls, 0);
+}
+
 static int os_host_main_loop_wait(int64_t timeout)
 {
     GMainContext *context = g_main_context_default();
@@ -302,7 +320,14 @@ static int os_host_main_loop_wait(int64_t timeout)
     bql_unlock();
     replay_mutex_unlock();
 
+    int64_t start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     ret = qemu_poll_ns((GPollFD *)gpollfds->data, gpollfds->len, timeout);
+    int64_t end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    // Track actual wait time (poll can return early) - use atomics for thread safety
+    int64_t waited_ns = end_ns - start_ns;
+    qatomic_add_fetch_i64(&total_wait_time_ns, waited_ns);
+    qatomic_inc_fetch_i64(&wait_calls);
 
     replay_mutex_lock();
     bql_lock();

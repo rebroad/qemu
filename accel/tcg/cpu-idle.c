@@ -74,7 +74,9 @@ static PCCollection collections[NUM_COLLECTIONS] = {
 
 /* Runtime-configurable settings */
 static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
+static int current_sleep_cap = 10000; // Dynamically adjusted based on time sync
 static time_t last_config_mtime = 0;   // Track config file mtime for auto-reload
+static bool auto_tune_sleep = true;    // Auto-adjust sleep to maintain time sync
 
 /* Helper: Extract architecture name from CPU typename (e.g., "sparc-cpu" → "sparc") */
 static const char *get_arch_name_from_cpu(CPUState *cpu)
@@ -484,8 +486,8 @@ static void cpu_idle_stop_learning_internal(void)
 // CPU execution enter hook - called before EVERY Translation Block execution
 void cpu_idle_exec_hook(CPUState *cs)
 {
-    // Early exit if idle detection is disabled
-    if (!cpu_idle_enabled) {
+    // If both idle detection AND debug are off, exit early
+    if (!cpu_idle_enabled && !cpu_idle_debug) {
         return;
     }
 
@@ -583,7 +585,7 @@ void cpu_idle_exec_hook(CPUState *cs)
                     is_known_idle = true;
                     pc_frequency = idle_coll->pcs[i].effective_count;
 
-                    // Calculate sleep based on frequency: linear mapping, capped at max_sleep_us_cap
+                    // Calculate sleep based on frequency: linear mapping, capped at current_sleep_cap
                     if (idle_coll->total_samples > 0) {
                         double freq_pct = (double)pc_frequency / idle_coll->total_samples * 100.0;
 
@@ -592,8 +594,8 @@ void cpu_idle_exec_hook(CPUState *cs)
 
                         freq_pct_sum += freq_pct;  // Accumulate for weighted idle % calculation
                         sleep_us = (int)(freq_pct * 1000);  // Direct linear: 1%=10µs, 10%=100µs, 50%=500µs, 100%=1000µs
-                        if (sleep_us > max_sleep_us_cap) {
-                            sleep_us = max_sleep_us_cap;  // Cap at runtime-configurable limit
+                        if (sleep_us > current_sleep_cap) {
+                            sleep_us = current_sleep_cap;  // Cap at dynamically-adjusted limit
                         }
                     }
 
@@ -646,7 +648,7 @@ void cpu_idle_exec_hook(CPUState *cs)
 
     // Check for power down state
     if (cs->halted) {
-        sleep_us = max_sleep_us_cap;
+        sleep_us = current_sleep_cap;
         freq_pct_sum += 100.0;  // Halted = 100% idle
         halted_hits++;
     }
@@ -659,9 +661,9 @@ void cpu_idle_exec_hook(CPUState *cs)
     }
     if (sleep_us < min_sleep_us) min_sleep_us = sleep_us;
 
-    // Only sleep if icount is not enabled (when icount is on, we want max speed)
-    // AND not in learning mode (need unthrottled speed for accurate learning)
-    if (learning_mode == LEARNING_OFF && sleep_us > 0) {
+    // Only sleep if idle detection is enabled AND not in learning mode
+    // (need unthrottled speed for accurate learning)
+    if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
         g_usleep(sleep_us);
     }
 
@@ -700,6 +702,25 @@ void cpu_idle_exec_hook(CPUState *cs)
         // This shows actual work done regardless of time manipulation
         double real_seconds = (double)real_delta_ns / 1000000000.0;
         int insns_per_sec = real_seconds > 0 ? (int)(total_execs / real_seconds) : 0;
+        
+        // Auto-tune sleep cap to maintain time sync (alternative to icount!)
+        // Only do this when NOT using icount (icount handles time sync itself)
+        int old_sleep_cap = current_sleep_cap;
+        if (auto_tune_sleep && !icount_enabled()) {
+            // If guest is falling behind real time, reduce sleep to let it catch up
+            // If guest is ahead, increase sleep to slow it down
+            // Target: speed_percent close to 100%
+            
+            if (speed_percent < 95) {
+                // Guest is slow - reduce sleep by 10%
+                current_sleep_cap = (current_sleep_cap * 90) / 100;
+                if (current_sleep_cap < 100) current_sleep_cap = 100;  // Min 100µs
+            } else if (speed_percent > 105) {
+                // Guest is fast - increase sleep by 10%  
+                current_sleep_cap = (current_sleep_cap * 110) / 100;
+                if (current_sleep_cap > max_sleep_us_cap) current_sleep_cap = max_sleep_us_cap;
+            }
+        }
 
         // Calculate true idle percentage (weighted by PC frequency from learning)
         double idle_pct = total_idle > 0 ? freq_pct_sum / total_idle : 0.0;
@@ -726,6 +747,11 @@ void cpu_idle_exec_hook(CPUState *cs)
                           avg_sleep_us,
                           max_sleep_us,
                           sleep_events);
+            // Show sleep cap adjustment if it changed
+            if (auto_tune_sleep && old_sleep_cap != current_sleep_cap) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos, " sleepcap:%d→%dµs",
+                               old_sleep_cap, current_sleep_cap);
+            }
         }
 
         // Show breakdown if there are idle hits

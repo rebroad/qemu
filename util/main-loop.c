@@ -326,8 +326,8 @@ static int os_host_main_loop_wait(int64_t timeout)
 
     // Track actual wait time (poll can return early) - use atomics for thread safety
     int64_t waited_ns = end_ns - start_ns;
-    qatomic_add_fetch_i64(&total_wait_time_ns, waited_ns);
-    qatomic_inc_fetch_i64(&wait_calls);
+    qatomic_add_fetch(&total_wait_time_ns, waited_ns);
+    qatomic_inc_fetch(&wait_calls);
 
     replay_mutex_lock();
     bql_lock();

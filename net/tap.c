@@ -490,6 +490,9 @@ static int net_bridge_run_helper(const char *helper, const char *bridge,
         helper = default_helper = get_relocated_path(DEFAULT_BRIDGE_HELPER);
     }
 
+    fprintf(stderr, "🔧 Bridge helper: %s\n", helper);
+    fprintf(stderr, "🌉 Bridge: %s\n", bridge);
+
     if (socketpair(PF_UNIX, SOCK_STREAM, 0, sv) == -1) {
         error_setg_errno(errp, errno, "socketpair() failed");
         return -1;

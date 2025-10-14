@@ -432,24 +432,20 @@ void main_loop_poll_add_notifier(Notifier *notify);
 void main_loop_poll_remove_notifier(Notifier *notify);
 
 /**
- * qemu_get_wait_stats: Get main loop wait statistics atomically
+ * qemu_get_wait_time_ns: Get main loop wait time
  *
  * Returns the cumulative time in nanoseconds that the main loop has spent
- * waiting/sleeping in os_host_main_loop_wait(), and the number of wait calls.
- * Both values are returned atomically to avoid race conditions.
+ * waiting/sleeping in os_host_main_loop_wait().
  *
  * This is useful for detecting when the emulator is running at maximum
  * capacity (wait time → 0).
- *
- * @out_wait_time_ns: Pointer to receive total wait time in nanoseconds
- * @out_wait_calls: Pointer to receive number of wait calls
  */
-void qemu_get_wait_stats(int64_t *out_wait_time_ns, int64_t *out_wait_calls);
+int64_t qemu_get_wait_time_ns(void);
 
 /**
  * qemu_reset_wait_stats: Reset main loop wait statistics
  *
- * Resets the wait time and call count to zero. Useful for per-second reporting.
+ * Resets the wait time to zero. Useful for per-second reporting.
  */
 void qemu_reset_wait_stats(void);
 

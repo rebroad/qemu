@@ -115,7 +115,7 @@ static FILE *fopen_with_tmp_fallback(const char *filename, const char *mode)
 {
     FILE *f = fopen(filename, mode);
     if (!f) {
-        char tmp_path[256];
+        char tmp_path[512];  // Large enough for /tmp/ prefix + max filename
         snprintf(tmp_path, sizeof(tmp_path), "/tmp/%s", filename);
         f = fopen(tmp_path, mode);
     }
@@ -129,7 +129,7 @@ static int stat_with_tmp_fallback(const char *filename, struct stat *st)
         return 0;  // Success in CWD
     }
     // Try /tmp
-    char tmp_path[256];
+    char tmp_path[512];  // Large enough for /tmp/ prefix + max filename
     snprintf(tmp_path, sizeof(tmp_path), "/tmp/%s", filename);
     return stat(tmp_path, st);
 }
@@ -704,13 +704,9 @@ void cpu_idle_exec_hook(CPUState *cs)
         double real_seconds = (double)real_delta_ns / 1000000000.0;
         int insns_per_sec = real_seconds > 0 ? (int)(total_execs / real_seconds) : 0;
 
-        // Get main loop wait stats atomically to detect emulator capacity
-        int64_t wait_time_ns = 0;
-        int64_t wait_calls = 0;
-        qemu_get_wait_stats(&wait_time_ns, &wait_calls);
-
+        // Get main loop wait time to detect emulator capacity
+        int64_t wait_time_ns = qemu_get_wait_time_ns();
         int wait_time_ms = (int)(wait_time_ns / 1000000);
-        int avg_wait_ms = wait_calls > 0 ? (int)(wait_time_ns / wait_calls / 1000000) : 0;
         int wait_pct = real_delta_ns > 0 ? (int)((double)wait_time_ns / (double)real_delta_ns * 100.0) : 0;
 
         qemu_reset_wait_stats();  // Reset for next second

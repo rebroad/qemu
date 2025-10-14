@@ -1,0 +1,1 @@
+CFLAGS="-Werror" ./configure --enable-debug --target-list=sparc-softmmu --prefix=/opt/qemu-v`cat VERSION` --enable-gtk --enable-gtk-clipboard --enable-kvm --enable-malloc-trim --enable-multiprocess --enable-pa --enable-sdl --enable-sdl-image --enable-slirp --enable-sndio --enable-vhost-net --enable-trace-backends=simple --enable-kvm --enable-user

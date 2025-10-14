@@ -716,9 +716,14 @@ void cpu_idle_exec_hook(CPUState *cs)
         qemu_reset_wait_stats();  // Reset for next second
 
         // Auto-tune sleep cap to maintain time sync (alternative to icount!)
-        // Only do this when NOT using icount (icount handles time sync itself)
+        // Run when:
+        //  1. NOT using icount (icount handles time sync itself), OR
+        //  2. icount is at MAX shift but still can't keep up (need to reduce sleep!)
         int old_sleep_cap = current_sleep_cap;
-        if (auto_tune_sleep && !icount_enabled()) {
+        bool icount_maxed_out = icount_enabled() && (icount_get_shift() >= MAX_ICOUNT_SHIFT);
+        bool should_auto_tune = auto_tune_sleep && (!icount_enabled() || icount_maxed_out);
+
+        if (should_auto_tune) {
             // If guest is falling behind real time, reduce sleep to let it catch up
             // If guest is ahead, increase sleep to slow it down
             // Target: speed_percent close to 100%
@@ -771,6 +776,10 @@ void cpu_idle_exec_hook(CPUState *cs)
             if (auto_tune_sleep && old_sleep_cap != current_sleep_cap) {
                 pos += snprintf(msg + pos, sizeof(msg) - pos, " sleepcap:%d→%dµs",
                                old_sleep_cap, current_sleep_cap);
+                // Indicate if we're auto-tuning because icount is maxed out
+                if (icount_maxed_out) {
+                    pos += snprintf(msg + pos, sizeof(msg) - pos, "(icount@MAX)");
+                }
             }
         }
 

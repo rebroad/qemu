@@ -244,14 +244,27 @@ static void icount_adjust(void)
     cur_icount = icount_get_locked();
     delta = cur_icount - cur_time;
 
-    /* FIXME: This is a very crude algorithm, somewhat prone to oscillation.  */
+    /* Rate limiting: Don't adjust more than once per 100ms to prevent oscillation */
+    static int64_t last_adjust_time_ns = 0;
+    int64_t time_since_last_adjust_ns = current_real_ns - last_adjust_time_ns;
+    if (time_since_last_adjust_ns < 100000000LL) {  // 100ms
+        timers_state.last_delta = delta;
+        seqlock_write_unlock(&timers_state.vm_clock_seqlock, &timers_state.vm_clock_lock);
+        return;
+    }
+
+    /* Improved algorithm with damping to reduce oscillation */
     int direction = 0;
+
+    // Use larger wobble threshold at higher shifts to prevent over-sensitivity
+    int64_t adaptive_wobble = ICOUNT_WOBBLE * (1 + timers_state.icount_time_shift / 5);
+
     if (delta > 0 && timers_state.icount_time_shift > 0
-                && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2) {
+                && timers_state.last_delta + adaptive_wobble < delta * 2) {
         /* The guest is getting too far ahead.  Slow time down.  */
         direction = -1;
     } else if (delta < 0 && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT
-                && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2) {
+                && timers_state.last_delta - adaptive_wobble > delta * 2) {
         /* The guest is getting too far behind.  Speed time up.  */
         direction = 1;
     }
@@ -261,6 +274,8 @@ static void icount_adjust(void)
         old_shift = timers_state.icount_time_shift;
         new_shift = old_shift + direction;
         qatomic_set(&timers_state.icount_time_shift, new_shift);
+        last_adjust_time_ns = current_real_ns;  // Update rate limiter
+
         int64_t ms = (current_real_ns / 1000000) % 10000;
         const char *ahead_behind = direction < 0 ? "ahead" : "behind";
         const char *speedword    = direction < 0 ? "slows" : "speeds";

@@ -45,8 +45,20 @@
  * is TCG-specific, and does not need to be built for other accels.
  */
 static bool icount_sleep = true;
-/* Arbitrarily pick 1MIPS as the minimum allowable speed.  */
-#define MAX_ICOUNT_SHIFT 10
+/* Higher shift = more virtual time per instruction = faster guest wall-clock execution
+ *
+ * The "minimum speed" is the guest CPU speed needed to run at 100% wall-clock time.
+ * If the emulated CPU runs faster than this minimum, the guest runs >100% wall-clock speed.
+ *
+ * Examples (assuming host can emulate ~1 MIPS = 1 million instructions/sec):
+ *   shift=10: 1024ns/inst, need ~976 KIPS for 100% → guest runs at ~102% (1000/976)
+ *   shift=15: 32768ns/inst, need ~30.5 KIPS for 100% → guest runs at ~3280% (33x faster!)
+ *   shift=20: 1048576ns/inst, need ~0.95 KIPS for 100% → guest runs at ~105,000% (1050x faster!)
+ *
+ * Formula: min_speed = 1,000,000,000ns / (2^shift) instructions per second
+ * Guest speedup = (host_speed / min_speed) when host_speed > min_speed
+ */
+#define MAX_ICOUNT_SHIFT 20
 
 /* Do not count executed instructions */
 ICountMode use_icount = ICOUNT_DISABLED;

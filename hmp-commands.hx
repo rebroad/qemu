@@ -752,15 +752,15 @@ ERST
         .name       = "icount-shift",
         .args_type  = "shift:s",
         .params     = "shift_value|auto",
-        .help       = "set icount shift value (0-15 or 'auto' for auto mode)",
+        .help       = "set icount shift value (0-20 or 'auto' for auto mode)",
         .cmd        = hmp_icount_shift_set,
     },
 
 SRST
 ``icount-shift`` *shift_value|auto*
   Set the icount shift value dynamically. The shift determines virtual time
-  per instruction (2^shift ns/inst). Lower=faster, higher=slower.
-  Use 'auto' to re-enable auto-adjust mode. Range: 0 to 15 or 'auto'.
+  per instruction (2^shift ns/inst). Higher shift = faster guest wall-clock execution.
+  Use 'auto' to re-enable auto-adjust mode. Range: 0 to 20 or 'auto'.
 ERST
 
     {

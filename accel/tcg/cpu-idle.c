@@ -24,7 +24,7 @@
 #include <sys/stat.h>
 
 /* MAX_ICOUNT_SHIFT from icount-common.c */
-#define MAX_ICOUNT_SHIFT 10
+#define MAX_ICOUNT_SHIFT 20
 
 /* Global control flags */
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
@@ -716,12 +716,14 @@ void cpu_idle_exec_hook(CPUState *cs)
         // - auto-tune adjusts sleep duration to maintain execution speed at ~100%
         //
         // Smart coordination with icount auto mode:
-        // - If icount is in auto mode AND host has capacity (wait% > 50%), let icount handle it
-        // - If icount is fixed OR host is maxed out (wait% < 50%), auto-tune helps
+        // - If icount is in auto mode AND host has capacity AND icount is NOT maxed out → let icount handle it
+        // - If icount is maxed out OR host is maxed out OR icount is fixed → auto-tune helps
         int old_sleep_cap = current_sleep_cap;
         bool icount_auto_mode = (icount_enabled() == ICOUNT_ADAPTATIVE);
+        bool icount_maxed = icount_enabled() && (icount_get_shift() >= MAX_ICOUNT_SHIFT);
         bool host_has_capacity = (wait_pct > 50);
-        bool should_auto_tune = auto_tune_sleep && !(icount_auto_mode && host_has_capacity);
+        bool icount_can_help = icount_auto_mode && host_has_capacity && !icount_maxed;
+        bool should_auto_tune = auto_tune_sleep && !icount_can_help;
 
         if (should_auto_tune) {
             // If guest is falling behind real time, reduce sleep to let it catch up

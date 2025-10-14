@@ -714,10 +714,16 @@ void cpu_idle_exec_hook(CPUState *cs)
         // Auto-tune sleep cap to maintain ~100% speed (works WITH icount, not instead of it!)
         // - icount adjusts virtual time (ns/instruction) to keep clocks in sync
         // - auto-tune adjusts sleep duration to maintain execution speed at ~100%
-        // These are complementary: icount ensures time accuracy, auto-tune ensures speed
+        //
+        // Smart coordination with icount auto mode:
+        // - If icount is in auto mode AND host has capacity (wait% > 50%), let icount handle it
+        // - If icount is fixed OR host is maxed out (wait% < 50%), auto-tune helps
         int old_sleep_cap = current_sleep_cap;
+        bool icount_auto_mode = (icount_enabled() == ICOUNT_ADAPTATIVE);
+        bool host_has_capacity = (wait_pct > 50);
+        bool should_auto_tune = auto_tune_sleep && !(icount_auto_mode && host_has_capacity);
 
-        if (auto_tune_sleep) {
+        if (should_auto_tune) {
             // If guest is falling behind real time, reduce sleep to let it catch up
             // If guest is ahead, increase sleep to slow it down
             // Target: speed_percent close to 100%

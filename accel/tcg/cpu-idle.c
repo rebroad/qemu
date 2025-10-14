@@ -520,6 +520,8 @@ void cpu_idle_exec_hook(CPUState *cs)
     static int busy_hits = 0;         // Count normal busy execs (not idle, not generic)
     static int halted_hits = 0;       // Count cpu halted state per second
     static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
+    static double freq_pct_min = 100.0;  // Minimum PC frequency % this second
+    static double freq_pct_max = 0.0;    // Maximum PC frequency % this second
 
     // Known idle addresses (discovered through analysis)
 
@@ -594,6 +596,8 @@ void cpu_idle_exec_hook(CPUState *cs)
                         if (freq_pct > 100.0) freq_pct = 100.0;
 
                         freq_pct_sum += freq_pct;  // Accumulate for weighted idle % calculation
+                        if (freq_pct < freq_pct_min) freq_pct_min = freq_pct;
+                        if (freq_pct > freq_pct_max) freq_pct_max = freq_pct;
                         sleep_us = (int)(freq_pct * 1000);  // Direct linear: 1%=10µs, 10%=100µs, 50%=500µs, 100%=1000µs
                         if (sleep_us > current_sleep_cap) {
                             sleep_us = current_sleep_cap;  // Cap at dynamically-adjusted limit
@@ -639,6 +643,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         if (!is_busy_pc) {
             generic_idle_hits++;
             freq_pct_sum += 1.0;  // Low confidence (generic repeat)
+            if (1.0 < freq_pct_min) freq_pct_min = 1.0;
+            if (1.0 > freq_pct_max) freq_pct_max = 1.0;
             // Generic sleep: just a small delay (not trusted like learned PCs)
             sleep_us = 1000;  // 1ms for generic repeats
         }
@@ -651,6 +657,7 @@ void cpu_idle_exec_hook(CPUState *cs)
     if (cs->halted) {
         sleep_us = current_sleep_cap;
         freq_pct_sum += 100.0;  // Halted = 100% idle
+        if (100.0 > freq_pct_max) freq_pct_max = 100.0;
         halted_hits++;
     }
 
@@ -702,7 +709,7 @@ void cpu_idle_exec_hook(CPUState *cs)
         // icount-independent metric: instructions executed per real second
         // This shows actual work done regardless of time manipulation
         double real_seconds = (double)real_delta_ns / 1000000000.0;
-        int insns_per_sec = real_seconds > 0 ? (int)(total_execs / real_seconds) : 0;
+        int insns_per_sec = real_seconds > 0 ? (int)((double)total_execs / real_seconds) : 0;
 
         // Get main loop wait time to detect emulator capacity
         int64_t wait_time_ns = qemu_get_wait_time_ns();
@@ -760,8 +767,11 @@ void cpu_idle_exec_hook(CPUState *cs)
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
                           learn_pct, speed_percent, insns_per_sec / 1000);
         } else {
-            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%dK/s idle=%.1f%% %d/%d sleep:%d/%d/%dµs(%devt) wait:%dms(%d%%)",
-                          speed_percent, insns_per_sec / 1000, idle_pct, total_idle, total_execs,
+            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%d idle=%.1f%%(%.1f-%.1f%%) %d/%d sleep:%d/%d/%dµs(%devt) wait:%dms(%d%%)",
+                          speed_percent, insns_per_sec, idle_pct,
+                          freq_pct_min == 100.0 ? 0.0 : freq_pct_min,
+                          freq_pct_max,
+                          total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
                           max_sleep_us,
@@ -787,7 +797,7 @@ void cpu_idle_exec_hook(CPUState *cs)
             bool first = true;
             if (os_idle_hits > 0) {
                 double os_pct = (double)os_idle_hits / total_execs * 100.0;
-                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sS:%.1f%%", first ? "" : " ", os_pct);
+                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sO:%.1f%%", first ? "" : " ", os_pct);
                 first = false;
             }
             if (prom_idle_hits > 0) {
@@ -839,6 +849,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         busy_hits = 0;
         total_execs = 0;  // Reset for next second
         freq_pct_sum = 0.0;  // Reset weighted idle % accumulator
+        freq_pct_min = 100.0;  // Reset min/max for next second
+        freq_pct_max = 0.0;
     }
 
     last_pc = pc_state.pc; last_npc = pc_state.next_pc;

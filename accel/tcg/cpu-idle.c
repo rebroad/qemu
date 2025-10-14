@@ -706,11 +706,6 @@ void cpu_idle_exec_hook(CPUState *cs)
         // MAME-style speed calculation: (emulated_time / real_time) * 100
         int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
 
-        // icount-independent metric: instructions executed per real second
-        // This shows actual work done regardless of time manipulation
-        double real_seconds = (double)real_delta_ns / 1000000000.0;
-        int insns_per_sec = real_seconds > 0 ? (int)((double)total_execs / real_seconds) : 0;
-
         // Get main loop wait time to detect emulator capacity
         int64_t wait_time_ns = qemu_get_wait_time_ns();
         int wait_time_ms = (int)(wait_time_ns / 1000000);
@@ -763,15 +758,14 @@ void cpu_idle_exec_hook(CPUState *cs)
         if (learning_mode != LEARNING_OFF) {
             PCCollection *learn_coll = &collections[learning_mode - 1];
             double learn_pct = (double)learn_coll->total_samples / LEARNING_AUTO_STOP_SAMPLES * 100.0;
-            pos = snprintf(msg, sizeof(msg), "[LEARNING %s] %d/%d samples (%.1f%%) spd=%d%% exec=%dK/s",
+            pos = snprintf(msg, sizeof(msg), "[LEARNING %s] %d/%d samples (%.1f%%) spd=%d%% execs=%d",
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
-                          learn_pct, speed_percent, insns_per_sec / 1000);
+                          learn_pct, speed_percent, total_execs);
         } else {
-            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%d idle=%.1f%%(%.1f-%.1f%%) %d/%d sleep:%d/%d/%dµs(%devt) wait:%dms(%d%%)",
-                          speed_percent, insns_per_sec, idle_pct,
+            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%d idle=%.1f%%(%.1f-%.1f%%) sleep:%d/%d/%dµs(%devt) wait:%dms(%d%%)",
+                          speed_percent, total_execs, idle_pct,
                           freq_pct_min == 100.0 ? 0.0 : freq_pct_min,
                           freq_pct_max,
-                          total_idle, total_execs,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,
                           avg_sleep_us,
                           max_sleep_us,

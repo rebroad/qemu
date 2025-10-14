@@ -185,27 +185,27 @@ static const char *format_time_delta(int64_t ns, char *buf, size_t bufsize)
 
     if (abs_ns >= 3600LL * 1000000000LL) {
         // Hours (if >= 1 hour)
-        double hours = (double)ns / (3600.0 * 1000000000.0);
+        double hours = (double)abs_ns / (3600.0 * 1000000000.0);
         snprintf(buf, bufsize, "%.2fh", hours);
     } else if (abs_ns >= 60LL * 1000000000LL) {
         // Minutes (if >= 1 minute)
-        double minutes = (double)ns / (60.0 * 1000000000.0);
+        double minutes = (double)abs_ns / (60.0 * 1000000000.0);
         snprintf(buf, bufsize, "%.2fmin", minutes);
     } else if (abs_ns >= 1000000000LL) {
         // Seconds (if >= 1 second)
-        double seconds = (double)ns / 1000000000.0;
+        double seconds = (double)abs_ns / 1000000000.0;
         snprintf(buf, bufsize, "%.3fs", seconds);
     } else if (abs_ns >= 1000000LL) {
         // Milliseconds (if >= 1 ms)
-        double ms = (double)ns / 1000000.0;
+        double ms = (double)abs_ns / 1000000.0;
         snprintf(buf, bufsize, "%.3fms", ms);
     } else if (abs_ns >= 1000LL) {
         // Microseconds (if >= 1 µs)
-        double us = (double)ns / 1000.0;
+        double us = (double)abs_ns / 1000.0;
         snprintf(buf, bufsize, "%.3fµs", us);
     } else {
         // Nanoseconds (if < 1 µs)
-        snprintf(buf, bufsize, "%"PRId64"ns", ns);
+        snprintf(buf, bufsize, "%"PRId64"ns", abs_ns);
     }
 
     return buf;
@@ -245,69 +245,27 @@ static void icount_adjust(void)
     cur_icount = icount_get_locked();
     delta = cur_icount - cur_time;
 
-    /* Logarithmic control for exponential shift effects
-     *
-     * Since shift changes have exponential effects (each shift doubles/halves virtual time rate),
-     * we need to use logarithmic math to calculate the correct magnitude of adjustment.
-     *
-     * Key insight: speed_percent tells us the current speed ratio
-     *   speed_percent = (vm_time_rate / real_time_rate) × 100
-     *
-     * To reach 100% speed, we need to adjust shift by:
-     *   shift_adjustment = log2(current_speed / target_speed)
-     */
+    /* FIXME: This is a very crude algorithm, somewhat prone to oscillation.  */
 
-    // Calculate velocity (rate of change of delta) and time between calls
+    // Calculate velocity (rate of change of delta) for debug output
     int64_t delta_velocity = delta - timers_state.last_delta;
 
-    // Track how long since last adjustment to avoid over-correcting
-    static int64_t last_adjust_real_time_ns = 0;
-    int64_t time_since_adjust_ns = current_real_ns - last_adjust_real_time_ns;
-
     int direction = 0;
-    int magnitude = 0;
-
-    // Only adjust if we're significantly off target (outside wobble zone)
-    // AND at least 100ms of REAL time has passed (prevent rapid-fire adjustments)
-    int64_t abs_delta = delta < 0 ? -delta : delta;
-
-    if (abs_delta > ICOUNT_WOBBLE && speed_percent > 0 && speed_percent != 100
-        && time_since_adjust_ns >= 100000000LL) {  // 100ms minimum in real time
-        // Calculate how many shifts needed to reach 100% speed
-        // Formula: shift_adjustment = log2(current_speed / 100)
-        double speed_ratio = (double)speed_percent / 100.0;
-
-        if (speed_percent > 100) {
-            // Running too fast (virtual time ahead) - need to decrease shift
-            direction = -1;
-            // How many shifts to halve back to 100%?
-            magnitude = (int)(log2(speed_ratio) + 0.5);  // Round to nearest
-            if (magnitude < 1) magnitude = 1;
-            if (magnitude > timers_state.icount_time_shift) {
-                magnitude = timers_state.icount_time_shift;  // Don't go below 0
-            }
-        } else {
-            // Running too slow (virtual time behind) - need to increase shift
-            direction = 1;
-            // How many shifts to double up to 100%?
-            magnitude = (int)(log2(1.0 / speed_ratio) + 0.5);  // Round to nearest
-            if (magnitude < 1) magnitude = 1;
-            if (magnitude > MAX_ICOUNT_SHIFT - timers_state.icount_time_shift) {
-                magnitude = MAX_ICOUNT_SHIFT - timers_state.icount_time_shift;
-            }
-        }
-
-        // Conservative adjustment: only use 50% of calculated magnitude to avoid overshoot
-        magnitude = (magnitude + 1) / 2;  // Round up when dividing
-        if (magnitude < 1) magnitude = 1;
+    if (delta > 0 && timers_state.icount_time_shift > 0
+                && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2) {
+        /* The guest is getting too far ahead.  Slow time down.  */
+        direction = -1;
+    } else if (delta < 0 && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT
+                && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2) {
+        /* The guest is getting too far behind.  Speed time up.  */
+        direction = 1;
     }
 
     int old_shift, new_shift;
-    if (direction != 0 && magnitude > 0) {
+    if (direction != 0) {
         old_shift = timers_state.icount_time_shift;
-        new_shift = old_shift + (direction * magnitude);
+        new_shift = old_shift + direction;
         qatomic_set(&timers_state.icount_time_shift, new_shift);
-        last_adjust_real_time_ns = current_real_ns;  // Update last adjustment timestamp
 
         int64_t ms = (current_real_ns / 1000000) % 10000;
         const char *ahead_behind = direction < 0 ? "ahead" : "behind";
@@ -322,17 +280,10 @@ static void icount_adjust(void)
         char velocity_str[32];
         format_time_delta(delta_velocity, velocity_str, sizeof(velocity_str));
 
-        if (magnitude > 1) {
-            fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d×%d (%dns→%dns/inst, vtime %s)\n",
-                    ms, speed_percent, ahead_behind, delta_str, velocity_str,
-                    old_shift, new_shift, magnitude,
-                    1 << old_shift, 1 << new_shift, speedword);
-        } else {
-            fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d (%dns→%dns/inst, vtime %s)\n",
-                    ms, speed_percent, ahead_behind, delta_str, velocity_str,
-                    old_shift, new_shift,
-                    1 << old_shift, 1 << new_shift, speedword);
-        }
+        fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d (%dns→%dns/inst, vtime %s)\n",
+                ms, speed_percent, ahead_behind, delta_str, velocity_str,
+                old_shift, new_shift,
+                1 << old_shift, 1 << new_shift, speedword);
     }
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,

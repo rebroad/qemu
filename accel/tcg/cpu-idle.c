@@ -492,6 +492,9 @@ void cpu_idle_exec_hook(CPUState *cs)
         return;
     }
 
+    // Measure hook entry time for overhead calculation
+    int64_t hook_entry_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
     // Auto-initialize on first call
     static bool initialized = false;
     if (!initialized) {
@@ -522,6 +525,7 @@ void cpu_idle_exec_hook(CPUState *cs)
     static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
     static double freq_pct_min = 100.0;  // Minimum PC frequency % this second
     static double freq_pct_max = 0.0;    // Maximum PC frequency % this second
+    static int64_t total_hook_time_ns = 0;  // Total time spent in this hook per second
 
     // Known idle addresses (discovered through analysis)
 
@@ -762,7 +766,10 @@ void cpu_idle_exec_hook(CPUState *cs)
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
                           learn_pct, speed_percent, total_execs);
         } else {
-            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%d idle=%.1f%%(%.1f-%.1f%%) sleep:%d/%d/%dµs(%devt) wait:%dms(%d%%)",
+            int hook_time_ms = (int)(total_hook_time_ns / 1000000);
+            int hook_pct = real_delta_ns > 0 ? (int)((double)total_hook_time_ns / (double)real_delta_ns * 100.0) : 0;
+
+            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%d idle=%.1f%%(%.1f-%.1f%%) sleep:%d/%d/%dµs(%devt) hook:%dms(%d%%) vcpu-wait:%dms(%d%%)",
                           speed_percent, total_execs, idle_pct,
                           freq_pct_min == 100.0 ? 0.0 : freq_pct_min,
                           freq_pct_max,
@@ -770,6 +777,8 @@ void cpu_idle_exec_hook(CPUState *cs)
                           avg_sleep_us,
                           max_sleep_us,
                           sleep_events,
+                          hook_time_ms,
+                          hook_pct,
                           vcpu_wait_ms,
                           vcpu_wait_pct);
 
@@ -845,9 +854,14 @@ void cpu_idle_exec_hook(CPUState *cs)
         freq_pct_sum = 0.0;  // Reset weighted idle % accumulator
         freq_pct_min = 100.0;  // Reset min/max for next second
         freq_pct_max = 0.0;
+        total_hook_time_ns = 0;  // Reset hook overhead timer
     }
 
     last_pc = pc_state.pc; last_npc = pc_state.next_pc;
+
+    // Measure hook exit time and accumulate total (must be last thing in function!)
+    int64_t hook_exit_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    total_hook_time_ns += (hook_exit_time_ns - hook_entry_time_ns);
 }
 
 // Functions to control idle detection and debug output

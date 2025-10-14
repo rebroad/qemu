@@ -244,38 +244,60 @@ static void icount_adjust(void)
     cur_icount = icount_get_locked();
     delta = cur_icount - cur_time;
 
-    /* Rate limiting: Don't adjust more than once per 100ms to prevent oscillation */
-    static int64_t last_adjust_time_ns = 0;
-    int64_t time_since_last_adjust_ns = current_real_ns - last_adjust_time_ns;
-    if (time_since_last_adjust_ns < 100000000LL) {  // 100ms
-        timers_state.last_delta = delta;
-        seqlock_write_unlock(&timers_state.vm_clock_seqlock, &timers_state.vm_clock_lock);
-        return;
-    }
+    /* Derivative-based control with velocity prediction
+     *
+     * Instead of just looking at position (delta), we look at velocity (d_delta/dt)
+     * to predict future behavior and calculate optimal shift adjustment.
+     */
 
-    /* Improved algorithm with damping to reduce oscillation */
+    // Calculate velocity (rate of change of delta)
+    int64_t delta_velocity = delta - timers_state.last_delta;
+
+    // Predict where delta will be in 1 second if we don't adjust
+    int64_t predicted_delta = delta + delta_velocity;
+
     int direction = 0;
+    int magnitude = 1;  // How many shifts to change (can be >1 for large errors)
 
-    // Use larger wobble threshold at higher shifts to prevent over-sensitivity
-    int64_t adaptive_wobble = ICOUNT_WOBBLE * (1 + timers_state.icount_time_shift / 5);
+    // Calculate how far off we are and will be
+    int64_t current_error = delta < 0 ? -delta : delta;
+    int64_t predicted_error = predicted_delta < 0 ? -predicted_delta : predicted_delta;
 
-    if (delta > 0 && timers_state.icount_time_shift > 0
-                && timers_state.last_delta + adaptive_wobble < delta * 2) {
-        /* The guest is getting too far ahead.  Slow time down.  */
-        direction = -1;
-    } else if (delta < 0 && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT
-                && timers_state.last_delta - adaptive_wobble > delta * 2) {
-        /* The guest is getting too far behind.  Speed time up.  */
-        direction = 1;
+    // Determine direction and magnitude based on both current error and predicted error
+    if (delta > 0 && timers_state.icount_time_shift > 0) {
+        // Virtual time is ahead
+        if (predicted_error > current_error || current_error > ICOUNT_WOBBLE * 2) {
+            // Getting worse or already very bad - slow down
+            direction = -1;
+
+            // Calculate magnitude: for every 1 second of error, add 1 shift adjustment
+            // This allows faster recovery from large errors
+            magnitude = 1 + (int)(current_error / NANOSECONDS_PER_SECOND);
+            if (magnitude > 3) magnitude = 3;  // Cap at 3 shifts per adjustment
+            if (timers_state.icount_time_shift - magnitude < 0) {
+                magnitude = timers_state.icount_time_shift;  // Don't go below 0
+            }
+        }
+    } else if (delta < 0 && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT) {
+        // Virtual time is behind
+        if (predicted_error > current_error || current_error > ICOUNT_WOBBLE * 2) {
+            // Getting worse or already very bad - speed up
+            direction = 1;
+
+            // Calculate magnitude
+            magnitude = 1 + (int)(current_error / NANOSECONDS_PER_SECOND);
+            if (magnitude > 3) magnitude = 3;  // Cap at 3 shifts per adjustment
+            if (timers_state.icount_time_shift + magnitude > MAX_ICOUNT_SHIFT) {
+                magnitude = MAX_ICOUNT_SHIFT - timers_state.icount_time_shift;
+            }
+        }
     }
 
     int old_shift, new_shift;
-    if (direction != 0) {
+    if (direction != 0 && magnitude > 0) {
         old_shift = timers_state.icount_time_shift;
-        new_shift = old_shift + direction;
+        new_shift = old_shift + (direction * magnitude);
         qatomic_set(&timers_state.icount_time_shift, new_shift);
-        last_adjust_time_ns = current_real_ns;  // Update rate limiter
-
         int64_t ms = (current_real_ns / 1000000) % 10000;
         const char *ahead_behind = direction < 0 ? "ahead" : "behind";
         const char *speedword    = direction < 0 ? "slows" : "speeds";
@@ -285,9 +307,21 @@ static void icount_adjust(void)
         char delta_str[32];
         format_time_delta(shown_delta, delta_str, sizeof(delta_str));
 
-        fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s, shift %d→%d (%dns→%dns/inst, vtime %s)\n",
-                ms, speed_percent, ahead_behind, delta_str, old_shift, new_shift,
-                1 << old_shift, 1 << new_shift, speedword);
+        // Format the velocity for debug
+        char velocity_str[32];
+        format_time_delta(delta_velocity, velocity_str, sizeof(velocity_str));
+
+        if (magnitude > 1) {
+            fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d×%d (%dns→%dns/inst, vtime %s)\n",
+                    ms, speed_percent, ahead_behind, delta_str, velocity_str,
+                    old_shift, new_shift, magnitude,
+                    1 << old_shift, 1 << new_shift, speedword);
+        } else {
+            fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d (%dns→%dns/inst, vtime %s)\n",
+                    ms, speed_percent, ahead_behind, delta_str, velocity_str,
+                    old_shift, new_shift,
+                    1 << old_shift, 1 << new_shift, speedword);
+        }
     }
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,

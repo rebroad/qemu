@@ -37,6 +37,7 @@
 #include "hw/core/cpu.h"
 #include "system/cpu-timers.h"
 #include "system/cpu-timers-internal.h"
+#include <math.h>
 
 /*
  * ICOUNT: Instruction Counter
@@ -256,14 +257,22 @@ static void icount_adjust(void)
      *   shift_adjustment = log2(current_speed / target_speed)
      */
 
+    // Calculate velocity (rate of change of delta) and time between calls
+    int64_t delta_velocity = delta - timers_state.last_delta;
+
+    // Track how long since last adjustment to avoid over-correcting
+    static int64_t last_adjust_real_time_ns = 0;
+    int64_t time_since_adjust_ns = current_real_ns - last_adjust_real_time_ns;
+
     int direction = 0;
     int magnitude = 0;
 
     // Only adjust if we're significantly off target (outside wobble zone)
-    // and not getting better on our own
+    // AND at least 100ms of REAL time has passed (prevent rapid-fire adjustments)
     int64_t abs_delta = delta < 0 ? -delta : delta;
 
-    if (abs_delta > ICOUNT_WOBBLE && speed_percent > 0 && speed_percent != 100) {
+    if (abs_delta > ICOUNT_WOBBLE && speed_percent > 0 && speed_percent != 100
+        && time_since_adjust_ns >= 100000000LL) {  // 100ms minimum in real time
         // Calculate how many shifts needed to reach 100% speed
         // Formula: shift_adjustment = log2(current_speed / 100)
         double speed_ratio = (double)speed_percent / 100.0;
@@ -298,6 +307,8 @@ static void icount_adjust(void)
         old_shift = timers_state.icount_time_shift;
         new_shift = old_shift + (direction * magnitude);
         qatomic_set(&timers_state.icount_time_shift, new_shift);
+        last_adjust_real_time_ns = current_real_ns;  // Update last adjustment timestamp
+
         int64_t ms = (current_real_ns / 1000000) % 10000;
         const char *ahead_behind = direction < 0 ? "ahead" : "behind";
         const char *speedword    = direction < 0 ? "slows" : "speeds";

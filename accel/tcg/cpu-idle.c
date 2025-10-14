@@ -912,29 +912,35 @@ void hmp_info_icount(Monitor *mon, const QDict *qdict)
 
 void hmp_icount_shift_set(Monitor *mon, const QDict *qdict)
 {
-    int shift = qdict_get_int(qdict, "shift");
+    const char *shift_str = qdict_get_str(qdict, "shift");
 
     if (!icount_enabled()) {
         monitor_printf(mon, "Error: icount not enabled (use -icount at startup)\n");
         return;
     }
 
-    if (shift < -1 || shift > MAX_ICOUNT_SHIFT) {
-        monitor_printf(mon, "Error: shift must be -1 (auto) or 0-%d\n", MAX_ICOUNT_SHIFT);
-        return;
-    }
-
-    if (shift == -1) {
+    // Check if the user wants auto mode
+    if (strcmp(shift_str, "auto") == 0) {
         // Re-enable auto-adjust mode
         icount_enable_adaptive();
         monitor_printf(mon, "icount: auto-adjust mode enabled (will dynamically tune shift)\n");
-    } else {
-        // Set fixed shift - disable auto adjust first
-        icount_enable_precise();
-        icount_set_shift(shift);
-        monitor_printf(mon, "icount shift set to %d (2^%d = %d ns/instruction)\n",
-                      shift, shift, 1 << shift);
+        return;
     }
+
+    // Parse as integer
+    char *endptr;
+    long shift = strtol(shift_str, &endptr, 10);
+
+    if (*endptr != '\0' || shift < 0 || shift > MAX_ICOUNT_SHIFT) {
+        monitor_printf(mon, "Error: shift must be 'auto' or 0-%d\n", MAX_ICOUNT_SHIFT);
+        return;
+    }
+
+    // Set fixed shift - switch to precise mode (disables auto-adjust)
+    icount_enable_precise();
+    icount_set_shift(shift);
+    monitor_printf(mon, "icount shift set to %ld (2^%ld = %d ns/instruction, auto-adjust disabled)\n",
+                  shift, shift, 1 << (int)shift);
 }
 
 // ============================================================================

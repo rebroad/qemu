@@ -165,6 +165,39 @@ int64_t icount_to_ns(int64_t icount)
  */
 #define ICOUNT_WOBBLE (NANOSECONDS_PER_SECOND / 10)
 
+// Helper: Format nanoseconds in human-readable time units
+static const char *format_time_delta(int64_t ns, char *buf, size_t bufsize)
+{
+    int64_t abs_ns = ns < 0 ? -ns : ns;
+
+    if (abs_ns >= 3600LL * 1000000000LL) {
+        // Hours (if >= 1 hour)
+        double hours = (double)ns / (3600.0 * 1000000000.0);
+        snprintf(buf, bufsize, "%.2fh", hours);
+    } else if (abs_ns >= 60LL * 1000000000LL) {
+        // Minutes (if >= 1 minute)
+        double minutes = (double)ns / (60.0 * 1000000000.0);
+        snprintf(buf, bufsize, "%.2fmin", minutes);
+    } else if (abs_ns >= 1000000000LL) {
+        // Seconds (if >= 1 second)
+        double seconds = (double)ns / 1000000000.0;
+        snprintf(buf, bufsize, "%.3fs", seconds);
+    } else if (abs_ns >= 1000000LL) {
+        // Milliseconds (if >= 1 ms)
+        double ms = (double)ns / 1000000.0;
+        snprintf(buf, bufsize, "%.3fms", ms);
+    } else if (abs_ns >= 1000LL) {
+        // Microseconds (if >= 1 µs)
+        double us = (double)ns / 1000.0;
+        snprintf(buf, bufsize, "%.3fµs", us);
+    } else {
+        // Nanoseconds (if < 1 µs)
+        snprintf(buf, bufsize, "%"PRId64"ns", ns);
+    }
+
+    return buf;
+}
+
 static void icount_adjust(void)
 {
     int64_t cur_time;
@@ -220,8 +253,13 @@ static void icount_adjust(void)
         const char *ahead_behind = direction < 0 ? "ahead" : "behind";
         const char *speedword    = direction < 0 ? "slows" : "speeds";
         int64_t shown_delta = direction < 0 ? delta : -delta;
-        fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %"PRId64"ns, shift %d→%d (%dns→%dns/inst, vtime %s)\n",
-                ms, speed_percent, ahead_behind, shown_delta, old_shift, new_shift,
+
+        // Format the time delta in human-readable units
+        char delta_str[32];
+        format_time_delta(shown_delta, delta_str, sizeof(delta_str));
+
+        fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s, shift %d→%d (%dns→%dns/inst, vtime %s)\n",
+                ms, speed_percent, ahead_behind, delta_str, old_shift, new_shift,
                 1 << old_shift, 1 << new_shift, speedword);
     }
     timers_state.last_delta = delta;

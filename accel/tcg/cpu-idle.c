@@ -11,7 +11,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
-#include "qemu/main-loop.h"  /* For wait time stats */
+#include "qemu/main-loop.h"  /* For vCPU wait time stats */
 #include "exec/cpu-defs.h"  /* For target_ulong */
 #include "hw/core/cpu.h"
 #include "qom/object.h"
@@ -706,12 +706,12 @@ void cpu_idle_exec_hook(CPUState *cs)
         // MAME-style speed calculation: (emulated_time / real_time) * 100
         int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
 
-        // Get main loop wait time to detect emulator capacity
-        int64_t wait_time_ns = qemu_get_wait_time_ns();
-        int wait_time_ms = (int)(wait_time_ns / 1000000);
-        int wait_pct = real_delta_ns > 0 ? (int)((double)wait_time_ns / (double)real_delta_ns * 100.0) : 0;
+        // Get vCPU thread wait time to detect emulator capacity
+        int64_t vcpu_wait_time_ns = qemu_get_vcpu_wait_time_ns();
+        int vcpu_wait_ms = (int)(vcpu_wait_time_ns / 1000000);
+        int vcpu_wait_pct = real_delta_ns > 0 ? (int)((double)vcpu_wait_time_ns / (double)real_delta_ns * 100.0) : 0;
 
-        qemu_reset_wait_stats();  // Reset for next second
+        qemu_reset_vcpu_wait_stats();  // Reset for next second
 
         // Auto-tune sleep cap to maintain ~100% speed (works WITH icount, not instead of it!)
         // - icount adjusts virtual time (ns/instruction) to keep clocks in sync
@@ -770,12 +770,12 @@ void cpu_idle_exec_hook(CPUState *cs)
                           avg_sleep_us,
                           max_sleep_us,
                           sleep_events,
-                          wait_time_ms,
-                          wait_pct);
+                          vcpu_wait_ms,
+                          vcpu_wait_pct);
 
-            // Warning if wait time is very low (approaching capacity limit)
-            if (wait_pct < 10 && icount_enabled()) {
-                pos += snprintf(msg + pos, sizeof(msg) - pos, " ⚠️ MAXED OUT!");
+            // Warning if vCPU wait time is very low (approaching capacity limit)
+            if (vcpu_wait_pct < 10 && icount_enabled()) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos, " ⚠️ VCPU MAXED OUT!");
             }
 
             // Show sleep cap adjustment if it changed

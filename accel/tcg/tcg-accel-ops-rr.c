@@ -105,9 +105,23 @@ static void rr_stop_kick_timer(void)
     }
 }
 
+// Track vCPU wait time for capacity monitoring
+static int64_t vcpu_wait_time_ns = 0;
+
+int64_t qemu_get_vcpu_wait_time_ns(void)
+{
+    return qatomic_read_i64(&vcpu_wait_time_ns);
+}
+
+void qemu_reset_vcpu_wait_stats(void)
+{
+    qatomic_set_i64(&vcpu_wait_time_ns, 0);
+}
+
 static void rr_wait_io_event(void)
 {
     CPUState *cpu;
+    int64_t start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     while (all_cpu_threads_idle()) {
         rr_stop_kick_timer();
@@ -119,6 +133,11 @@ static void rr_wait_io_event(void)
     CPU_FOREACH(cpu) {
         qemu_wait_io_event_common(cpu);
     }
+
+    // Track actual wait time in vCPU thread
+    int64_t end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t waited_ns = end_ns - start_ns;
+    qatomic_add_fetch(&vcpu_wait_time_ns, waited_ns);
 }
 
 /*

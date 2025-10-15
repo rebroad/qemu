@@ -296,32 +296,40 @@ static void icount_adjust(void)
         int64_t estimated_new_velocity = -delta_velocity * direction;  // Reverses and scales by shift direction
 
         // Use NEW shift's historical interval range for prediction
-        int64_t min_predicted_drift = delta;
-        int64_t max_predicted_drift = delta;
-
         int64_t new_shift_min_interval = min_interval_per_shift[new_shift];
         int64_t new_shift_max_interval = max_interval_per_shift[new_shift];
 
+        char prediction_str[256] = "";
+
         if (new_shift_min_interval != INT64_MAX && new_shift_max_interval > 0) {
             // Predict drift = current_drift + (new_velocity * time_interval_for_new_shift)
-            min_predicted_drift = delta + (estimated_new_velocity * new_shift_min_interval / NANOSECONDS_PER_SECOND);
-            max_predicted_drift = delta + (estimated_new_velocity * new_shift_max_interval / NANOSECONDS_PER_SECOND);
+            int64_t min_predicted_drift = delta + (estimated_new_velocity * new_shift_min_interval / NANOSECONDS_PER_SECOND);
+            int64_t max_predicted_drift = delta + (estimated_new_velocity * new_shift_max_interval / NANOSECONDS_PER_SECOND);
+
+            // Format predictions
+            char min_pred_str[32], max_pred_str[32];
+            const char *min_dir = min_predicted_drift < 0 ? "-" : "+";
+            const char *max_dir = max_predicted_drift < 0 ? "-" : "+";
+            format_time_delta(min_predicted_drift < 0 ? -min_predicted_drift : min_predicted_drift,
+                             min_pred_str, sizeof(min_pred_str));
+            format_time_delta(max_predicted_drift < 0 ? -max_predicted_drift : max_predicted_drift,
+                             max_pred_str, sizeof(max_pred_str));
+
+            // Format the intervals used
+            char min_interval_str[32], max_interval_str[32];
+            format_time_delta(new_shift_min_interval, min_interval_str, sizeof(min_interval_str));
+            format_time_delta(new_shift_max_interval, max_interval_str, sizeof(max_interval_str));
+
+            snprintf(prediction_str, sizeof(prediction_str), " pred:vm:%s%s-%s%s(@%s-%s)",
+                    min_dir, min_pred_str, max_dir, max_pred_str,
+                    min_interval_str, max_interval_str);
         }
 
-        // Format predictions
-        char min_pred_str[32], max_pred_str[32];
-        const char *min_dir = min_predicted_drift < 0 ? "-" : "+";
-        const char *max_dir = max_predicted_drift < 0 ? "-" : "+";
-        format_time_delta(min_predicted_drift < 0 ? -min_predicted_drift : min_predicted_drift,
-                         min_pred_str, sizeof(min_pred_str));
-        format_time_delta(max_predicted_drift < 0 ? -max_predicted_drift : max_predicted_drift,
-                         max_pred_str, sizeof(max_pred_str));
-
-        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vm:%s%s v:%s%s/s shift %d→%d (%dns→%dns/i) pred:vm:%s%s-%s%s\n",
+        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vm:%s%s v:%s%s/s shift %d→%d (%dns→%dns/i)%s\n",
                 time_since_str, speed_percent, vm_dir, delta_str, velocity_dir, velocity_str,
                 old_shift, new_shift,
                 1 << old_shift, 1 << new_shift,
-                min_dir, min_pred_str, max_dir, max_pred_str);
+                prediction_str);
     }
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,

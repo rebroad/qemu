@@ -37,6 +37,7 @@
 #include "hw/core/cpu.h"
 #include "system/cpu-timers.h"
 #include "system/cpu-timers-internal.h"
+#include "util/time-format.h"
 
 /*
  * ICOUNT: Instruction Counter
@@ -177,39 +178,6 @@ int64_t icount_to_ns(int64_t icount)
  */
 #define ICOUNT_WOBBLE (NANOSECONDS_PER_SECOND / 10)
 
-// Helper: Format nanoseconds in human-readable time units
-static const char *format_time_delta(int64_t ns, char *buf, size_t bufsize)
-{
-    int64_t abs_ns = ns < 0 ? -ns : ns;
-
-    if (abs_ns >= 3600LL * 1000000000LL) {
-        // Hours (if >= 1 hour)
-        double hours = (double)abs_ns / (3600.0 * 1000000000.0);
-        snprintf(buf, bufsize, "%.2fh", hours);
-    } else if (abs_ns >= 60LL * 1000000000LL) {
-        // Minutes (if >= 1 minute)
-        double minutes = (double)abs_ns / (60.0 * 1000000000.0);
-        snprintf(buf, bufsize, "%.2fmin", minutes);
-    } else if (abs_ns >= 1000000000LL) {
-        // Seconds (if >= 1 second)
-        double seconds = (double)abs_ns / 1000000000.0;
-        snprintf(buf, bufsize, "%.3fs", seconds);
-    } else if (abs_ns >= 1000000LL) {
-        // Milliseconds (if >= 1 ms)
-        double ms = (double)abs_ns / 1000000.0;
-        snprintf(buf, bufsize, "%.3fms", ms);
-    } else if (abs_ns >= 1000LL) {
-        // Microseconds (if >= 1 µs)
-        double us = (double)abs_ns / 1000.0;
-        snprintf(buf, bufsize, "%.3fµs", us);
-    } else {
-        // Nanoseconds (if < 1 µs)
-        snprintf(buf, bufsize, "%"PRId64"ns", abs_ns);
-    }
-
-    return buf;
-}
-
 static void icount_adjust(void)
 {
     int64_t cur_time;
@@ -266,10 +234,31 @@ static void icount_adjust(void)
         new_shift = old_shift + direction;
         qatomic_set(&timers_state.icount_time_shift, new_shift);
 
-        int64_t ms = (current_real_ns / 1000000) % 10000;
+        // Track time since last adjustment and min/max intervals
+        static int64_t last_adjust_time_ns = 0;
+        static int64_t min_interval_ns = INT64_MAX;
+        static int64_t max_interval_ns = 0;
+
+        int64_t time_since_adjust_ns = last_adjust_time_ns > 0 ? (current_real_ns - last_adjust_time_ns) : 0;
+
+        if (time_since_adjust_ns > 0) {
+            if (time_since_adjust_ns < min_interval_ns) min_interval_ns = time_since_adjust_ns;
+            if (time_since_adjust_ns > max_interval_ns) max_interval_ns = time_since_adjust_ns;
+        }
+
+        last_adjust_time_ns = current_real_ns;
+
         const char *ahead_behind = direction < 0 ? "ahead" : "behind";
         const char *speedword    = direction < 0 ? "slows" : "speeds";
         int64_t shown_delta = direction < 0 ? delta : -delta;
+
+        // Format time since last adjustment
+        char time_since_str[32];
+        if (time_since_adjust_ns > 0) {
+            format_time_delta(time_since_adjust_ns, time_since_str, sizeof(time_since_str));
+        } else {
+            snprintf(time_since_str, sizeof(time_since_str), "first");
+        }
 
         // Format the time delta in human-readable units
         char delta_str[32];
@@ -279,10 +268,32 @@ static void icount_adjust(void)
         char velocity_str[32];
         format_time_delta(delta_velocity, velocity_str, sizeof(velocity_str));
 
-        fprintf(stderr, "[%04" PRId64 "][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d (%dns→%dns/inst, vtime %s)\n",
-                ms, speed_percent, ahead_behind, delta_str, velocity_str,
+        // Predict next drift based on velocity and interval history
+        // Formula: next_delta = current_delta + (velocity × time_interval)
+        int64_t min_predicted_delta = 0;
+        int64_t max_predicted_delta = 0;
+
+        if (min_interval_ns != INT64_MAX && max_interval_ns > 0) {
+            // Scale velocity by interval (velocity is per call, not per second)
+            min_predicted_delta = delta + delta_velocity;  // Minimum interval prediction
+            max_predicted_delta = delta + (delta_velocity * max_interval_ns / (min_interval_ns > 0 ? min_interval_ns : 1));
+        }
+
+        // Format predictions
+        char min_pred_str[32], max_pred_str[32];
+        format_time_delta(min_predicted_delta < 0 ? -min_predicted_delta : min_predicted_delta,
+                         min_pred_str, sizeof(min_pred_str));
+        format_time_delta(max_predicted_delta < 0 ? -max_predicted_delta : max_predicted_delta,
+                         max_pred_str, sizeof(max_pred_str));
+
+        const char *min_dir = min_predicted_delta < 0 ? "-" : "+";
+        const char *max_dir = max_predicted_delta < 0 ? "-" : "+";
+
+        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d (%dns→%dns/inst, vtime %s) pred:%s%s-%s%s\n",
+                time_since_str, speed_percent, ahead_behind, delta_str, velocity_str,
                 old_shift, new_shift,
-                1 << old_shift, 1 << new_shift, speedword);
+                1 << old_shift, 1 << new_shift, speedword,
+                min_dir, min_pred_str, max_dir, max_pred_str);
     }
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,

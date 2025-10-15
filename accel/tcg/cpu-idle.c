@@ -18,6 +18,7 @@
 #include "system/cpu-idle.h"
 #include "system/cpu-timers.h"
 #include "system/cpu-throttle.h"
+#include "util/time-format.h"
 #include "monitor/monitor.h"
 #include "monitor/hmp-target.h"
 #include "qapi/qmp/qdict.h"
@@ -747,6 +748,19 @@ void cpu_idle_exec_hook(CPUState *cs)
             }
         }
 
+        // Calculate VM clock drift (same technique as icount_adjust)
+        // This shows if virtual time is ahead or behind real time
+        int64_t vm_drift_ns = vm_delta_ns - real_delta_ns;  // Positive = ahead, negative = behind
+        const char *drift_direction = "";
+        char drift_str[64] = "";
+
+        if (vm_drift_ns > 10000000LL || vm_drift_ns < -10000000LL) {  // Only show if >10ms drift
+            drift_direction = vm_drift_ns > 0 ? "+" : "-";
+            char drift_abs_str[32];
+            format_time_delta(vm_drift_ns < 0 ? -vm_drift_ns : vm_drift_ns, drift_abs_str, sizeof(drift_abs_str));
+            snprintf(drift_str, sizeof(drift_str), " vm:%s%s", drift_direction, drift_abs_str);
+        }
+
         // Calculate true idle percentage (weighted by PC frequency from learning)
         double idle_pct = total_idle > 0 ? freq_pct_sum / total_idle : 0.0;
 
@@ -769,8 +783,8 @@ void cpu_idle_exec_hook(CPUState *cs)
             int hook_time_ms = (int)(total_hook_time_ns / 1000000);
             int hook_pct = real_delta_ns > 0 ? (int)((double)total_hook_time_ns / (double)real_delta_ns * 100.0) : 0;
 
-            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%% exec=%d idle=%.1f%%(%.1f-%.1f%%) sleep:%d/%d/%dµs(%devt) hook:%dms(%d%%) vcpu-wait:%dms(%d%%)",
-                          speed_percent, total_execs, idle_pct,
+            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%%%s exec=%d idle=%.1f%%(%.1f-%.1f%%) sleep:%d/%d/%dµs(%devt) hook:%dms(%d%%) vcpu-wait:%dms(%d%%)",
+                          speed_percent, drift_str, total_execs, idle_pct,
                           freq_pct_min == 100.0 ? 0.0 : freq_pct_min,
                           freq_pct_max,
                           min_sleep_us == INT_MAX ? 0 : min_sleep_us,

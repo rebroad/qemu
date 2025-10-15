@@ -676,8 +676,13 @@ void cpu_idle_exec_hook(CPUState *cs)
 
     // Only sleep if idle detection is enabled AND not in learning mode
     // (need unthrottled speed for accurate learning)
+    static int64_t total_sleep_time_ns = 0;  // Track actual sleep time separately
+
     if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
+        int64_t sleep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         g_usleep(sleep_us);
+        int64_t sleep_end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        total_sleep_time_ns += (sleep_end_ns - sleep_start_ns);
     }
 
     // Print debug info at most once per second (MAME-style speed measurement)
@@ -783,21 +788,33 @@ void cpu_idle_exec_hook(CPUState *cs)
                           learn_coll->name, learn_coll->total_samples, LEARNING_AUTO_STOP_SAMPLES,
                           learn_pct, speed_percent, total_execs);
         } else {
-            int hook_time_ms = (int)(total_hook_time_ns / 1000000);
-            int hook_pct = real_delta_ns > 0 ? (int)((double)total_hook_time_ns / (double)real_delta_ns * 100.0) : 0;
+            // Calculate hook overhead (deducting actual sleep time)
+            int64_t hook_overhead_ns = total_hook_time_ns - total_sleep_time_ns;
+            int hook_time_ms = (int)(hook_overhead_ns / 1000000);
+            int hook_pct = real_delta_ns > 0 ? (int)((double)hook_overhead_ns / (double)real_delta_ns * 100.0) : 0;
 
-            pos = snprintf(msg, sizeof(msg), "[CPU-IDLE] spd=%d%%%s exec=%d idle=%.1f%%(%.1f-%.1f%%) sleep:%d/%d/%dµs(%devt) hook:%dms(%d%%) vcpu-wait:%dms(%d%%)",
-                          speed_percent, drift_str, total_execs, idle_pct,
-                          freq_pct_min == 100.0 ? 0.0 : freq_pct_min,
-                          freq_pct_max,
-                          min_sleep_us == INT_MAX ? 0 : min_sleep_us,
-                          avg_sleep_us,
-                          max_sleep_us,
-                          sleep_events,
-                          hook_time_ms,
-                          hook_pct,
-                          vcpu_wait_ms,
-                          vcpu_wait_pct);
+            // Calculate sleep overhead separately
+            int sleep_time_ms = (int)(total_sleep_time_ns / 1000000);
+            int sleep_pct = real_delta_ns > 0 ? (int)((double)total_sleep_time_ns / (double)real_delta_ns * 100.0) : 0;
+
+            // Only show sleep metrics if we actually slept
+            // Compose the common prefix first
+            pos = snprintf(msg, sizeof(msg),
+                "[CPU-IDLE] spd=%d%%%s exec=%d idle=%.1f%%(%.1f-%.1f%%) ",
+                speed_percent, drift_str, total_execs, idle_pct,
+                freq_pct_min == 100.0 ? 0.0 : freq_pct_min, freq_pct_max);
+
+            // Add sleep details only if events occurred
+            if (sleep_events > 0) {
+                pos += snprintf(msg + pos, sizeof(msg) - pos,
+                    "sleep:%d/%d/%dµs(%devt,%dms,%d%%) ",
+                    min_sleep_us == INT_MAX ? 0 : min_sleep_us, avg_sleep_us, max_sleep_us,
+                    sleep_events, sleep_time_ms, sleep_pct);
+            }
+
+            pos += snprintf(msg + pos, sizeof(msg) - pos,
+                "hook:%dms(%d%%) vcpu-wait:%dms(%d%%)",
+                hook_time_ms, hook_pct, vcpu_wait_ms, vcpu_wait_pct);
 
             // Warning if vCPU wait time is very low (approaching capacity limit) - disabled until we find reliable way to detect this
             /*if (vcpu_wait_pct < 10 && icount_enabled()) {
@@ -859,6 +876,7 @@ void cpu_idle_exec_hook(CPUState *cs)
         min_sleep_us = INT_MAX;
         max_sleep_us = 0;
         sleep_events = 0;
+        total_sleep_time_ns = 0;  // Reset sleep time
         // Save current values as "previous" for next second's PROM gating check
         prev_total_execs = total_execs > 0 ? total_execs : 1;  // Avoid div by zero
         prev_prom_total_hits = prom_idle_hits;

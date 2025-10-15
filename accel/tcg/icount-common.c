@@ -54,12 +54,11 @@ static bool icount_sleep = true;
  * Examples (assuming host can emulate ~1 MIPS = 1 million instructions/sec):
  *   shift=10: 1024ns/inst, need ~976 KIPS for 100% → guest runs at ~102% (1000/976)
  *   shift=15: 32768ns/inst, need ~30.5 KIPS for 100% → guest runs at ~3280% (33x faster!)
- *   shift=20: 1048576ns/inst, need ~0.95 KIPS for 100% → guest runs at ~105,000% (1050x faster!)
  *
  * Formula: min_speed = 1,000,000,000ns / (2^shift) instructions per second
  * Guest speedup = (host_speed / min_speed) when host_speed > min_speed
  */
-#define MAX_ICOUNT_SHIFT 20
+#define MAX_ICOUNT_SHIFT 10
 
 /* Do not count executed instructions */
 ICountMode use_icount = ICOUNT_DISABLED;
@@ -196,10 +195,12 @@ static void icount_adjust(void)
 
     int64_t current_real_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t current_vm_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t real_delta_ns = 0;
+    int64_t vm_delta_ns = 0;
 
     if (last_real_time_ns > 0) {
-        int64_t real_delta_ns = current_real_ns - last_real_time_ns;
-        int64_t vm_delta_ns = current_vm_ns - last_vm_time_ns;
+        real_delta_ns = current_real_ns - last_real_time_ns;
+        vm_delta_ns = current_vm_ns - last_vm_time_ns;
         if (real_delta_ns > 0) {
             speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
         }
@@ -248,9 +249,9 @@ static void icount_adjust(void)
 
         last_adjust_time_ns = current_real_ns;
 
-        const char *ahead_behind = direction < 0 ? "ahead" : "behind";
-        const char *speedword    = direction < 0 ? "slows" : "speeds";
-        int64_t shown_delta = direction < 0 ? delta : -delta;
+        // VM clock drift direction: positive delta means ahead, negative means behind
+        const char *vm_dir = direction < 0 ? "+" : "-";
+        int64_t abs_delta = direction < 0 ? delta : -delta;
 
         // Format time since last adjustment
         char time_since_str[32];
@@ -262,11 +263,12 @@ static void icount_adjust(void)
 
         // Format the time delta in human-readable units
         char delta_str[32];
-        format_time_delta(shown_delta, delta_str, sizeof(delta_str));
+        format_time_delta(abs_delta, delta_str, sizeof(delta_str));
 
         // Format the velocity for debug
         char velocity_str[32];
-        format_time_delta(delta_velocity, velocity_str, sizeof(velocity_str));
+        format_time_delta(delta_velocity < 0 ? -delta_velocity : delta_velocity, velocity_str, sizeof(velocity_str));
+        const char *velocity_dir = delta_velocity < 0 ? "-" : "+";
 
         // Predict next drift based on velocity and interval history
         // Formula: next_delta = current_delta + (velocity × time_interval)
@@ -289,10 +291,16 @@ static void icount_adjust(void)
         const char *min_dir = min_predicted_delta < 0 ? "-" : "+";
         const char *max_dir = max_predicted_delta < 0 ? "-" : "+";
 
-        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vtime %s %s (v=%s/s), shift %d→%d (%dns→%dns/inst, vtime %s) pred:%s%s-%s%s\n",
-                time_since_str, speed_percent, ahead_behind, delta_str, velocity_str,
+        // Calculate drift rate (how much VM clock gained/lost vs real time this interval)
+        int64_t drift_rate_ns = vm_delta_ns - real_delta_ns;
+        const char *rate_dir = drift_rate_ns > 0 ? "+" : "-";
+        char rate_str[32];
+        format_time_delta(drift_rate_ns < 0 ? -drift_rate_ns : drift_rate_ns, rate_str, sizeof(rate_str));
+
+        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vm:%s%s (rate:%s%s/s v:%s%s/s) shift %d→%d (%dns→%dns/i) pred:%s%s-%s%s\n",
+                time_since_str, speed_percent, vm_dir, delta_str, rate_dir, rate_str, velocity_dir, velocity_str,
                 old_shift, new_shift,
-                1 << old_shift, 1 << new_shift, speedword,
+                1 << old_shift, 1 << new_shift,
                 min_dir, min_pred_str, max_dir, max_pred_str);
     }
     timers_state.last_delta = delta;

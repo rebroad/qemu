@@ -25,7 +25,7 @@
 #include <sys/stat.h>
 
 /* MAX_ICOUNT_SHIFT from icount-common.c */
-#define MAX_ICOUNT_SHIFT 20
+#define MAX_ICOUNT_SHIFT 10
 
 /* Global control flags */
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
@@ -749,8 +749,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         }
 
         // Calculate VM clock drift (same technique as icount_adjust)
-        // This shows if virtual time is ahead or behind real time
-        int64_t vm_drift_ns = vm_delta_ns - real_delta_ns;  // Positive = ahead, negative = behind
+        // This shows if virtual time is ahead or behind real time (absolute drift, not rate!)
+        int64_t vm_drift_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         const char *drift_direction = "";
         char drift_str[64] = "";
 
@@ -796,10 +796,10 @@ void cpu_idle_exec_hook(CPUState *cs)
                           vcpu_wait_ms,
                           vcpu_wait_pct);
 
-            // Warning if vCPU wait time is very low (approaching capacity limit)
-            if (vcpu_wait_pct < 10 && icount_enabled()) {
+            // Warning if vCPU wait time is very low (approaching capacity limit) - disabled until we find reliable way to detect this
+            /*if (vcpu_wait_pct < 10 && icount_enabled()) {
                 pos += snprintf(msg + pos, sizeof(msg) - pos, " ⚠️ VCPU MAXED OUT!");
-            }
+            }*/
 
             // Show sleep cap adjustment if it changed
             if (auto_tune_sleep && old_sleep_cap != current_sleep_cap) {

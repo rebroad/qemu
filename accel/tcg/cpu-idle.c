@@ -748,18 +748,21 @@ void cpu_idle_exec_hook(CPUState *cs)
             }
         }
 
-        // Calculate VM clock drift (same technique as icount_adjust)
-        // This shows if virtual time is ahead or behind real time (absolute drift, not rate!)
-        int64_t vm_drift_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        // Calculate VM clock drift rate (how much VM gained/lost vs real time this second)
+        // Positive = VM running faster than real time, Negative = VM running slower
+        int64_t drift_rate_ns = vm_delta_ns - real_delta_ns;
+
+        // Track cumulative drift over time
+        static int64_t cumulative_drift_ns = 0;
+        cumulative_drift_ns += drift_rate_ns;
+
         const char *drift_direction = "";
         char drift_str[64] = "";
 
-        if (vm_drift_ns > 10000000LL || vm_drift_ns < -10000000LL) {  // Only show if >10ms drift
-            drift_direction = vm_drift_ns > 0 ? "+" : "-";
-            char drift_abs_str[32];
-            format_time_delta(vm_drift_ns < 0 ? -vm_drift_ns : vm_drift_ns, drift_abs_str, sizeof(drift_abs_str));
-            snprintf(drift_str, sizeof(drift_str), " vm:%s%s", drift_direction, drift_abs_str);
-        }
+        drift_direction = cumulative_drift_ns > 0 ? "+" : "-";
+        char drift_abs_str[32];
+        format_time_delta(cumulative_drift_ns < 0 ? -cumulative_drift_ns : cumulative_drift_ns, drift_abs_str, sizeof(drift_abs_str));
+        snprintf(drift_str, sizeof(drift_str), " vm:%s%s", drift_direction, drift_abs_str);
 
         // Calculate true idle percentage (weighted by PC frequency from learning)
         double idle_pct = total_idle > 0 ? freq_pct_sum / total_idle : 0.0;

@@ -235,16 +235,31 @@ static void icount_adjust(void)
         new_shift = old_shift + direction;
         qatomic_set(&timers_state.icount_time_shift, new_shift);
 
-        // Track time since last adjustment and min/max intervals
+        // Track time since last adjustment and min/max intervals PER SHIFT VALUE
         static int64_t last_adjust_time_ns = 0;
-        static int64_t min_interval_ns = INT64_MAX;
-        static int64_t max_interval_ns = 0;
+        static int64_t min_interval_per_shift[MAX_ICOUNT_SHIFT + 1];
+        static int64_t max_interval_per_shift[MAX_ICOUNT_SHIFT + 1];
+        static bool intervals_initialized = false;
+
+        // Initialize interval arrays on first call
+        if (!intervals_initialized) {
+            for (int i = 0; i <= MAX_ICOUNT_SHIFT; i++) {
+                min_interval_per_shift[i] = INT64_MAX;
+                max_interval_per_shift[i] = 0;
+            }
+            intervals_initialized = true;
+        }
 
         int64_t time_since_adjust_ns = last_adjust_time_ns > 0 ? (current_real_ns - last_adjust_time_ns) : 0;
 
-        if (time_since_adjust_ns > 0) {
-            if (time_since_adjust_ns < min_interval_ns) min_interval_ns = time_since_adjust_ns;
-            if (time_since_adjust_ns > max_interval_ns) max_interval_ns = time_since_adjust_ns;
+        // Record interval for the OLD shift (the one we just ran with)
+        if (time_since_adjust_ns > 0 && old_shift >= 0 && old_shift <= MAX_ICOUNT_SHIFT) {
+            if (time_since_adjust_ns < min_interval_per_shift[old_shift]) {
+                min_interval_per_shift[old_shift] = time_since_adjust_ns;
+            }
+            if (time_since_adjust_ns > max_interval_per_shift[old_shift]) {
+                max_interval_per_shift[old_shift] = time_since_adjust_ns;
+            }
         }
 
         last_adjust_time_ns = current_real_ns;
@@ -265,40 +280,45 @@ static void icount_adjust(void)
         char delta_str[32];
         format_time_delta(abs_delta, delta_str, sizeof(delta_str));
 
-        // Format the velocity for debug
+        // Format the velocity for debug (rate of change of drift)
         char velocity_str[32];
         format_time_delta(delta_velocity < 0 ? -delta_velocity : delta_velocity, velocity_str, sizeof(velocity_str));
         const char *velocity_dir = delta_velocity < 0 ? "-" : "+";
 
-        // Predict next drift based on velocity and interval history
-        // Formula: next_delta = current_delta + (velocity × time_interval)
-        int64_t min_predicted_delta = 0;
-        int64_t max_predicted_delta = 0;
+        // Predict drift at next adjustment based on NEW shift
+        // The shift change alters virtual time rate by factor of 2
+        // direction > 0: shift up → virtual time 2x faster → velocity should reverse direction
+        // direction < 0: shift down → virtual time 2x slower → velocity should reverse direction
 
-        if (min_interval_ns != INT64_MAX && max_interval_ns > 0) {
-            // Scale velocity by interval (velocity is per call, not per second)
-            min_predicted_delta = delta + delta_velocity;  // Minimum interval prediction
-            max_predicted_delta = delta + (delta_velocity * max_interval_ns / (min_interval_ns > 0 ? min_interval_ns : 1));
+        // Estimate new velocity: shift change reverses and scales the drift velocity
+        // When we shift up while behind, we expect the drift to improve (velocity becomes positive)
+        // When we shift down while ahead, we expect the drift to improve (velocity becomes negative)
+        int64_t estimated_new_velocity = -delta_velocity * direction;  // Reverses and scales by shift direction
+
+        // Use NEW shift's historical interval range for prediction
+        int64_t min_predicted_drift = delta;
+        int64_t max_predicted_drift = delta;
+
+        int64_t new_shift_min_interval = min_interval_per_shift[new_shift];
+        int64_t new_shift_max_interval = max_interval_per_shift[new_shift];
+
+        if (new_shift_min_interval != INT64_MAX && new_shift_max_interval > 0) {
+            // Predict drift = current_drift + (new_velocity * time_interval_for_new_shift)
+            min_predicted_drift = delta + (estimated_new_velocity * new_shift_min_interval / NANOSECONDS_PER_SECOND);
+            max_predicted_drift = delta + (estimated_new_velocity * new_shift_max_interval / NANOSECONDS_PER_SECOND);
         }
 
         // Format predictions
         char min_pred_str[32], max_pred_str[32];
-        format_time_delta(min_predicted_delta < 0 ? -min_predicted_delta : min_predicted_delta,
+        const char *min_dir = min_predicted_drift < 0 ? "-" : "+";
+        const char *max_dir = max_predicted_drift < 0 ? "-" : "+";
+        format_time_delta(min_predicted_drift < 0 ? -min_predicted_drift : min_predicted_drift,
                          min_pred_str, sizeof(min_pred_str));
-        format_time_delta(max_predicted_delta < 0 ? -max_predicted_delta : max_predicted_delta,
+        format_time_delta(max_predicted_drift < 0 ? -max_predicted_drift : max_predicted_drift,
                          max_pred_str, sizeof(max_pred_str));
 
-        const char *min_dir = min_predicted_delta < 0 ? "-" : "+";
-        const char *max_dir = max_predicted_delta < 0 ? "-" : "+";
-
-        // Calculate drift rate (how much VM clock gained/lost vs real time this interval)
-        int64_t drift_rate_ns = vm_delta_ns - real_delta_ns;
-        const char *rate_dir = drift_rate_ns > 0 ? "+" : "-";
-        char rate_str[32];
-        format_time_delta(drift_rate_ns < 0 ? -drift_rate_ns : drift_rate_ns, rate_str, sizeof(rate_str));
-
-        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vm:%s%s (rate:%s%s/s v:%s%s/s) shift %d→%d (%dns→%dns/i) pred:%s%s-%s%s\n",
-                time_since_str, speed_percent, vm_dir, delta_str, rate_dir, rate_str, velocity_dir, velocity_str,
+        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vm:%s%s v:%s%s/s shift %d→%d (%dns→%dns/i) pred:vm:%s%s-%s%s\n",
+                time_since_str, speed_percent, vm_dir, delta_str, velocity_dir, velocity_str,
                 old_shift, new_shift,
                 1 << old_shift, 1 << new_shift,
                 min_dir, min_pred_str, max_dir, max_pred_str);

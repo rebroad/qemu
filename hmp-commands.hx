@@ -749,6 +749,21 @@ SRST
 ERST
 
     {
+        .name       = "cpu-idle-halt",
+        .args_type  = "enable:b",
+        .params     = "on|off",
+        .help       = "enable or disable halting vCPU on idle (icount warp)",
+        .cmd        = hmp_cpu_idle_halt,
+    },
+
+SRST
+``cpu-idle-halt`` *on*|*off*
+  Enable or disable halting the vCPU when an idle loop is detected.
+  When enabled and icount is active, QEMU halts the vCPU and lets icount
+  warp virtual time forward, reducing host CPU while keeping guest time correct.
+ERST
+
+    {
         .name       = "icount-shift",
         .args_type  = "shift:s",
         .params     = "shift_value|auto",

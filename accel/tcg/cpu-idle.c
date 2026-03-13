@@ -30,6 +30,7 @@
 /* Global control flags */
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
 static bool cpu_idle_debug = false;    // Controls debug output
+static bool cpu_idle_halt_on_idle = true;  // Use vCPU halt + icount warp when idle
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -527,6 +528,7 @@ void cpu_idle_exec_hook(CPUState *cs)
     static double freq_pct_min = 100.0;  // Minimum PC frequency % this second
     static double freq_pct_max = 0.0;    // Maximum PC frequency % this second
     static int64_t total_hook_time_ns = 0;  // Total time spent in this hook per second
+    static int last_speed_percent = 100;   // Last measured emulation speed (vs real time)
 
     // Known idle addresses (discovered through analysis)
 
@@ -679,6 +681,33 @@ void cpu_idle_exec_hook(CPUState *cs)
     static int64_t total_sleep_time_ns = 0;  // Track actual sleep time separately
 
     if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
+        /*
+         * If icount is enabled, prefer a real vCPU halt so the main loop
+         * can warp virtual time forward (icount sleep). This lets the host
+         * idle heavily while keeping guest time accurate.
+         */
+        if (cpu_idle_halt_on_idle && icount_enabled() && !cs->halted) {
+            cpu_interrupt(cs, CPU_INTERRUPT_HALT);
+            cpu_exit(cs);
+            return;
+        }
+
+        /*
+         * Do not allow idle sleeping to push the guest below real time.
+         * If the last measured speed is <100%, skip sleeping entirely.
+         * If we're only slightly ahead (100-105%), scale sleep down.
+         */
+        if (last_speed_percent <= 100) {
+            sleep_us = 0;
+        } else if (last_speed_percent < 105) {
+            sleep_us = (sleep_us * (last_speed_percent - 100)) / 5;
+            if (sleep_us < 0) {
+                sleep_us = 0;
+            }
+        }
+    }
+
+    if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
         int64_t sleep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         g_usleep(sleep_us);
         int64_t sleep_end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -715,6 +744,7 @@ void cpu_idle_exec_hook(CPUState *cs)
 
         // MAME-style speed calculation: (emulated_time / real_time) * 100
         int speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+        last_speed_percent = speed_percent;
 
         // Get vCPU thread wait time to detect emulator capacity
         int64_t vcpu_wait_time_ns = qemu_get_vcpu_wait_time_ns();
@@ -912,6 +942,12 @@ void cpu_idle_set_debug(bool enable)
     DEBUG_PRINTF("CPU idle debug output %s\n", enable ? "enabled" : "disabled");
 }
 
+void cpu_idle_set_halt_on_idle(bool enable)
+{
+    cpu_idle_halt_on_idle = enable;
+    fprintf(stderr, "CPU idle halt-on-idle %s\n", enable ? "enabled" : "disabled");
+}
+
 void hmp_cpu_idle(Monitor *mon, const QDict *qdict)
 {
     bool enable = qdict_get_bool(qdict, "enable");
@@ -924,6 +960,13 @@ void hmp_cpu_idle_debug(Monitor *mon, const QDict *qdict)
     bool enable = qdict_get_bool(qdict, "enable");
     cpu_idle_set_debug(enable);
     monitor_printf(mon, "CPU idle debug output %s\n", enable ? "enabled" : "disabled");
+}
+
+void hmp_cpu_idle_halt(Monitor *mon, const QDict *qdict)
+{
+    bool enable = qdict_get_bool(qdict, "enable");
+    cpu_idle_set_halt_on_idle(enable);
+    monitor_printf(mon, "CPU idle halt-on-idle %s\n", enable ? "enabled" : "disabled");
 }
 
 void hmp_cpu_idle_start_prom_learning(Monitor *mon, const QDict *qdict)

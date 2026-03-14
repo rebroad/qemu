@@ -46,17 +46,20 @@
  * is TCG-specific, and does not need to be built for other accels.
  */
 static bool icount_sleep = true;
-/* Higher shift = more virtual time per instruction = faster guest wall-clock execution
+/*
+ * Higher shift = more virtual time per instruction.
  *
- * The "minimum speed" is the guest CPU speed needed to run at 100% wall-clock time.
- * If the emulated CPU runs faster than this minimum, the guest runs >100% wall-clock speed.
+ * That means virtual time advances faster per insn, so to stay aligned to
+ * real time the guest executes fewer instructions per second (slower guest
+ * instruction throughput). This is why MAX_ICOUNT_SHIFT caps the slowest
+ * allowable guest speed.
  *
- * Examples (assuming host can emulate ~1 MIPS = 1 million instructions/sec):
- *   shift=10: 1024ns/inst, need ~976 KIPS for 100% → guest runs at ~102% (1000/976)
- *   shift=15: 32768ns/inst, need ~30.5 KIPS for 100% → guest runs at ~3280% (33x faster!)
+ * The "minimum speed" is the guest instruction rate required to keep
+ * virtual time in sync with real time at a given shift:
+ *   min_speed = 1,000,000,000ns / (2^shift) instructions per second
  *
- * Formula: min_speed = 1,000,000,000ns / (2^shift) instructions per second
- * Guest speedup = (host_speed / min_speed) when host_speed > min_speed
+ * Example:
+ *   shift=10 → 1024ns/insn → ~976 KIPS required to keep up with real time.
  */
 #define MAX_ICOUNT_SHIFT 10
 
@@ -188,21 +191,24 @@ static void icount_adjust(void)
         return;
     }
 
-    // Calculate speed percentage for debug output
+    // Calculate virtual-time rate and effective guest MIPS for debug output
     static int64_t last_real_time_ns = 0;
     static int64_t last_vm_time_ns = 0;
-    int speed_percent = 0;
+    static int64_t last_icount_raw = 0;
+    int vm_rate_percent = 0;
+    double mips = 0.0;
 
     int64_t current_real_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t current_vm_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int64_t real_delta_ns = 0;
     int64_t vm_delta_ns = 0;
+    int64_t icount_delta = 0;
 
     if (last_real_time_ns > 0) {
         real_delta_ns = current_real_ns - last_real_time_ns;
         vm_delta_ns = current_vm_ns - last_vm_time_ns;
         if (real_delta_ns > 0) {
-            speed_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+            vm_rate_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
         }
     }
     last_real_time_ns = current_real_ns;
@@ -210,9 +216,11 @@ static void icount_adjust(void)
 
     seqlock_write_lock(&timers_state.vm_clock_seqlock, &timers_state.vm_clock_lock);
     cur_time = REPLAY_CLOCK_LOCKED(REPLAY_CLOCK_VIRTUAL_RT, cpu_get_clock_locked());
-    cur_icount = icount_get_locked();
-    delta = cur_icount - cur_time;
+    int64_t cur_icount_raw = icount_get_raw_locked();
+    cur_icount = qatomic_read_i64(&timers_state.qemu_icount_bias) +
+                 icount_to_ns(cur_icount_raw);
 
+    delta = cur_icount - cur_time;
     /* FIXME: This is a very crude algorithm, somewhat prone to oscillation.  */
 
     // Calculate velocity (rate of change of delta) for debug output
@@ -221,11 +229,11 @@ static void icount_adjust(void)
     int direction = 0;
     if (delta > 0 && timers_state.icount_time_shift > 0
                 && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2) {
-        /* The guest is getting too far ahead.  Slow time down.  */
+        /* The guest is getting too far ahead.  Advance virtual time slower.  */
         direction = -1;
     } else if (delta < 0 && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT
                 && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2) {
-        /* The guest is getting too far behind.  Speed time up.  */
+        /* The guest is getting too far behind.  Advance virtual time faster.  */
         direction = 1;
     }
 
@@ -285,10 +293,10 @@ static void icount_adjust(void)
         format_time_delta(delta_velocity < 0 ? -delta_velocity : delta_velocity, velocity_str, sizeof(velocity_str));
         const char *velocity_dir = delta_velocity < 0 ? "-" : "+";
 
-        // Predict drift at next adjustment based on NEW shift
-        // The shift change alters virtual time rate by factor of 2
-        // direction > 0: shift up → virtual time 2x faster → velocity should reverse direction
-        // direction < 0: shift down → virtual time 2x slower → velocity should reverse direction
+        // Predict drift at next adjustment based on NEW shift.
+        // The shift change alters virtual time rate by factor of 2.
+        // direction > 0: shift up → virtual time 2x faster.
+        // direction < 0: shift down → virtual time 2x slower.
 
         // Estimate new velocity: shift change reverses and scales the drift velocity
         // When we shift up while behind, we expect the drift to improve (velocity becomes positive)
@@ -325,12 +333,17 @@ static void icount_adjust(void)
                     min_interval_str, max_interval_str);
         }
 
-        fprintf(stderr, "[+%s][ICOUNT-AUTO] spd=%d%% vm:%s%s v:%s%s/s shift %d→%d (%dns→%dns/i)%s\n",
-                time_since_str, speed_percent, vm_dir, delta_str, velocity_dir, velocity_str,
+        if (last_icount_raw > 0 && real_delta_ns > 0) {
+            icount_delta = cur_icount_raw - last_icount_raw;
+            mips = (double)icount_delta * 1000.0 / (double)real_delta_ns;
+        }
+        fprintf(stderr, "[+%s][ICOUNT-AUTO] vmrate=%d%% mips=%.1f vm:%s%s v:%s%s/s shift %d→%d (%dns→%dns/i)%s\n",
+                time_since_str, vm_rate_percent, mips, vm_dir, delta_str, velocity_dir, velocity_str,
                 old_shift, new_shift,
                 1 << old_shift, 1 << new_shift,
                 prediction_str);
     }
+    last_icount_raw = cur_icount_raw;
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,
                     cur_icount - (timers_state.qemu_icount << timers_state.icount_time_shift));

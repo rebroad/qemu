@@ -704,9 +704,16 @@ void cpu_idle_exec_hook(CPUState *cs)
          * idle heavily while keeping guest time accurate.
          */
         if (cpu_idle_halt_on_idle && icount_enabled() && !cs->halted) {
-            cpu_interrupt(cs, CPU_INTERRUPT_HALT);
-            cpu_exit(cs);
-            return;
+            /*
+             * cpu_idle_exec_hook() can run without the BQL held. Only
+             * raise CPU interrupts when the BQL is locked; otherwise
+             * fall back to sleeping.
+             */
+            if (bql_locked()) {
+                cpu_interrupt(cs, CPU_INTERRUPT_HALT);
+                cpu_exit(cs);
+                return;
+            }
         }
 
         /*

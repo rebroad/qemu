@@ -45,7 +45,21 @@
  * is TCG-specific, and does not need to be built for other accels.
  */
 static bool icount_sleep = true;
-/* Arbitrarily pick 1MIPS as the minimum allowable speed.  */
+/*
+ * Higher shift = more virtual time per instruction.
+ *
+ * That means virtual time advances faster per insn, so to stay aligned to
+ * real time the guest executes fewer instructions per second (slower guest
+ * instruction throughput). This is why MAX_ICOUNT_SHIFT caps the slowest
+ * allowable guest speed.
+ *
+ * The "minimum speed" is the guest instruction rate required to keep
+ * virtual time in sync with real time at a given shift:
+ *   min_speed = 1,000,000,000ns / (2^shift) instructions per second
+ *
+ * Example:
+ *   shift=10 → 1024ns/insn → ~976 KIPS required to keep up with real time.
+ */
 #define MAX_ICOUNT_SHIFT 10
 
 /* Do not count executed instructions */
@@ -171,6 +185,29 @@ static void icount_adjust(void)
     int64_t cur_icount;
     int64_t delta;
 
+    // Calculate virtual-time rate and effective guest MIPS for debug output
+    static int64_t last_real_time_ns = 0;
+    static int64_t last_vm_time_ns = 0;
+    static int64_t last_icount_raw = 0;
+    int vm_rate_percent = 0;
+    double mips = 0.0;
+
+    int64_t current_real_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t current_vm_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t real_delta_ns = 0;
+    int64_t vm_delta_ns = 0;
+    int64_t icount_delta = 0;
+
+    if (last_real_time_ns > 0) {
+        real_delta_ns = current_real_ns - last_real_time_ns;
+        vm_delta_ns = current_vm_ns - last_vm_time_ns;
+        if (real_delta_ns > 0) {
+            vm_rate_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+        }
+    }
+    last_real_time_ns = current_real_ns;
+    last_vm_time_ns = current_vm_ns;
+
     /* If the VM is not running, then do nothing.  */
     if (!runstate_is_running()) {
         return;
@@ -180,24 +217,39 @@ static void icount_adjust(void)
                        &timers_state.vm_clock_lock);
     cur_time = REPLAY_CLOCK_LOCKED(REPLAY_CLOCK_VIRTUAL_RT,
                                    cpu_get_clock_locked());
-    cur_icount = icount_get_locked();
+    int64_t cur_icount_raw = icount_get_raw_locked();
+    cur_icount = qatomic_read_i64(&timers_state.qemu_icount_bias) +
+                 icount_to_ns(cur_icount_raw);
 
     delta = cur_icount - cur_time;
     /* FIXME: This is a very crude algorithm, somewhat prone to oscillation.  */
+    int old_shift = timers_state.icount_time_shift;
+    int new_shift = old_shift;
     if (delta > 0
         && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2
         && timers_state.icount_time_shift > 0) {
         /* The guest is getting too far ahead.  Slow time down.  */
-        qatomic_set(&timers_state.icount_time_shift,
-                    timers_state.icount_time_shift - 1);
+        new_shift = old_shift - 1;
+        qatomic_set(&timers_state.icount_time_shift, new_shift);
     }
     if (delta < 0
         && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2
         && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT) {
         /* The guest is getting too far behind.  Speed time up.  */
-        qatomic_set(&timers_state.icount_time_shift,
-                    timers_state.icount_time_shift + 1);
+        new_shift = old_shift + 1;
+        qatomic_set(&timers_state.icount_time_shift, new_shift);
     }
+    if (new_shift != old_shift) {
+        if (last_icount_raw > 0 && real_delta_ns > 0) {
+            icount_delta = cur_icount_raw - last_icount_raw;
+            mips = (double)icount_delta * 1000.0 / (double)real_delta_ns;
+        }
+        fprintf(stderr, "[ICOUNT-AUTO] vmrate=%d%% mips=%.1f vm_delta_ns=%lld shift %d->%d (%dns->%dns/i)\n",
+                vm_rate_percent, mips, (long long)delta,
+                old_shift, new_shift,
+                1 << old_shift, 1 << new_shift);
+    }
+    last_icount_raw = cur_icount_raw;
     timers_state.last_delta = delta;
     qatomic_set_i64(&timers_state.qemu_icount_bias,
                     cur_icount - (timers_state.qemu_icount

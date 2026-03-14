@@ -24,6 +24,19 @@
 #include "qapi/qmp/qdict.h"
 #include <sys/stat.h>
 
+#ifndef TARGET_SPARC
+/*
+ * cpu_get_pc_state is only implemented for SPARC today. Provide a stub for
+ * other targets so cpu-idle.c can link cleanly even if idle detection isn't
+ * actively used there yet.
+ */
+void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
+{
+    state->pc = 0;
+    state->next_pc = 0;
+}
+#endif
+
 /* MAX_ICOUNT_SHIFT from icount-common.c */
 #define MAX_ICOUNT_SHIFT 10
 
@@ -489,6 +502,10 @@ static void cpu_idle_stop_learning_internal(void)
 // CPU execution enter hook - called before EVERY Translation Block execution
 void cpu_idle_exec_hook(CPUState *cs)
 {
+#ifdef CONFIG_USER_ONLY
+    /* linux-user builds don't provide system-only helpers used below */
+    return;
+#endif
     // If both idle detection AND debug are off, exit early
     if (!cpu_idle_enabled && !cpu_idle_debug) {
         return;
@@ -948,6 +965,7 @@ void cpu_idle_set_halt_on_idle(bool enable)
     fprintf(stderr, "CPU idle halt-on-idle %s\n", enable ? "enabled" : "disabled");
 }
 
+#ifndef CONFIG_USER_ONLY
 void hmp_cpu_idle(Monitor *mon, const QDict *qdict)
 {
     bool enable = qdict_get_bool(qdict, "enable");
@@ -1042,6 +1060,7 @@ void hmp_icount_shift_set(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "icount shift set to %ld (2^%ld = %d ns/instruction, auto-adjust disabled)\n",
                   shift, shift, 1 << (int)shift);
 }
+#endif
 
 // ============================================================================
 // Public API Wrappers

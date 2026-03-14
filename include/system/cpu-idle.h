@@ -110,6 +110,15 @@ void cpu_idle_set_enabled(bool enable);
 void cpu_idle_set_debug(bool enable);
 
 /**
+ * cpu_idle_set_halt_on_idle - Enable/disable halt-on-idle behavior
+ * @enable: true to enable, false to disable
+ *
+ * Controls whether idle detection will halt vCPUs (for icount warp) instead
+ * of sleeping in the TCG thread.
+ */
+void cpu_idle_set_halt_on_idle(bool enable);
+
+/**
  * cpu_idle_start_prom_learning - Start PROM/firmware idle learning
  *
  * Begins collecting PC patterns while guest is in PROM/firmware idle state.
@@ -151,4 +160,3 @@ void cpu_idle_stop_learning(void);
 void cpu_idle_init(void);
 
 #endif /* QEMU_CPU_IDLE_H */
-

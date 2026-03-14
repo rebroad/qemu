@@ -192,6 +192,16 @@ static void icount_adjust(void)
     int vm_rate_percent = 0;
     double mips = 0.0;
 
+    // Averaged ICOUNT-AUTO logging across last two shift changes
+    static bool have_prev_sample = false;
+    static int prev_vmrate = 0;
+    static double prev_mips = 0.0;
+    static int prev_shift = 0;
+    static bool have_last_avg = false;
+    static double last_avg_vmrate = 0.0;
+    static double last_avg_mips = 0.0;
+    static double last_avg_shift = 0.0;
+
     int64_t current_real_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t current_vm_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int64_t real_delta_ns = 0;
@@ -244,10 +254,33 @@ static void icount_adjust(void)
             icount_delta = cur_icount_raw - last_icount_raw;
             mips = (double)icount_delta * 1000.0 / (double)real_delta_ns;
         }
-        fprintf(stderr, "[ICOUNT-AUTO] vmrate=%d%% mips=%.1f vm_delta_ns=%lld shift %d->%d (%dns->%dns/i)\n",
-                vm_rate_percent, mips, (long long)delta,
-                old_shift, new_shift,
-                1 << old_shift, 1 << new_shift);
+        int sample_vmrate = vm_rate_percent;
+        double sample_mips = mips;
+        int sample_shift = new_shift;
+        if (!have_prev_sample) {
+            prev_vmrate = sample_vmrate;
+            prev_mips = sample_mips;
+            prev_shift = sample_shift;
+            have_prev_sample = true;
+        } else {
+            double avg_vmrate = (prev_vmrate + sample_vmrate) / 2.0;
+            double avg_mips = (prev_mips + sample_mips) / 2.0;
+            double avg_shift = (prev_shift + sample_shift) / 2.0;
+            if (!have_last_avg ||
+                avg_vmrate != last_avg_vmrate ||
+                avg_mips != last_avg_mips ||
+                avg_shift != last_avg_shift) {
+                fprintf(stderr, "[ICOUNT-AUTO-AVG] vmrate=%.1f%% mips=%.1f shift=%.1f (2-sample avg)\n",
+                        avg_vmrate, avg_mips, avg_shift);
+                last_avg_vmrate = avg_vmrate;
+                last_avg_mips = avg_mips;
+                last_avg_shift = avg_shift;
+                have_last_avg = true;
+            }
+            prev_vmrate = sample_vmrate;
+            prev_mips = sample_mips;
+            prev_shift = sample_shift;
+        }
     }
     last_icount_raw = cur_icount_raw;
     timers_state.last_delta = delta;

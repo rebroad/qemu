@@ -34,11 +34,28 @@
 static const CPUPCState sunos414_idle_pcs[] = {
     /*
      * SunOS 4.1.4 /vmunix extracted from sunos-hdd.qcow2.
-     * _idle is the scheduler idle loop entry in sys/sparc/swtch.s.
+     * These are the code entry points in the idle path. Data/state symbols
+     * such as _whichqs, _qrunflag, _idleproc, and _cpu_idle are excluded.
      */
     {
         .pc = UINT64_C(0xf0143cd0),
-        .next_pc = UINT64_C(0xf0143cd4),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf0143dbc),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf0135fd8),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf0038b1c),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf004be20),
+        .next_pc = 0,
     },
 };
 

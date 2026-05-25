@@ -39,6 +39,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /*
  * IMPLEMENTATION STATUS:
@@ -117,6 +118,37 @@ void cpu_idle_set_debug(bool enable);
  * of sleeping in the TCG thread.
  */
 void cpu_idle_set_halt_on_idle(bool enable);
+
+/**
+ * cpu_idle_set_pc_learning - Enable/disable PC-based idle learning
+ * @enable: true to enable, false to disable
+ *
+ * When enabled, learned idle signatures use PC-only matching in icount mode.
+ * Outside icount, the matcher keeps using PC/NPC pairs.
+ */
+void cpu_idle_set_pc_learning(bool enable);
+
+/**
+ * cpu_idle_set_builtin_fallbacks - Enable/disable built-in fallback signatures
+ * @enable: true to enable, false to disable
+ *
+ * When enabled, architecture glue may register built-in idle signatures
+ * compiled into QEMU (for example SunOS 4.1.4 SPARC).
+ */
+void cpu_idle_set_builtin_fallbacks(bool enable);
+
+/**
+ * cpu_idle_register_builtin_idle_pcs - Register built-in idle signatures
+ * @name: Human-readable label for debug output
+ * @pcs: Array of PC/NPC states to register
+ * @count: Number of entries in @pcs
+ *
+ * Architecture glue may call this during CPU init to seed the idle matcher
+ * with known good signatures from a specific guest OS image.
+ */
+void cpu_idle_register_builtin_idle_pcs(const char *name,
+                                        const CPUPCState *pcs,
+                                        size_t count);
 
 /**
  * cpu_idle_start_prom_learning - Start PROM/firmware idle learning

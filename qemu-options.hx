@@ -4746,6 +4746,22 @@ SRST
     Use ``-cpu-idle-debug`` to see detailed statistics.
 ERST
 
+DEF("cpu-idle-pc-learning", 0, QEMU_OPTION_cpu_idle_pc_learning, \
+    "-cpu-idle-pc-learning enable PC learning for idle signatures\n", QEMU_ARCH_ALL)
+SRST
+``-cpu-idle-pc-learning``
+    Enable idle signature learning. QEMU stores PC/NPC pairs by default,
+    but automatically falls back to PC-only matching when used with
+    ``-icount``.
+ERST
+
+DEF("cpu-idle-sunos414", 0, QEMU_OPTION_cpu_idle_sunos414, \
+    "-cpu-idle-sunos414  enable built-in SunOS 4.1.4 idle fallback\n", QEMU_ARCH_ALL)
+SRST
+``-cpu-idle-sunos414``
+    Enable the built-in SunOS 4.1.4 SPARC idle signature fallback table.
+ERST
+
 DEF("cpu-idle-debug", 0, QEMU_OPTION_cpu_idle_debug, \
     "-cpu-idle-debug enable CPU idle detection debug output\n", QEMU_ARCH_ALL)
 SRST

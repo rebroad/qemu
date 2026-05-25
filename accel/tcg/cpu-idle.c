@@ -44,6 +44,8 @@ void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
 static bool cpu_idle_debug = false;    // Controls debug output
 static bool cpu_idle_halt_on_idle = true;  // Use vCPU halt + icount warp when idle
+static bool cpu_idle_pc_learning = false;  // Learn/store PC-only signatures in icount mode
+static bool cpu_idle_builtin_fallbacks = false;  // Allow built-in signatures
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -88,11 +90,36 @@ static PCCollection collections[NUM_COLLECTIONS] = {
     {.name = "BUSY", .mode = LEARNING_BUSY}
 };
 
+#define MAX_BUILTIN_IDLE_PCS 16
+typedef struct {
+    CPUPCState pcs[MAX_BUILTIN_IDLE_PCS];
+    size_t count;
+    const char *name;
+} BuiltinIdleSet;
+
+static BuiltinIdleSet builtin_idle_set;
+
 /* Runtime-configurable settings */
 static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
 static int current_sleep_cap = 10000; // Dynamically adjusted based on time sync
 static time_t last_config_mtime = 0;   // Track config file mtime for auto-reload
 static bool auto_tune_sleep = true;    // Auto-adjust sleep to maintain time sync
+
+static inline bool cpu_idle_state_matches(const CPUPCState *state,
+                                          uint64_t pc,
+                                          uint64_t next_pc,
+                                          bool pc_only_mode)
+{
+    if (state->pc != pc) {
+        return false;
+    }
+
+    if (pc_only_mode || next_pc == 0) {
+        return true;
+    }
+
+    return state->next_pc == next_pc;
+}
 
 /* Helper: Extract architecture name from CPU typename (e.g., "sparc-cpu" → "sparc") */
 static const char *get_arch_name_from_cpu(CPUState *cpu)
@@ -120,7 +147,12 @@ static const char *get_arch_name_from_cpu(CPUState *cpu)
 static inline const char *get_idle_pc_save_file(const char *arch_name)
 {
     static char filename[256];
-    const char *suffix = icount_enabled() ? "-icount" : "";
+    const char *suffix = "";
+
+    if (icount_enabled()) {
+        suffix = cpu_idle_pc_learning ? "-icount-pc" : "-icount";
+    }
+
     snprintf(filename, sizeof(filename), "qemu-%s-idle-pcs%s.dat", arch_name, suffix);
     return filename;
 }
@@ -288,7 +320,7 @@ static void load_learned_pcs(const char *arch_name)
     }
 
     DEBUG_PRINTF("📂 Loading learned PCs from %s%s...\n", filename,
-                icount_enabled() ? " [ICOUNT MODE]" : "");
+                icount_enabled() ? (cpu_idle_pc_learning ? " [ICOUNT PC LEARNING]" : " [ICOUNT MODE]") : "");
 
     int mode, num_pcs, max_repeats;
     unsigned int total_samples;
@@ -323,7 +355,7 @@ static void load_learned_pcs(const char *arch_name)
                 unsigned int count;
                 if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
                     coll->pcs[i].pc = pc;
-                    coll->pcs[i].npc = npc;
+                    coll->pcs[i].npc = cpu_idle_pc_learning ? 0 : npc;
                     coll->pcs[i].count = count;
                     coll->num_pcs++;
                 }
@@ -345,7 +377,7 @@ static void load_learned_pcs(const char *arch_name)
                 unsigned int count;
                 if (fscanf(f, "0x%lx 0x%lx %u\n", &pc, &npc, &count) == 3) {
                     coll->pcs[i].pc = pc;
-                    coll->pcs[i].npc = npc;
+                    coll->pcs[i].npc = cpu_idle_pc_learning ? 0 : npc;
                     coll->pcs[i].count = count;
                     coll->total_samples += count;  // Sum counts as estimate
                     coll->num_pcs++;
@@ -405,6 +437,11 @@ static void cpu_idle_stop_learning_internal(void)
                 auto_stopped ? " (auto-stopped)" : "");
     DEBUG_PRINTF("   Total samples: %u\n", coll->total_samples);
     DEBUG_PRINTF("   Unique PC/NPC pairs: %d\n", coll->num_pcs);
+    if (cpu_idle_pc_learning && icount_enabled()) {
+        DEBUG_PRINTF("   Matching mode: PC-only (icount)\n");
+    } else {
+        DEBUG_PRINTF("   Matching mode: PC/NPC pair\n");
+    }
     DEBUG_PRINTF("   Max consecutive repeats: %d\n", coll->max_consecutive_repeats);
 
     if (coll->num_pcs == 0) {
@@ -425,7 +462,8 @@ static void cpu_idle_stop_learning_internal(void)
     }
 
     // Show top 10
-    DEBUG_PRINTF("\n   Top PC/NPC pairs (by frequency):\n");
+    DEBUG_PRINTF("\n   Top PC%s (by frequency):\n",
+                (cpu_idle_pc_learning && icount_enabled()) ? "s" : "/NPC pairs");
     DEBUG_PRINTF("   Rank  PC         NPC        Count     %%\n");
     DEBUG_PRINTF("   ----  --------   --------   -------   -----\n");
     int show_count = coll->num_pcs < 10 ? coll->num_pcs : 10;
@@ -553,6 +591,7 @@ void cpu_idle_exec_hook(CPUState *cs)
     static int learning_consecutive_count = 0;
     static uint64_t learning_last_pc = 0;
     static uint64_t learning_last_npc = 0;
+    const bool pc_only_mode = cpu_idle_pc_learning && icount_enabled();
 
     if (learning_mode != LEARNING_OFF) {
         PCCollection *coll = &collections[learning_mode - 1];  // mode-1 since OFF has no collection
@@ -564,7 +603,8 @@ void cpu_idle_exec_hook(CPUState *cs)
             // Note: learning_mode is now OFF, will continue to idle detection below
         } else {
             // Track consecutive repeats for threshold calculation
-            if (pc_state.pc == learning_last_pc && pc_state.next_pc == learning_last_npc) {
+            if (pc_state.pc == learning_last_pc &&
+                (!pc_only_mode ? (pc_state.next_pc == learning_last_npc) : true)) {
                 learning_consecutive_count++;
                 if (learning_consecutive_count > coll->max_consecutive_repeats) {
                     coll->max_consecutive_repeats = learning_consecutive_count;
@@ -572,13 +612,14 @@ void cpu_idle_exec_hook(CPUState *cs)
             } else {
                 learning_consecutive_count = 1;
                 learning_last_pc = pc_state.pc;
-                learning_last_npc = pc_state.next_pc;
+                learning_last_npc = pc_only_mode ? 0 : pc_state.next_pc;
             }
 
             // Find or add this PC/NPC pair
             int found = -1;
             for (int i = 0; i < coll->num_pcs; i++) {
-                if (coll->pcs[i].pc == pc_state.pc && coll->pcs[i].npc == pc_state.next_pc) {
+                if (cpu_idle_state_matches(&pc_state, coll->pcs[i].pc, coll->pcs[i].npc,
+                                           pc_only_mode)) {
                     found = i;
                     break;
                 }
@@ -588,7 +629,7 @@ void cpu_idle_exec_hook(CPUState *cs)
                 coll->pcs[found].count++;
             } else if (coll->num_pcs < MAX_PC_CANDIDATES) {
                 coll->pcs[coll->num_pcs].pc = pc_state.pc;
-                coll->pcs[coll->num_pcs].npc = pc_state.next_pc;
+                coll->pcs[coll->num_pcs].npc = pc_only_mode ? 0 : pc_state.next_pc;
                 coll->pcs[coll->num_pcs].count = 1;
                 coll->num_pcs++;
             }
@@ -608,7 +649,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         if (idle_coll->num_pcs > 0) {
             // Use learned PCs WITH frequency data
             for (int i = 0; i < idle_coll->num_pcs; i++) {
-                if (pc_state.pc == idle_coll->pcs[i].pc && pc_state.next_pc == idle_coll->pcs[i].npc) {
+                if (cpu_idle_state_matches(&pc_state, idle_coll->pcs[i].pc, idle_coll->pcs[i].npc,
+                                           pc_only_mode)) {
                     is_known_idle = true;
                     pc_frequency = idle_coll->pcs[i].effective_count;
 
@@ -645,13 +687,30 @@ void cpu_idle_exec_hook(CPUState *cs)
         }
     }
 
+    if (!is_known_idle && cpu_idle_builtin_fallbacks && builtin_idle_set.count > 0) {
+        for (size_t i = 0; i < builtin_idle_set.count; i++) {
+            if (cpu_idle_state_matches(&pc_state,
+                                       builtin_idle_set.pcs[i].pc,
+                                       builtin_idle_set.pcs[i].next_pc,
+                                       pc_only_mode)) {
+                is_known_idle = true;
+                pc_frequency = UINT32_MAX;
+                sleep_us = current_sleep_cap;
+                os_idle_hits++;
+                break;
+            }
+        }
+    }
+
     // Generic idle detection (PC/NPC repeat) - only if not already known-idle
-    if (!is_known_idle && pc_state.pc == last_pc && pc_state.next_pc == last_npc) {
+    if (!is_known_idle && pc_state.pc == last_pc &&
+        (!pc_only_mode ? (pc_state.next_pc == last_npc) : true)) {
         // Check if this PC/NPC is in the BUSY collection (filter out busy loops!)
         bool is_busy_pc = false;
         PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
         for (int i = 0; i < busy_coll->num_pcs; i++) {
-            if (busy_coll->pcs[i].pc == pc_state.pc && busy_coll->pcs[i].npc == pc_state.next_pc) {
+            if (cpu_idle_state_matches(&pc_state, busy_coll->pcs[i].pc, busy_coll->pcs[i].npc,
+                                       pc_only_mode)) {
                 is_busy_pc = true;
                 // Track the busy frequency for reporting (antigeneric = rejected generic idle)
                 if (busy_coll->total_samples > 0) {
@@ -946,7 +1005,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         total_hook_time_ns = 0;  // Reset hook overhead timer
     }
 
-    last_pc = pc_state.pc; last_npc = pc_state.next_pc;
+    last_pc = pc_state.pc;
+    last_npc = pc_only_mode ? 0 : pc_state.next_pc;
 
     // Measure hook exit time and accumulate total (must be last thing in function!)
     int64_t hook_exit_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -970,6 +1030,27 @@ void cpu_idle_set_halt_on_idle(bool enable)
 {
     cpu_idle_halt_on_idle = enable;
     fprintf(stderr, "CPU idle halt-on-idle %s\n", enable ? "enabled" : "disabled");
+}
+
+void cpu_idle_set_pc_learning(bool enable)
+{
+    cpu_idle_pc_learning = enable;
+    fprintf(stderr, "CPU idle PC learning %s\n", enable ? "enabled" : "disabled");
+}
+
+void cpu_idle_set_builtin_fallbacks(bool enable)
+{
+    cpu_idle_builtin_fallbacks = enable;
+    fprintf(stderr, "CPU idle built-in fallbacks %s\n", enable ? "enabled" : "disabled");
+}
+
+void cpu_idle_register_builtin_idle_pcs(const char *name,
+                                        const CPUPCState *pcs,
+                                        size_t count)
+{
+    builtin_idle_set.name = name;
+    builtin_idle_set.count = MIN(count, (size_t)MAX_BUILTIN_IDLE_PCS);
+    memcpy(builtin_idle_set.pcs, pcs, builtin_idle_set.count * sizeof(*pcs));
 }
 
 #ifndef CONFIG_USER_ONLY

@@ -3390,6 +3390,14 @@ void qemu_init(int argc, char **argv)
             case QEMU_OPTION_cpu_idle:
                 cpu_idle_set_enabled(true);
                 break;
+            case QEMU_OPTION_cpu_idle_pc_learning:
+                cpu_idle_set_enabled(true);
+                cpu_idle_set_pc_learning(true);
+                break;
+            case QEMU_OPTION_cpu_idle_sunos414:
+                cpu_idle_set_enabled(true);
+                cpu_idle_set_builtin_fallbacks(true);
+                break;
             case QEMU_OPTION_cpu_idle_debug:
                 cpu_idle_set_enabled(true);  // Debug implies enabled
                 cpu_idle_set_debug(true);

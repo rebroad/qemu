@@ -31,6 +31,17 @@
 #include "target/sparc/translate.h"
 #include "system/cpu-idle.h"
 
+static const CPUPCState sunos414_idle_pcs[] = {
+    /*
+     * SunOS 4.1.4 /vmunix extracted from sunos-hdd.qcow2.
+     * _idle is the scheduler idle loop entry in sys/sparc/swtch.s.
+     */
+    {
+        .pc = UINT64_C(0xf0143cd0),
+        .next_pc = UINT64_C(0xf0143cd4),
+    },
+};
+
 // ============================================================================
 // CPU Idle Detection - SPARC Architecture Glue Code
 // ============================================================================
@@ -1097,6 +1108,9 @@ static void sparc_register_cpudef_type(const struct sparc_def_t *def)
 static void sparc_cpu_register_types(void)
 {
     int i;
+
+    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4", sunos414_idle_pcs,
+                                       ARRAY_SIZE(sunos414_idle_pcs));
 
     type_register_static(&sparc_cpu_type_info);
     for (i = 0; i < ARRAY_SIZE(sparc_defs); i++) {

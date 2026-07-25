@@ -90,14 +90,16 @@ static PCCollection collections[NUM_COLLECTIONS] = {
     {.name = "BUSY", .mode = LEARNING_BUSY}
 };
 
-#define MAX_BUILTIN_IDLE_PCS 16
+#define MAX_BUILTIN_IDLE_SETS 4
+#define MAX_BUILTIN_IDLE_PCS 32
 typedef struct {
     CPUPCState pcs[MAX_BUILTIN_IDLE_PCS];
     size_t count;
     const char *name;
 } BuiltinIdleSet;
 
-static BuiltinIdleSet builtin_idle_set;
+static BuiltinIdleSet builtin_idle_sets[MAX_BUILTIN_IDLE_SETS];
+static size_t builtin_idle_set_count;
 
 /* Runtime-configurable settings */
 static int max_sleep_us_cap = 10000;  // Max sleep cap (from config file)
@@ -687,17 +689,23 @@ void cpu_idle_exec_hook(CPUState *cs)
         }
     }
 
-    if (!is_known_idle && cpu_idle_builtin_fallbacks && builtin_idle_set.count > 0) {
-        for (size_t i = 0; i < builtin_idle_set.count; i++) {
-            if (cpu_idle_state_matches(&pc_state,
-                                       builtin_idle_set.pcs[i].pc,
-                                       builtin_idle_set.pcs[i].next_pc,
-                                       pc_only_mode)) {
-                is_known_idle = true;
-                pc_frequency = UINT32_MAX;
-                sleep_us = current_sleep_cap;
-                os_idle_hits++;
-                break;
+    if (!is_known_idle && cpu_idle_builtin_fallbacks && builtin_idle_set_count > 0) {
+        for (size_t set_idx = 0; set_idx < builtin_idle_set_count && !is_known_idle; set_idx++) {
+            const BuiltinIdleSet *set = &builtin_idle_sets[set_idx];
+
+            for (size_t i = 0; i < set->count; i++) {
+                if (cpu_idle_state_matches(&pc_state,
+                                           set->pcs[i].pc,
+                                           set->pcs[i].next_pc,
+                                           pc_only_mode)) {
+                    is_known_idle = true;
+                    pc_frequency = UINT32_MAX;
+                    sleep_us = current_sleep_cap;
+                    os_idle_hits++;
+                    DEBUG_PRINTF("   built-in idle match: %s\n",
+                                 set->name ? set->name : "(unnamed)");
+                    break;
+                }
             }
         }
     }
@@ -762,7 +770,8 @@ void cpu_idle_exec_hook(CPUState *cs)
          * can warp virtual time forward (icount sleep). This lets the host
          * idle heavily while keeping guest time accurate.
          */
-        if (cpu_idle_halt_on_idle && icount_enabled() && !cs->halted) {
+        if (cpu_idle_halt_on_idle && icount_enabled() &&
+            icount_sleep_enabled() && !cs->halted) {
             /*
              * cpu_idle_exec_hook() can run without the BQL held. Only
              * raise CPU interrupts when the BQL is locked; otherwise
@@ -1048,9 +1057,27 @@ void cpu_idle_register_builtin_idle_pcs(const char *name,
                                         const CPUPCState *pcs,
                                         size_t count)
 {
-    builtin_idle_set.name = name;
-    builtin_idle_set.count = MIN(count, (size_t)MAX_BUILTIN_IDLE_PCS);
-    memcpy(builtin_idle_set.pcs, pcs, builtin_idle_set.count * sizeof(*pcs));
+    size_t idx;
+
+    for (idx = 0; idx < builtin_idle_set_count; idx++) {
+        if (g_strcmp0(builtin_idle_sets[idx].name, name) == 0) {
+            break;
+        }
+    }
+
+    if (idx == builtin_idle_set_count) {
+        if (builtin_idle_set_count >= MAX_BUILTIN_IDLE_SETS) {
+            fprintf(stderr, "CPU idle built-in fallback registry full, dropping %s\n",
+                    name ? name : "(unnamed)");
+            return;
+        }
+        builtin_idle_set_count++;
+    }
+
+    builtin_idle_sets[idx].name = name;
+    builtin_idle_sets[idx].count = MIN(count, (size_t)MAX_BUILTIN_IDLE_PCS);
+    memcpy(builtin_idle_sets[idx].pcs, pcs,
+           builtin_idle_sets[idx].count * sizeof(*pcs));
 }
 
 #ifndef CONFIG_USER_ONLY

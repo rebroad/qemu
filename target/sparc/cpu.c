@@ -31,7 +31,7 @@
 #include "target/sparc/translate.h"
 #include "system/cpu-idle.h"
 
-static const CPUPCState sunos414_idle_pcs[] = {
+static const CPUPCState sunos414_kernel_idle_pcs[] = {
     /*
      * SunOS 4.1.4 /vmunix extracted from sunos-hdd.qcow2.
      * These are the code entry points in the idle path. Data/state symbols
@@ -55,6 +55,34 @@ static const CPUPCState sunos414_idle_pcs[] = {
     },
     {
         .pc = UINT64_C(0xf004be20),
+        .next_pc = 0,
+    },
+};
+
+static const CPUPCState sunos414_prom_idle_pcs[] = {
+    /*
+     * SunOS 4.1.4 PROM idle PCs already used by the launcher script.
+     * These are kept separate from kernel idle PCs to avoid mixing firmware
+     * and kernel idle state.
+     */
+    {
+        .pc = UINT64_C(0xffd16750),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffd20170),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffd20174),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffd2ba10),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffef0000),
         .next_pc = 0,
     },
 };
@@ -1126,8 +1154,12 @@ static void sparc_cpu_register_types(void)
 {
     int i;
 
-    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4", sunos414_idle_pcs,
-                                       ARRAY_SIZE(sunos414_idle_pcs));
+    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 kernel",
+                                       sunos414_kernel_idle_pcs,
+                                       ARRAY_SIZE(sunos414_kernel_idle_pcs));
+    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 PROM",
+                                       sunos414_prom_idle_pcs,
+                                       ARRAY_SIZE(sunos414_prom_idle_pcs));
 
     type_register_static(&sparc_cpu_type_info);
     for (i = 0; i < ARRAY_SIZE(sparc_defs); i++) {

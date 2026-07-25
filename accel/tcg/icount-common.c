@@ -46,6 +46,11 @@
  * is TCG-specific, and does not need to be built for other accels.
  */
 static bool icount_sleep = true;
+
+bool icount_sleep_enabled(void)
+{
+    return icount_sleep;
+}
 /*
  * Higher shift = more virtual time per instruction.
  *

@@ -78,6 +78,14 @@ void icount_enable_adaptive(void);
 void icount_start_warp_timer(void);
 void icount_account_warp_timer(void);
 void icount_notify_exit(void);
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+bool icount_sleep_enabled(void);
+#else
+static inline bool icount_sleep_enabled(void)
+{
+    return false;
+}
+#endif
 
 /*
  * CPU Ticks and Clock

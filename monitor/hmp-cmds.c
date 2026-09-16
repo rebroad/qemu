@@ -21,6 +21,7 @@
 #include "exec/target_page.h"
 #include "gdbstub/enums.h"
 #include "monitor/hmp.h"
+#include "monitor/hmp-target.h"
 #include "qemu/help_option.h"
 #include "monitor/hmp.h"
 #include "monitor/hmp-completion.h"

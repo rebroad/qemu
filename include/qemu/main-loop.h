@@ -449,4 +449,38 @@ typedef struct MainLoopPoll {
 void main_loop_poll_add_notifier(Notifier *notify);
 void main_loop_poll_remove_notifier(Notifier *notify);
 
+/**
+ * qemu_get_wait_time_ns: Get main loop wait time
+ *
+ * Returns the cumulative time in nanoseconds that the main I/O loop has spent
+ * waiting/sleeping in os_host_main_loop_wait().
+ *
+ * Note: This measures the I/O thread, not the vCPU thread.
+ */
+int64_t qemu_get_wait_time_ns(void);
+
+/**
+ * qemu_reset_wait_stats: Reset main loop wait statistics
+ *
+ * Resets the main loop wait time to zero. Useful for per-second reporting.
+ */
+void qemu_reset_wait_stats(void);
+
+/**
+ * qemu_get_vcpu_wait_time_ns: Get vCPU thread wait time
+ *
+ * Returns the cumulative time in nanoseconds that the vCPU thread has spent
+ * waiting in rr_wait_io_event() for instruction budget or I/O.
+ *
+ * This is useful for understanding actual vCPU thread idle time.
+ */
+int64_t qemu_get_vcpu_wait_time_ns(void);
+
+/**
+ * qemu_reset_vcpu_wait_stats: Reset vCPU wait statistics
+ *
+ * Resets the vCPU wait time to zero. Useful for per-second reporting.
+ */
+void qemu_reset_vcpu_wait_stats(void);
+
 #endif

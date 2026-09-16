@@ -1,0 +1,194 @@
+/*
+ * QEMU CPU Idle Detection and Power Saving - Architecture-Agnostic Design
+ *
+ * This header documents the FUTURE architecture-agnostic interface for
+ * idle loop detection. Currently implemented for SPARC in target/sparc/cpu.c.
+ *
+ * DESIGN GOALS:
+ * - Learn PC/NPC patterns during idle and busy periods
+ * - Detect guest idle loops at runtime
+ * - Reduce host CPU usage via strategic g_usleep() calls
+ * - Work across all architectures (x86, ARM, SPARC, 6502, etc.)
+ *
+ * TODO: Refactor target/sparc/cpu.c idle detection code to use this interface
+ *       once SPARC implementation is stable and well-tested.
+ *
+ * Copyright (c) 2024 QEMU Contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+#ifndef QEMU_CPU_IDLE_H
+#define QEMU_CPU_IDLE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+/*
+ * IMPLEMENTATION STATUS:
+ * ✅ COMPLETE! Full implementation in accel/tcg/cpu-idle.c
+ * ✅ SPARC using generic system via 7 lines of glue code
+ * ✅ Architecture name auto-detected from CPU typename
+ * 🚀 Ready for other architectures (6502, x86, ARM, etc.)
+ */
+
+/* Forward declarations to avoid pulling in architecture-specific headers */
+typedef struct CPUState CPUState;
+
+/**
+ * CPUPCState - Architecture-agnostic program counter state
+ *
+ * For pattern matching, we want to identify unique execution points.
+ * Architectures handle this differently:
+ *
+ * - SPARC (delayed branch): Uses PC + NPC (both real registers)
+ * - 6502/x86/ARM (immediate): Uses PC only, set next_pc = 0 to disable
+ *
+ * When next_pc is 0, idle detection uses only PC for pattern matching.
+ *
+ * Note: Uses uint64_t to be architecture-agnostic (works for 32-bit and 64-bit targets)
+ */
+typedef struct {
+	uint64_t pc;       /* Current program counter */
+	uint64_t next_pc;  /* Next PC (delayed branch archs) or 0 (immediate branch) */
+} CPUPCState;
+
+/**
+ * cpu_get_pc_state - Get current PC state for a CPU
+ * @cpu: The CPU to query
+ * @state: Output structure to fill with PC values
+ *
+ * Architecture-specific function that must be implemented by each target.
+ * Extracts the current and next program counter from the CPU state.
+ */
+void cpu_get_pc_state(CPUState *cpu, CPUPCState *state);
+
+/**
+ * cpu_idle_exec_hook - Main idle detection hook
+ * @cpu: The CPU that is about to execute
+ *
+ * Called before each translation block execution. Performs:
+ * - PC pattern learning (if in learning mode)
+ * - Idle detection based on learned patterns
+ * - Strategic sleeping to save host CPU
+ * - Speed measurement and statistics
+ *
+ * Safe to call on all architectures. No-op if idle detection is disabled.
+ */
+void cpu_idle_exec_hook(CPUState *cpu);
+
+/**
+ * cpu_idle_set_enabled - Enable/disable idle detection
+ * @enable: true to enable, false to disable
+ *
+ * Controls whether idle detection and power-saving is active.
+ */
+void cpu_idle_set_enabled(bool enable);
+
+/**
+ * cpu_idle_set_debug - Enable/disable debug output
+ * @enable: true to enable, false to disable
+ *
+ * Controls whether per-second statistics are printed to stderr.
+ */
+void cpu_idle_set_debug(bool enable);
+
+/**
+ * cpu_idle_set_halt_on_idle - Enable/disable halt-on-idle behavior
+ * @enable: true to enable, false to disable
+ *
+ * Controls whether idle detection will halt vCPUs (for icount warp) instead
+ * of sleeping in the TCG thread.
+ */
+void cpu_idle_set_halt_on_idle(bool enable);
+
+/**
+ * cpu_idle_set_pc_learning - Enable/disable PC-based idle learning
+ * @enable: true to enable, false to disable
+ *
+ * When enabled, learned idle signatures use PC-only matching in icount mode.
+ * Outside icount, the matcher keeps using PC/NPC pairs.
+ */
+void cpu_idle_set_pc_learning(bool enable);
+
+/**
+ * cpu_idle_set_builtin_fallbacks - Enable/disable built-in fallback signatures
+ * @enable: true to enable, false to disable
+ *
+ * When enabled, architecture glue may register built-in idle signatures
+ * compiled into QEMU (for example SunOS 4.1.4 SPARC).
+ */
+void cpu_idle_set_builtin_fallbacks(bool enable);
+
+/**
+ * cpu_idle_register_builtin_idle_pcs - Register built-in idle signatures
+ * @name: Human-readable label for debug output
+ * @pcs: Array of PC/NPC states to register
+ * @count: Number of entries in @pcs
+ *
+ * Architecture glue may call this during CPU init to seed the idle matcher
+ * with known good signatures from a specific guest OS image.
+ */
+void cpu_idle_register_builtin_idle_pcs(const char *name,
+                                        const CPUPCState *pcs,
+                                        size_t count);
+
+/**
+ * cpu_idle_start_prom_learning - Start PROM/firmware idle learning
+ *
+ * Begins collecting PC patterns while guest is in PROM/firmware idle state.
+ * Auto-stops after 10,000 samples.
+ */
+void cpu_idle_start_prom_learning(void);
+
+/**
+ * cpu_idle_start_os_idle_learning - Start OS idle learning
+ *
+ * Begins collecting PC patterns while guest OS is idle (e.g., at login prompt).
+ * Auto-stops after 10,000 samples.
+ */
+void cpu_idle_start_os_idle_learning(void);
+
+/**
+ * cpu_idle_start_busy_learning - Start busy/active learning
+ *
+ * Begins collecting PC patterns while guest OS is busy (compiling, etc.).
+ * Used for cross-contamination filtering.
+ * Auto-stops after 10,000 samples.
+ */
+void cpu_idle_start_busy_learning(void);
+
+/**
+ * cpu_idle_stop_learning - Stop current learning session
+ *
+ * Stops any active learning mode, displays results, performs confidence
+ * adjustment, and saves learned patterns to disk.
+ */
+void cpu_idle_stop_learning(void);
+
+/**
+ * cpu_idle_init - Initialize idle detection system
+ *
+ * Called automatically on first execution. Loads previously learned patterns
+ * from disk (qemu-<arch>-idle-pcs.dat in current dir or /tmp).
+ */
+void cpu_idle_init(void);
+
+#endif /* QEMU_CPU_IDLE_H */

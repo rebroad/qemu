@@ -735,6 +735,120 @@ SRST
 ERST
 
     {
+        .name       = "cpu-idle",
+        .args_type  = "enable:b",
+        .params     = "on|off",
+        .help       = "enable or disable CPU idle detection and power-saving",
+        .cmd        = hmp_cpu_idle,
+    },
+
+SRST
+``cpu-idle`` *on*|*off*
+  Enable or disable CPU idle detection and power-saving system (architecture-agnostic).
+  When enabled, QEMU detects guest idle loops and sleeps to reduce host CPU usage.
+ERST
+
+    {
+        .name       = "cpu-idle-debug",
+        .args_type  = "enable:b",
+        .params     = "on|off",
+        .help       = "enable or disable CPU idle detection debug output",
+        .cmd        = hmp_cpu_idle_debug,
+    },
+
+SRST
+``cpu-idle-debug`` *on*|*off*
+  Enable or disable CPU idle detection debug output (architecture-agnostic).
+  This shows statistics about idle loop detection and power-saving.
+ERST
+
+    {
+        .name       = "cpu-idle-halt",
+        .args_type  = "enable:b",
+        .params     = "on|off",
+        .help       = "enable or disable halting vCPU on idle (icount warp)",
+        .cmd        = hmp_cpu_idle_halt,
+    },
+
+SRST
+``cpu-idle-halt`` *on*|*off*
+  Enable or disable halting the vCPU when an idle loop is detected.
+  When enabled and icount is active, QEMU halts the vCPU and lets icount
+  warp virtual time forward, reducing host CPU while keeping guest time correct.
+ERST
+
+    {
+        .name       = "icount-shift",
+        .args_type  = "shift:s",
+        .params     = "shift_value|auto",
+        .help       = "set icount shift value (0-10 or 'auto' for auto mode)",
+        .cmd        = hmp_icount_shift_set,
+    },
+
+SRST
+``icount-shift`` *shift_value|auto*
+  Set the icount shift value dynamically. The shift determines virtual time
+  per instruction (2^shift ns/inst). Higher shift = faster guest wall-clock execution.
+  Use 'auto' to re-enable auto-adjust mode. Range: 0 to 10 or 'auto'.
+ERST
+
+    {
+        .name       = "cpu-idle-start-prom-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "start collecting PROM/firmware idle PC frequencies",
+        .cmd        = hmp_cpu_idle_start_prom_learning,
+    },
+
+SRST
+``cpu-idle-start-prom-learning``
+  Start PROM/firmware idle PC learning mode (architecture-agnostic).
+  Keep guest at firmware prompt for 10 seconds. Auto-stops after 10K samples.
+ERST
+
+    {
+        .name       = "cpu-idle-start-os-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "start collecting OS idle PC frequencies",
+        .cmd        = hmp_cpu_idle_start_os_learning,
+    },
+
+SRST
+``cpu-idle-start-os-learning``
+  Start OS idle PC learning mode (architecture-agnostic).
+  Keep guest idle at login prompt for 10 seconds. Auto-stops after 10K samples.
+ERST
+
+    {
+        .name       = "cpu-idle-start-busy-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "start collecting busy PC frequencies for filtering",
+        .cmd        = hmp_cpu_idle_start_busy_learning,
+    },
+
+SRST
+``cpu-idle-start-busy-learning``
+  Start busy PC learning mode (architecture-agnostic).
+  Keep guest busy (compiling, running tasks). Auto-stops after 10K samples.
+ERST
+
+    {
+        .name       = "cpu-idle-stop-learning",
+        .args_type  = "",
+        .params     = "",
+        .help       = "stop any active learning mode and show results",
+        .cmd        = hmp_cpu_idle_stop_learning,
+    },
+
+SRST
+``cpu-idle-stop-learning``
+  Stop whichever learning mode is active (PROM/OS idle or busy) (architecture-agnostic).
+  Shows top 10 PCs, filters contamination if busy, and auto-saves to file.
+ERST
+
+    {
         .name       = "mouse_move",
         .args_type  = "dx_str:s,dy_str:s,dz_str:s?",
         .params     = "dx dy [dz]",

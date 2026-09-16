@@ -37,6 +37,7 @@
 #include "hw/core/cpu.h"
 #include "exec/icount.h"
 #include "system/cpu-timers-internal.h"
+#include "util/time-format.h"
 
 /*
  * ICOUNT: Instruction Counter
@@ -45,7 +46,26 @@
  * is TCG-specific, and does not need to be built for other accels.
  */
 static bool icount_sleep = true;
-/* Arbitrarily pick 1MIPS as the minimum allowable speed.  */
+
+bool icount_sleep_enabled(void)
+{
+    return icount_sleep;
+}
+/*
+ * Higher shift = more virtual time per instruction.
+ *
+ * That means virtual time advances faster per insn, so to stay aligned to
+ * real time the guest executes fewer instructions per second (slower guest
+ * instruction throughput). This is why MAX_ICOUNT_SHIFT caps the slowest
+ * allowable guest speed.
+ *
+ * The "minimum speed" is the guest instruction rate required to keep
+ * virtual time in sync with real time at a given shift:
+ *   min_speed = 1,000,000,000ns / (2^shift) instructions per second
+ *
+ * Example:
+ *   shift=10 → 1024ns/insn → ~976 KIPS required to keep up with real time.
+ */
 #define MAX_ICOUNT_SHIFT 10
 
 bool icount_align_option;
@@ -53,13 +73,13 @@ bool icount_align_option;
 /* Do not count executed instructions */
 ICountMode use_icount = ICOUNT_DISABLED;
 
-static void icount_enable_precise(void)
+void icount_enable_precise(void)
 {
     /* Fixed conversion of insn to ns via "shift" option */
     use_icount = ICOUNT_PRECISE;
 }
 
-static void icount_enable_adaptive(void)
+void icount_enable_adaptive(void)
 {
     /* Runtime adaptive algorithm to compute shift */
     use_icount = ICOUNT_ADAPTATIVE;
@@ -165,6 +185,22 @@ int64_t icount_to_ns(int64_t icount)
  * the IO wait loop.
  */
 #define ICOUNT_WOBBLE (NANOSECONDS_PER_SECOND / 10)
+#define ICOUNT_ADJUST_MIN_INTERVAL (500 * 1000000LL)
+
+static FILE *icount_debug_file;
+
+static void G_GNUC_PRINTF(1, 2) icount_debug(const char *format, ...)
+{
+    va_list ap;
+
+    if (!icount_debug_file) {
+        return;
+    }
+    va_start(ap, format);
+    vfprintf(icount_debug_file, format, ap);
+    va_end(ap);
+    fflush(icount_debug_file);
+}
 
 static void icount_adjust(void)
 {
@@ -177,28 +213,159 @@ static void icount_adjust(void)
         return;
     }
 
-    seqlock_write_lock(&timers_state.vm_clock_seqlock,
-                       &timers_state.vm_clock_lock);
-    cur_time = REPLAY_CLOCK_LOCKED(REPLAY_CLOCK_VIRTUAL_RT,
-                                   cpu_get_clock_locked());
-    cur_icount = icount_get_locked();
+    // Calculate virtual-time rate and effective guest MIPS for debug output
+    static int64_t last_real_time_ns = 0;
+    static int64_t last_vm_time_ns = 0;
+    static int64_t last_icount_raw = 0;
+    static int64_t last_adjust_time_ns = 0;
+    int vm_rate_percent = 0;
+    double mips = 0.0;
+
+    int64_t current_real_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t current_vm_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t real_delta_ns = 0;
+    int64_t vm_delta_ns = 0;
+    int64_t icount_delta = 0;
+
+    if (last_real_time_ns > 0) {
+        real_delta_ns = current_real_ns - last_real_time_ns;
+        vm_delta_ns = current_vm_ns - last_vm_time_ns;
+        if (real_delta_ns > 0) {
+            vm_rate_percent = (int)((double)vm_delta_ns / (double)real_delta_ns * 100.0);
+        }
+    }
+    last_real_time_ns = current_real_ns;
+    last_vm_time_ns = current_vm_ns;
+
+    seqlock_write_lock(&timers_state.vm_clock_seqlock, &timers_state.vm_clock_lock);
+    cur_time = REPLAY_CLOCK_LOCKED(REPLAY_CLOCK_VIRTUAL_RT, cpu_get_clock_locked());
+    int64_t cur_icount_raw = icount_get_raw_locked();
+    cur_icount = qatomic_read(&timers_state.qemu_icount_bias) +
+                 icount_to_ns(cur_icount_raw);
 
     delta = cur_icount - cur_time;
-    /* FIXME: This is a very crude algorithm, somewhat prone to oscillation.  */
-    if (delta > 0
-        && timers_state.last_delta + ICOUNT_WOBBLE < delta * 2
-        && timers_state.icount_time_shift > 0) {
-        /* The guest is getting too far ahead.  Slow time down.  */
-        qatomic_set(&timers_state.icount_time_shift,
-                    timers_state.icount_time_shift - 1);
+    // Calculate velocity (rate of change of delta) for debug output
+    int64_t delta_velocity = delta - timers_state.last_delta;
+
+    int direction = 0;
+    bool adjust_allowed = last_adjust_time_ns == 0 ||
+        current_real_ns - last_adjust_time_ns >= ICOUNT_ADJUST_MIN_INTERVAL;
+    if (adjust_allowed && delta > ICOUNT_WOBBLE &&
+        timers_state.icount_time_shift > 0) {
+        /* The guest is getting too far ahead.  Advance virtual time slower.  */
+        direction = -1;
+    } else if (adjust_allowed && delta < -ICOUNT_WOBBLE &&
+               timers_state.icount_time_shift < MAX_ICOUNT_SHIFT) {
+        /* The guest is getting too far behind.  Advance virtual time faster.  */
+        direction = 1;
     }
-    if (delta < 0
-        && timers_state.last_delta - ICOUNT_WOBBLE > delta * 2
-        && timers_state.icount_time_shift < MAX_ICOUNT_SHIFT) {
-        /* The guest is getting too far behind.  Speed time up.  */
-        qatomic_set(&timers_state.icount_time_shift,
-                    timers_state.icount_time_shift + 1);
+
+    int old_shift, new_shift;
+    if (direction != 0) {
+        old_shift = timers_state.icount_time_shift;
+        new_shift = old_shift + direction;
+        qatomic_set(&timers_state.icount_time_shift, new_shift);
+
+        // Track time since last adjustment and min/max intervals PER SHIFT VALUE
+        static int64_t min_interval_per_shift[MAX_ICOUNT_SHIFT + 1];
+        static int64_t max_interval_per_shift[MAX_ICOUNT_SHIFT + 1];
+        static bool intervals_initialized = false;
+
+        // Initialize interval arrays on first call
+        if (!intervals_initialized) {
+            for (int i = 0; i <= MAX_ICOUNT_SHIFT; i++) {
+                min_interval_per_shift[i] = INT64_MAX;
+                max_interval_per_shift[i] = 0;
+            }
+            intervals_initialized = true;
+        }
+
+        int64_t time_since_adjust_ns = last_adjust_time_ns > 0 ? (current_real_ns - last_adjust_time_ns) : 0;
+
+        // Record interval for the OLD shift (the one we just ran with)
+        if (time_since_adjust_ns > 0 && old_shift >= 0 && old_shift <= MAX_ICOUNT_SHIFT) {
+            if (time_since_adjust_ns < min_interval_per_shift[old_shift]) {
+                min_interval_per_shift[old_shift] = time_since_adjust_ns;
+            }
+            if (time_since_adjust_ns > max_interval_per_shift[old_shift]) {
+                max_interval_per_shift[old_shift] = time_since_adjust_ns;
+            }
+        }
+
+        last_adjust_time_ns = current_real_ns;
+
+        // VM clock drift direction: positive delta means ahead, negative means behind
+        const char *vm_dir = direction < 0 ? "+" : "-";
+        int64_t abs_delta = direction < 0 ? delta : -delta;
+
+        // Format time since last adjustment
+        char time_since_str[32];
+        if (time_since_adjust_ns > 0) {
+            format_time_delta(time_since_adjust_ns, time_since_str, sizeof(time_since_str));
+        } else {
+            snprintf(time_since_str, sizeof(time_since_str), "first");
+        }
+
+        // Format the time delta in human-readable units
+        char delta_str[32];
+        format_time_delta(abs_delta, delta_str, sizeof(delta_str));
+
+        // Format the velocity for debug (rate of change of drift)
+        char velocity_str[32];
+        format_time_delta(delta_velocity < 0 ? -delta_velocity : delta_velocity, velocity_str, sizeof(velocity_str));
+        const char *velocity_dir = delta_velocity < 0 ? "-" : "+";
+
+        // Predict drift at next adjustment based on NEW shift.
+        // The shift change alters virtual time rate by factor of 2.
+        // direction > 0: shift up → virtual time 2x faster.
+        // direction < 0: shift down → virtual time 2x slower.
+
+        // Estimate new velocity: shift change reverses and scales the drift velocity
+        // When we shift up while behind, we expect the drift to improve (velocity becomes positive)
+        // When we shift down while ahead, we expect the drift to improve (velocity becomes negative)
+        int64_t estimated_new_velocity = -delta_velocity * direction;  // Reverses and scales by shift direction
+
+        // Use NEW shift's historical interval range for prediction
+        int64_t new_shift_min_interval = min_interval_per_shift[new_shift];
+        int64_t new_shift_max_interval = max_interval_per_shift[new_shift];
+
+        char prediction_str[256] = "";
+
+        if (new_shift_min_interval != INT64_MAX && new_shift_max_interval > 0) {
+            // Predict drift = current_drift + (new_velocity * time_interval_for_new_shift)
+            int64_t min_predicted_drift = delta + (estimated_new_velocity * new_shift_min_interval / NANOSECONDS_PER_SECOND);
+            int64_t max_predicted_drift = delta + (estimated_new_velocity * new_shift_max_interval / NANOSECONDS_PER_SECOND);
+
+            // Format predictions
+            char min_pred_str[32], max_pred_str[32];
+            const char *min_dir = min_predicted_drift < 0 ? "-" : "+";
+            const char *max_dir = max_predicted_drift < 0 ? "-" : "+";
+            format_time_delta(min_predicted_drift < 0 ? -min_predicted_drift : min_predicted_drift,
+                             min_pred_str, sizeof(min_pred_str));
+            format_time_delta(max_predicted_drift < 0 ? -max_predicted_drift : max_predicted_drift,
+                             max_pred_str, sizeof(max_pred_str));
+
+            // Format the intervals used
+            char min_interval_str[32], max_interval_str[32];
+            format_time_delta(new_shift_min_interval, min_interval_str, sizeof(min_interval_str));
+            format_time_delta(new_shift_max_interval, max_interval_str, sizeof(max_interval_str));
+
+            snprintf(prediction_str, sizeof(prediction_str), " pred:vm:%s%s-%s%s(@%s-%s)",
+                    min_dir, min_pred_str, max_dir, max_pred_str,
+                    min_interval_str, max_interval_str);
+        }
+
+        if (last_icount_raw > 0 && real_delta_ns > 0) {
+            icount_delta = cur_icount_raw - last_icount_raw;
+            mips = (double)icount_delta * 1000.0 / (double)real_delta_ns;
+        }
+        icount_debug("[+%s][ICOUNT-AUTO] vmrate=%d%% mips=%.1f vm:%s%s v:%s%s/s shift %d→%d (%dns→%dns/i)%s\n",
+                time_since_str, vm_rate_percent, mips, vm_dir, delta_str, velocity_dir, velocity_str,
+                old_shift, new_shift,
+                1 << old_shift, 1 << new_shift,
+                prediction_str);
     }
+    last_icount_raw = cur_icount_raw;
     timers_state.last_delta = delta;
     qatomic_set(&timers_state.qemu_icount_bias,
                 cur_icount - (timers_state.qemu_icount
@@ -209,8 +376,7 @@ static void icount_adjust(void)
 
 static void icount_adjust_rt(void *opaque)
 {
-    timer_mod(timers_state.icount_rt_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL_RT) + 1000);
+    timer_mod(timers_state.icount_rt_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL_RT) + 1000);
     icount_adjust();
 }
 
@@ -226,6 +392,16 @@ int64_t icount_round(int64_t count)
 {
     int shift = qatomic_read(&timers_state.icount_time_shift);
     return (count + (1 << shift) - 1) >> shift;
+}
+
+void icount_set_shift(int shift)
+{
+    qatomic_set(&timers_state.icount_time_shift, shift);
+}
+
+int icount_get_shift(void)
+{
+    return qatomic_read(&timers_state.icount_time_shift);
 }
 
 static void icount_warp_rt(void)
@@ -420,6 +596,7 @@ bool icount_configure(QemuOpts *opts, Error **errp)
     const char *option = qemu_opt_get(opts, "shift");
     bool sleep = qemu_opt_get_bool(opts, "sleep", true);
     bool align = qemu_opt_get_bool(opts, "align", false);
+    const char *debug_file = qemu_opt_get(opts, "debug-file");
     long time_shift = -1;
 
     if (!option) {
@@ -428,6 +605,15 @@ bool icount_configure(QemuOpts *opts, Error **errp)
             return false;
         }
         return true;
+    }
+
+    if (debug_file) {
+        icount_debug_file = fopen(debug_file, "w");
+        if (!icount_debug_file) {
+            error_setg_errno(errp, errno, "icount: unable to open debug-file '%s'",
+                             debug_file);
+            return false;
+        }
     }
 
     if (align && !sleep) {

@@ -30,8 +30,75 @@
 #include "tcg/tcg.h"
 #include "fpu/softfloat.h"
 #include "target/sparc/translate.h"
+#include "system/cpu-idle.h"
 
-//#define DEBUG_FEATURES
+static const CPUPCState sunos414_kernel_idle_pcs[] = {
+    /*
+     * SunOS 4.1.4 /vmunix extracted from sunos-hdd.qcow2.
+     * These are the code entry points in the idle path. Data/state symbols
+     * such as _whichqs, _qrunflag, _idleproc, and _cpu_idle are excluded.
+     */
+    {
+        .pc = UINT64_C(0xf0143cd0),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf0143dbc),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf0135fd8),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf0038b1c),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xf004be20),
+        .next_pc = 0,
+    },
+};
+
+static const CPUPCState sunos414_prom_idle_pcs[] = {
+    /*
+     * SunOS 4.1.4 PROM idle PCs already used by the launcher script.
+     * These are kept separate from kernel idle PCs to avoid mixing firmware
+     * and kernel idle state.
+     */
+    {
+        .pc = UINT64_C(0xffd16750),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffd20170),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffd20174),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffd2ba10),
+        .next_pc = 0,
+    },
+    {
+        .pc = UINT64_C(0xffef0000),
+        .next_pc = 0,
+    },
+};
+
+// ============================================================================
+// CPU Idle Detection - SPARC Architecture Glue Code
+// ============================================================================
+
+// Architecture interface: extract PC/NPC from SPARC CPU state
+void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
+{
+    CPUSPARCState *env = cpu_env(cpu);
+    state->pc = env->pc;
+    state->next_pc = env->npc;  // SPARC has delayed branch architecture
+}
 
 static void sparc_cpu_reset_hold(Object *obj, ResetType type)
 {
@@ -96,6 +163,7 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             if (type != TT_EXTINT || cpu_pil_allowed(env, pil)) {
                 cs->exception_index = env->interrupt_index;
                 sparc_cpu_do_interrupt(cs);
+                // REBTODO - can we set cs->halted=1 here like in i386/kvm/kvm.c?
                 return true;
             }
         }
@@ -1068,6 +1136,7 @@ static const TCGCPUOps sparc_tcg_ops = {
     .synchronize_from_tb = sparc_cpu_synchronize_from_tb,
     .restore_state_to_opc = sparc_restore_state_to_opc,
     .mmu_index = sparc_cpu_mmu_index,
+    .cpu_exec_enter = cpu_idle_exec_hook,
 
 #ifndef CONFIG_USER_ONLY
     .tlb_fill = sparc_cpu_tlb_fill,
@@ -1154,6 +1223,13 @@ static void sparc_register_cpudef_type(const struct sparc_def_t *def)
 static void sparc_cpu_register_types(void)
 {
     int i;
+
+    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 kernel",
+                                       sunos414_kernel_idle_pcs,
+                                       ARRAY_SIZE(sunos414_kernel_idle_pcs));
+    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 PROM",
+                                       sunos414_prom_idle_pcs,
+                                       ARRAY_SIZE(sunos414_prom_idle_pcs));
 
     type_register_static(&sparc_cpu_type_info);
     for (i = 0; i < ARRAY_SIZE(sparc_defs); i++) {

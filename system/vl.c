@@ -92,6 +92,7 @@
 #include "system/cpus.h"
 #include "system/cpu-timers.h"
 #include "exec/icount.h"
+#include "system/cpu-idle.h"
 #include "migration/colo.h"
 #include "migration/postcopy-ram.h"
 #include "system/kvm.h"
@@ -450,6 +451,9 @@ static QemuOptsList qemu_icount_opts = {
         }, {
             .name = "sleep",
             .type = QEMU_OPT_BOOL,
+        }, {
+            .name = "debug-file",
+            .type = QEMU_OPT_STRING,
         }, {
             .name = "rr",
             .type = QEMU_OPT_STRING,
@@ -3490,6 +3494,21 @@ void qemu_init(int argc, char **argv)
             case QEMU_OPTION_no_shutdown:
                 olist = qemu_find_opts("action");
                 qemu_opts_parse_noisily(olist, "shutdown=pause", false);
+                break;
+            case QEMU_OPTION_cpu_idle:
+                cpu_idle_set_enabled(true);
+                break;
+            case QEMU_OPTION_cpu_idle_pc_learning:
+                cpu_idle_set_enabled(true);
+                cpu_idle_set_pc_learning(true);
+                break;
+            case QEMU_OPTION_cpu_idle_sunos414:
+                cpu_idle_set_enabled(true);
+                cpu_idle_set_builtin_fallbacks(true);
+                break;
+            case QEMU_OPTION_cpu_idle_debug:
+                cpu_idle_set_enabled(true);  // Debug implies enabled
+                cpu_idle_set_debug(true);
                 break;
             case QEMU_OPTION_uuid:
                 if (qemu_uuid_parse(optarg, &qemu_uuid) < 0) {

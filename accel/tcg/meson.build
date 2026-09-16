@@ -28,6 +28,7 @@ user_ss.add(files(
 ))
 
 system_ss.add(files(
+  'cpu-idle.c',
   'cputlb.c',
   'icount-common.c',
   'monitor.c',

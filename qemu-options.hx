@@ -5225,6 +5225,41 @@ SRST
     changes to the disk image.
 ERST
 
+DEF("cpu-idle", 0, QEMU_OPTION_cpu_idle, \
+    "-cpu-idle       enable CPU idle detection and power-saving\n", QEMU_ARCH_ALL)
+SRST
+``-cpu-idle``
+    Enable CPU idle detection and power-saving system. QEMU will detect
+    guest idle loops and strategically sleep to reduce host CPU usage.
+    Use ``-cpu-idle-debug`` to see detailed statistics.
+ERST
+
+DEF("cpu-idle-pc-learning", 0, QEMU_OPTION_cpu_idle_pc_learning, \
+    "-cpu-idle-pc-learning enable PC learning for idle signatures\n", QEMU_ARCH_ALL)
+SRST
+``-cpu-idle-pc-learning``
+    Enable idle signature learning. QEMU stores PC/NPC pairs by default,
+    but automatically falls back to PC-only matching when used with
+    ``-icount``.
+ERST
+
+DEF("cpu-idle-sunos414", 0, QEMU_OPTION_cpu_idle_sunos414, \
+    "-cpu-idle-sunos414  enable built-in SunOS 4.1.4 idle fallback\n", QEMU_ARCH_ALL)
+SRST
+``-cpu-idle-sunos414``
+    Enable the built-in SunOS 4.1.4 SPARC idle signature fallback table.
+ERST
+
+DEF("cpu-idle-debug", 0, QEMU_OPTION_cpu_idle_debug, \
+    "-cpu-idle-debug enable CPU idle detection debug output\n", QEMU_ARCH_ALL)
+SRST
+``-cpu-idle-debug``
+    Enable debug output for CPU idle detection system. Shows per-second
+    statistics including idle percentage, sleep time, and breakdown of
+    different idle detection methods (PROM, OS, generic, halted state).
+    Implies ``-cpu-idle``.
+ERST
+
 DEF("action", HAS_ARG, QEMU_OPTION_action,
     "-action reboot=reset|shutdown\n"
     "                   action when guest reboots [default=reset]\n"
@@ -5314,17 +5349,21 @@ SRST
 ERST
 
 DEF("icount", HAS_ARG, QEMU_OPTION_icount, \
-    "-icount [shift=N|auto][,align=on|off][,sleep=on|off][,rr=record|replay,rrfile=<filename>[,rrsnapshot=<snapshot>]]\n" \
+    "-icount [shift=N|auto][,align=on|off][,sleep=on|off][,debug-file=<filename>]" \
+    "[,rr=record|replay,rrfile=<filename>[,rrsnapshot=<snapshot>]]\n" \
     "                enable virtual instruction counter with 2^N clock ticks per\n" \
     "                instruction, enable aligning the host and virtual clocks\n" \
     "                or disable real time cpu sleeping, and optionally enable\n" \
     "                record-and-replay mode\n", QEMU_ARCH_ALL)
 SRST
-``-icount [shift=N|auto][,align=on|off][,sleep=on|off][,rr=record|replay,rrfile=filename[,rrsnapshot=snapshot]]``
+``-icount [shift=N|auto][,align=on|off][,sleep=on|off][,debug-file=filename][,rr=record|replay,rrfile=filename[,rrsnapshot=snapshot]]``
     Enable virtual instruction counter. The virtual cpu will execute one
     instruction every 2^N ns of virtual time. If ``auto`` is specified
     then the virtual cpu speed will be automatically adjusted to keep
     virtual time within a few seconds of real time.
+
+    ``debug-file=filename`` writes adaptive-shift diagnostics to the named
+    file instead of standard error.
 
     Note that while this option can give deterministic behavior, it does
     not provide cycle accurate emulation. Modern CPUs contain

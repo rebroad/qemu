@@ -341,7 +341,11 @@ bool vmstate_load_vmsd(QEMUFile *f, const VMStateDescription *vmsd,
             vmstate_handle_alloc(first_elem, field, opaque);
             if (field->flags & VMS_POINTER) {
                 first_elem = *(void **)first_elem;
-                assert(first_elem || !n_elems || !size);
+                if (!(first_elem || !n_elems || !size)) {
+                    error_report("❌ Snapshot incompatibility in '%s' field '%s'",
+                                vmsd->name, field->name);
+                    return -EINVAL;
+                }
             }
 
             for (i = 0; i < n_elems; i++) {

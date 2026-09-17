@@ -15,6 +15,16 @@ remaining a usable, time-correct VM.
 - Keep source edits in the source repositories and perform QEMU builds in the
   corresponding external `.build` tree under `/mnt/kingston/builds/`.
 - Preserve unrelated existing work in the checkout.
+- The normal VM network must attach to the host `spod` bridge. Networking is
+  part of the acceptance path, not an optional fallback to user-mode or no
+  networking.
+- Provide working telnet access to the SunOS guest and port/build an SSH
+  server suitable for SunOS 4.1.4, then verify SSH access to the running VM.
+  The guest is recorded in `/etc/hosts` as `lily` and that name should be used
+  when verifying the services.
+- All QEMU CPU measurements must be taken from an elevated host shell against
+  the live QEMU PID, using a real observation interval (at least 10 seconds);
+  sandbox-limited or stale-PID readings are invalid evidence.
 - Keep adaptive icount diagnostics out of normal stderr output when requested
   by writing them to a dedicated `-icount debug-file=...` logfile, and make
   shift changes stable by enforcing a drift deadband and minimum dwell time.
@@ -56,7 +66,10 @@ same tested QEMU/SunOS build:
    immediately or taking materially longer.
 9. The normal launcher invocation `./run_Solaris112.sh` must work successfully
    without test-only options: it must start QEMU, complete its normal
-   boot/monitoring path, and shut down cleanly.
+   boot/monitoring path on the `spod` bridge, and shut down cleanly.
+10. The running bridged SunOS guest must accept a verified telnet connection
+    and a verified SSH connection as `lily`. Building/porting the SSH server
+    and its required SunOS support is within scope.
 
 ## Evidence to retain
 

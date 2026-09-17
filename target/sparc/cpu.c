@@ -58,6 +58,15 @@ static const CPUPCState sunos414_kernel_idle_pcs[] = {
         .pc = UINT64_C(0xf004be20),
         .next_pc = 0,
     },
+    /* SunOS login(1M) input wait on the serial console. */
+    {
+        .pc = UINT64_C(0xf01294f8),
+        .next_pc = UINT64_C(0xf01294fc),
+    },
+    {
+        .pc = UINT64_C(0xf0038b84),
+        .next_pc = UINT64_C(0xf0038b88),
+    },
 };
 
 static const CPUPCState sunos414_prom_idle_pcs[] = {

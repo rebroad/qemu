@@ -228,16 +228,6 @@ static void nvram_init(Nvram *nvram, uint8_t *macaddr,
     Sun_init_header((struct Sun_nvram *)&image[0x1fd8], macaddr,
                     nvram_machine_id);
 
-    /* The original SS-5 PROM validates the main NVRAM area with its own
-     * checksum.  Preserve the CHRP signature byte while making the image
-     * valid for both PROM implementations. */
-    image[0x1dd7] = image[0];
-    uint8_t xsum = 0x7b;
-    for (i = 0x20; i < 0x1dd8; i++) {
-        xsum ^= image[i];
-    }
-    image[0] = xsum ^ 0xf0;
-
     for (i = 0; i < sizeof(image); i++) {
         (k->write)(nvram, i, image[i]);
     }

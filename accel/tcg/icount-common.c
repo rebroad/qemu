@@ -184,8 +184,11 @@ int64_t icount_to_ns(int64_t icount)
  * When the guest is idle real and virtual time will be aligned in
  * the IO wait loop.
  */
-#define ICOUNT_WOBBLE (NANOSECONDS_PER_SECOND / 10)
-#define ICOUNT_ADJUST_MIN_INTERVAL (500 * 1000000LL)
+/* Keep adaptive changes away from timer/measurement jitter.  A one-second
+ * deadband and two-second dwell prevent the power-saving idle path from
+ * repeatedly crossing the adjustment boundary and chasing its own warp. */
+#define ICOUNT_WOBBLE (NANOSECONDS_PER_SECOND)
+#define ICOUNT_ADJUST_MIN_INTERVAL (2 * NANOSECONDS_PER_SECOND)
 
 static FILE *icount_debug_file;
 

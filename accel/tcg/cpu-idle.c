@@ -42,6 +42,7 @@ static bool cpu_idle_debug = false;    // Controls debug output
 static bool cpu_idle_halt_on_idle = true;  // Use vCPU halt + icount warp when idle
 static bool cpu_idle_pc_learning = false;  // Learn/store PC-only signatures in icount mode
 static bool cpu_idle_builtin_fallbacks = false;  // Allow built-in signatures
+static bool learned_os_data_enabled = false;  // Arm learned OS PCs only after live learning
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -408,6 +409,9 @@ static void cpu_idle_start_learning_internal(LearningMode mode)
     memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
 
     // Now set learning mode (after reset to avoid counting during reset)
+    if (mode == LEARNING_OS_IDLE) {
+        learned_os_data_enabled = false;
+    }
     learning_mode = mode;
 
     if (mode == LEARNING_BUSY) {
@@ -429,6 +433,9 @@ static void cpu_idle_stop_learning_internal(void)
     PCCollection *coll = &collections[stopped_mode - 1];
 
     learning_mode = LEARNING_OFF;
+    if (stopped_mode == LEARNING_OS_IDLE) {
+        learned_os_data_enabled = true;
+    }
 
     bool auto_stopped = (coll->total_samples >= LEARNING_AUTO_STOP_SAMPLES);
     DEBUG_PRINTF("🎓 %s PC learning complete%s!\n", coll->name,
@@ -643,6 +650,9 @@ void cpu_idle_exec_hook(CPUState *cs)
 
     // Check both idle collections (PROM and OS) - use learned frequency!
     for (int idle_type = 0; idle_type < 2 && !is_known_idle; idle_type++) {
+        if (idle_type == 1 && !learned_os_data_enabled) {
+            continue;
+        }
         PCCollection *idle_coll = &collections[idle_type];  // 0=PROM, 1=OS
 
         if (idle_coll->num_pcs > 0) {
@@ -734,8 +744,13 @@ void cpu_idle_exec_hook(CPUState *cs)
             freq_pct_sum += 1.0;  // Low confidence (generic repeat)
             if (1.0 < freq_pct_min) freq_pct_min = 1.0;
             if (1.0 > freq_pct_max) freq_pct_max = 1.0;
-            // Generic sleep: just a small delay (not trusted like learned PCs)
-            sleep_us = 1000;  // 1ms for generic repeats
+            /*
+             * A repeated TB is not sufficient evidence of an idle guest:
+             * boot-time polling, filesystem waits, and device probes all
+             * legitimately repeat PCs.  Count these repeats for diagnostics,
+             * but never throttle the vCPU from this generic fallback.
+             */
+            sleep_us = 0;
         }
     } else if (!is_known_idle && !cs->halted) {
         // Normal busy execution (PC changed, not idle, not halted)
@@ -763,20 +778,6 @@ void cpu_idle_exec_hook(CPUState *cs)
     static int64_t total_sleep_time_ns = 0;  // Track actual sleep time separately
 
     if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
-        /*
-         * If icount is enabled, prefer a real vCPU halt so the main loop
-         * can warp virtual time forward (icount sleep). This lets the host
-         * idle heavily while keeping guest time accurate.
-         */
-        if (!builtin_prom_idle && cpu_idle_halt_on_idle && icount_enabled() &&
-            icount_sleep_enabled() && !cs->halted) {
-            /* Set the request atomically and wake a vCPU that is waiting. */
-            cpu_set_interrupt(cs, CPU_INTERRUPT_HALT);
-            qemu_cpu_kick(cs);
-            cpu_exit(cs);
-            return;
-        }
-
         /*
          * Do not allow idle sleeping to push the guest below real time.
          * If the last measured speed is <100%, skip sleeping entirely.

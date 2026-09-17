@@ -1935,6 +1935,10 @@ if get_option('gtk') \
     if not get_option('vte').auto() or have_system
       vte = dependency('vte-2.91',
                        method: 'pkg-config',
+                       # VTE is an external dependency.  Its installed
+                       # headers may contain compiler-specific attributes;
+                       # keep their diagnostics out of QEMU's -Werror set.
+                       include_type: 'system',
                        required: get_option('vte'))
     endif
   endif

@@ -36,6 +36,7 @@ __attribute__((weak)) void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
 /* MAX_ICOUNT_SHIFT from icount-common.c */
 #define MAX_ICOUNT_SHIFT 10
 #define PROM_IDLE_SLEEP_US 100000
+#define LOGIN_IDLE_SLEEP_US 500000
 
 /* Global control flags */
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
@@ -44,6 +45,7 @@ static bool cpu_idle_halt_on_idle = true;  // Use vCPU halt + icount warp when i
 static bool cpu_idle_pc_learning = false;  // Learn/store PC-only signatures in icount mode
 static bool cpu_idle_builtin_fallbacks = false;  // Allow built-in signatures
 static bool learned_os_data_enabled = false;  // Arm learned OS PCs only after live learning
+static bool cpu_idle_boot_complete = true;  // Do not sleep during guest boot
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -645,6 +647,7 @@ void cpu_idle_exec_hook(CPUState *cs)
     // Check for learned idle patterns and calculate sleep based on frequency
     bool is_known_idle = false;
     bool builtin_prom_idle = false;
+    bool builtin_login_idle = false;
     int sleep_us = 0;
     uint32_t pc_frequency = 0;  // How often this PC appeared during learning
     total_execs++;  // Count every execution for percentage calculation
@@ -714,6 +717,7 @@ void cpu_idle_exec_hook(CPUState *cs)
                     is_known_idle = true;
                     pc_frequency = UINT32_MAX;
                     builtin_prom_idle = g_strrstr(set->name, "PROM") != NULL;
+                    builtin_login_idle = g_strrstr(set->name, "login") != NULL;
                     sleep_us = current_sleep_cap;
                     os_idle_hits++;
                     DEBUG_PRINTF("   built-in idle match: %s\n",
@@ -783,7 +787,8 @@ void cpu_idle_exec_hook(CPUState *cs)
     // (need unthrottled speed for accurate learning)
     static int64_t total_sleep_time_ns = 0;  // Track actual sleep time separately
 
-    if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
+    if (cpu_idle_enabled && cpu_idle_boot_complete &&
+        learning_mode == LEARNING_OFF && sleep_us > 0) {
         /*
          * Do not allow idle sleeping to push the guest below real time.
          * If the last measured speed is <100%, skip sleeping entirely.
@@ -795,6 +800,11 @@ void cpu_idle_exec_hook(CPUState *cs)
              * confined to a trusted PROM signature and remains interruptible
              * by the normal QEMU thread scheduling path. */
             sleep_us = PROM_IDLE_SLEEP_US;
+        } else if (builtin_login_idle) {
+            /* Login waits are stable after boot; use a long, bounded wait
+             * without applying it to kernel paths that can occur during
+             * initialization. */
+            sleep_us = MAX(sleep_us, LOGIN_IDLE_SLEEP_US);
         } else if (icount_enabled() && last_speed_percent <= 100) {
             /* In ordinary host-clock mode, the guest clock follows the
              * host independently of this wait.  Only adaptive icount needs
@@ -808,7 +818,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         }
     }
 
-    if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
+    if (cpu_idle_enabled && cpu_idle_boot_complete &&
+        learning_mode == LEARNING_OFF && sleep_us > 0) {
         int64_t sleep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (icount_enabled() && icount_sleep_enabled()) {
             /* Let adaptive icount arm its normal real-time warp timer before
@@ -1065,7 +1076,24 @@ void cpu_idle_set_pc_learning(bool enable)
 void cpu_idle_set_builtin_fallbacks(bool enable)
 {
     cpu_idle_builtin_fallbacks = enable;
+    if (enable) {
+        cpu_idle_boot_complete = false;
+    }
     fprintf(stderr, "CPU idle built-in fallbacks %s\n", enable ? "enabled" : "disabled");
+}
+
+void cpu_idle_set_boot_complete(bool complete)
+{
+    cpu_idle_boot_complete = complete;
+    fprintf(stderr, "CPU idle boot gate %s\n", complete ? "open" : "closed");
+}
+
+void hmp_cpu_idle_boot_complete(Monitor *mon, const QDict *qdict)
+{
+    bool complete = qdict_get_bool(qdict, "complete");
+    cpu_idle_set_boot_complete(complete);
+    monitor_printf(mon, "CPU idle boot gate %s\n",
+                   complete ? "open" : "closed");
 }
 
 void cpu_idle_register_builtin_idle_pcs(const char *name,

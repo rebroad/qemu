@@ -45,6 +45,7 @@ struct MonitorDef {
 void hmp_cpu_idle(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_debug(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_halt(Monitor *mon, const QDict *qdict);
+void hmp_cpu_idle_boot_complete(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_start_os_learning(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_start_prom_learning(Monitor *mon, const QDict *qdict);
 void hmp_cpu_idle_start_busy_learning(Monitor *mon, const QDict *qdict);

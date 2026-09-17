@@ -1033,10 +1033,7 @@ static void sun4m_hw_init(MachineState *machine)
     /* Slavio TTYA (base+4, Linux ttyS0) is the first QEMU serial device
        Slavio TTYB (base+0, Linux ttyS1) is the second QEMU serial device */
     dev = qdev_new(TYPE_ESCC);
-    /* The SS-5 PROM probes the keyboard even when the display is disabled.
-     * Keep the controller present in --nographic mode so that PROM startup
-     * does not wait for the missing-keyboard diagnostic timeout. */
-    qdev_prop_set_uint32(dev, "disabled", 0);
+    qdev_prop_set_uint32(dev, "disabled", !machine->enable_graphics);
     qdev_prop_set_uint32(dev, "frequency", ESCC_CLOCK);
     qdev_prop_set_uint32(dev, "it_shift", 1);
     qdev_prop_set_chr(dev, "chrB", NULL);

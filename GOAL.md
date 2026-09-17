@@ -4,6 +4,13 @@ Keep the `exp` branch rebased onto the latest upstream QEMU 11.1.1 release
 candidate, and make an idle SunOS 4.1.4 guest relinquish host CPU time while
 remaining a usable, time-correct VM.
 
+## Primary focus
+
+The primary focus is proving and fixing low QEMU CPU use while SunOS is idle,
+especially at an idle PROM prompt and at the SunOS login prompt. Networking,
+telnet, and SSH are secondary until the PROM/login idle behavior is correct and
+verified from an elevated host measurement.
+
 ## Scope
 
 - Rebase `exp` onto the latest upstream release-candidate commit for v11.1.1

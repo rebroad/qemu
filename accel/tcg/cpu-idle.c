@@ -795,9 +795,12 @@ void cpu_idle_exec_hook(CPUState *cs)
              * confined to a trusted PROM signature and remains interruptible
              * by the normal QEMU thread scheduling path. */
             sleep_us = PROM_IDLE_SLEEP_US;
-        } else if (last_speed_percent <= 100) {
+        } else if (icount_enabled() && last_speed_percent <= 100) {
+            /* In ordinary host-clock mode, the guest clock follows the
+             * host independently of this wait.  Only adaptive icount needs
+             * this speed guard to avoid accumulating virtual-time error. */
             sleep_us = 0;
-        } else if (last_speed_percent < 105) {
+        } else if (icount_enabled() && last_speed_percent < 105) {
             sleep_us = (sleep_us * (last_speed_percent - 100)) / 5;
             if (sleep_us < 0) {
                 sleep_us = 0;

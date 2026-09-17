@@ -35,6 +35,7 @@ __attribute__((weak)) void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
 
 /* MAX_ICOUNT_SHIFT from icount-common.c */
 #define MAX_ICOUNT_SHIFT 10
+#define PROM_IDLE_SLEEP_US 100000
 
 /* Global control flags */
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
@@ -683,6 +684,11 @@ void cpu_idle_exec_hook(CPUState *cs)
                     if (idle_type == 1) {  // OS - always allow sleeping
                         os_idle_hits++;
                     } else {  // PROM - only sleep if >90% of execs were PROM idle in previous second
+                        /* A learned PROM record is trusted in the same way as
+                         * a built-in PROM signature.  Without this marker the
+                         * real-time guard below treats the learned hit as an
+                         * ordinary learned loop and removes its sleep. */
+                        builtin_prom_idle = true;
                         prom_idle_hits++;
                         // Use PREVIOUS second's data to avoid early-second false readings
                         double prev_prom_pct = (double)prev_prom_total_hits / prev_total_execs * 100.0;
@@ -782,10 +788,13 @@ void cpu_idle_exec_hook(CPUState *cs)
          * Do not allow idle sleeping to push the guest below real time.
          * If the last measured speed is <100%, skip sleeping entirely.
          * If we're only slightly ahead (100-105%), scale sleep down.
-         */
+        */
         if (builtin_prom_idle) {
-            /* Keep firmware responsive to keyboard/boot activity. */
-            sleep_us = MIN(sleep_us, 1000);
+            /* The PROM hook returns often enough that a 10 ms wait still
+             * leaves roughly half the host CPU busy.  This longer wait is
+             * confined to a trusted PROM signature and remains interruptible
+             * by the normal QEMU thread scheduling path. */
+            sleep_us = PROM_IDLE_SLEEP_US;
         } else if (last_speed_percent <= 100) {
             sleep_us = 0;
         } else if (last_speed_percent < 105) {

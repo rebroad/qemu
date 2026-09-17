@@ -75,7 +75,10 @@ same tested QEMU/SunOS build:
    immediately or taking materially longer.
 9. The normal launcher invocation `./run_Solaris112.sh` must work successfully
    without test-only options: it must start QEMU, complete its normal
-   boot/monitoring path on the `spod` bridge, and shut down cleanly.
+   boot/monitoring path on the `spod` bridge, and shut down cleanly. In
+   `--nographic` mode, startup must also avoid the current approximately
+   30-second `No Keyboard Detected` delay (targeting no more than five
+   seconds) without making the PROM hang or losing serial responsiveness.
 10. The running bridged SunOS guest must accept a verified telnet connection
     and a verified SSH connection as `lily`. Building/porting the SSH server
     and its required SunOS support is within scope.

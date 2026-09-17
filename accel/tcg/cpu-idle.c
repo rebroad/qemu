@@ -798,6 +798,11 @@ void cpu_idle_exec_hook(CPUState *cs)
 
     if (cpu_idle_enabled && learning_mode == LEARNING_OFF && sleep_us > 0) {
         int64_t sleep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (icount_enabled() && icount_sleep_enabled()) {
+            /* Let adaptive icount arm its normal real-time warp timer before
+             * this vCPU-side idle wait, just as it does for a halted vCPU. */
+            icount_start_warp_timer();
+        }
         g_usleep(sleep_us);
         int64_t sleep_end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         total_sleep_time_ns += (sleep_end_ns - sleep_start_ns);

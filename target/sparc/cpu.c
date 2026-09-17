@@ -58,16 +58,19 @@ static const CPUPCState sunos414_kernel_idle_pcs[] = {
         .pc = UINT64_C(0xf004be20),
         .next_pc = 0,
     },
-    /* SunOS login(1M) input wait on the serial console. */
-    {
-        .pc = UINT64_C(0xf01294f8),
-        .next_pc = UINT64_C(0xf01294fc),
-    },
     {
         .pc = UINT64_C(0xf0038b84),
         .next_pc = UINT64_C(0xf0038b88),
     },
-    /* SunOS login(1M) input wait after the serial console is initialized. */
+};
+
+/* SunOS login(1M) input waits.  These are separated from general kernel
+ * idle points so they can use a longer backoff without slowing boot paths. */
+static const CPUPCState sunos414_login_idle_pcs[] = {
+    {
+        .pc = UINT64_C(0xf01294f8),
+        .next_pc = UINT64_C(0xf01294fc),
+    },
     {
         .pc = UINT64_C(0xfe0221a0),
         .next_pc = UINT64_C(0xfe0221a4),
@@ -75,6 +78,10 @@ static const CPUPCState sunos414_kernel_idle_pcs[] = {
 };
 
 static const CPUPCState sunos414_prom_idle_pcs[] = {
+    {
+        .pc = UINT64_C(0xffd16c88),
+        .next_pc = UINT64_C(0xffd16c8c),
+    },
     /*
      * SunOS 4.1.4 PROM idle PCs already used by the launcher script.
      * These are kept separate from kernel idle PCs to avoid mixing firmware
@@ -1246,6 +1253,9 @@ static void sparc_cpu_register_types(void)
     cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 kernel",
                                        sunos414_kernel_idle_pcs,
                                        ARRAY_SIZE(sunos414_kernel_idle_pcs));
+    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 login",
+                                       sunos414_login_idle_pcs,
+                                       ARRAY_SIZE(sunos414_login_idle_pcs));
     cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 PROM",
                                        sunos414_prom_idle_pcs,
                                        ARRAY_SIZE(sunos414_prom_idle_pcs));

@@ -138,6 +138,12 @@ void cpu_idle_set_pc_learning(bool enable);
 void cpu_idle_set_builtin_fallbacks(bool enable);
 
 /**
+ * cpu_idle_set_boot_complete - allow or forbid idle sleeps during boot
+ * @complete: true after the launcher has observed a stable guest prompt
+ */
+void cpu_idle_set_boot_complete(bool complete);
+
+/**
  * cpu_idle_register_builtin_idle_pcs - Register built-in idle signatures
  * @name: Human-readable label for debug output
  * @pcs: Array of PC/NPC states to register

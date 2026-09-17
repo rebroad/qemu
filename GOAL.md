@@ -48,7 +48,7 @@ same tested QEMU/SunOS build:
 2. With the SunOS guest booted and deliberately idle at a stable `login:`
    prompt or shell, repeated host measurements show that the QEMU process uses
    drastically less CPU than the pre-fix baseline. For SunOS kernel idle, the
-   target is less than 5% QEMU CPU. Record the measurement method, host CPU
+   target is less than 3% QEMU CPU. Record the measurement method, host CPU
    model, QEMU command line, sample duration, baseline, fixed result, and the
    reduction. A useful pass criterion is at least a 90% reduction in QEMU CPU
    usage, unless the measured host baseline makes a more meaningful equivalent
@@ -59,10 +59,10 @@ same tested QEMU/SunOS build:
    98% of the non-idled speed), measured over repeated runs.
 4. When the SunOS guest is doing no work except a long sleep (for example, the
    logged-in shell is running `sleep 10`), the QEMU process must remain mostly
-   idle, at less than 5% instantaneous host CPU during that interval.
+   idle, at less than 3% instantaneous host CPU during that interval.
 5. When the guest is stopped at an idle SunOS PROM prompt, the QEMU process
-   must use less than 10% instantaneous host CPU. This PROM threshold is less
-   strict than the separate SunOS kernel-idle target above.
+   must use less than 3% instantaneous host CPU, matching the SunOS kernel-idle
+   target.
 6. Guest activity still wakes the VM and the guest remains responsive after the
    idle test.
 7. While the guest is idle, compare a guest-readable wall clock with the host

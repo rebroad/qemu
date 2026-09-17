@@ -17,14 +17,36 @@ experiments and discarded approaches are in `HISTORY.md`.
   received bytes. The launcher supports temporary autologin and throwaway
   disks.
 
+## Idle implementation direction
+
+PC/NPC probing is diagnostic and fallback-only. It is not a reliable primary
+guest/host power-management interface: the running SPARC state can differ from
+what the monitor reports, and a repeated PC can also be a boot-time poll.
+
+The preferred implementation is to compile the SunOS 4.1.4 kernel's real
+`sun4m` scheduler idle path (`_idle`/`sw_goidle`) with the SPARC
+`wrpowerdown` instruction after interrupts are enabled. QEMU already models
+that instruction as a halted vCPU which resumes on an interrupt. The rebuilt
+kernel image must be installed in the throwaway test disk and its instruction
+bytes verified before any CPU result is accepted. PROM probing may remain as a
+small, conservative fallback until an equivalent firmware idle instruction is
+identified.
+
+Current state: no SunOS kernel has been rebuilt or installed into the qcow2
+image yet. The image therefore contains neither the earlier experimental trap
+nor the proposed `wrpowerdown` idle path.
+
 ## Latest evidence
 
 Test build: external `qemu-system-sparc` build from
 `configure --target-list=sparc-softmmu --enable-debug --disable-strip`.
 
 - Boot marker: 59.71s without `--cpuidle`, 59.01s with it.
-- Guest `sleep 10`: 0% instantaneous QEMU CPU over 10s.
-- Direct idle PROM (`--noboot --cpuidle`): 0% instantaneous QEMU CPU over 10s.
+- Earlier low-CPU readings are not acceptance evidence: they measured the
+  QEMU main thread rather than the TCG worker. A live login-prompt run was
+  subsequently observed at approximately 100% in the TCG thread. All idle
+  results must therefore be repeated with elevated, per-thread process
+  measurements after the explicit guest idle instruction is booted.
 - Guest `date; sleep 10; date`: 11 displayed seconds over 11.605s host time.
 - Three guest `sleep 1` runs: one displayed guest second each; raw command
   times 1.351--1.388s, with 0.298--0.333s command transport overhead.

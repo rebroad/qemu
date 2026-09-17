@@ -54,6 +54,9 @@ same tested QEMU/SunOS build:
    take approximately one second (target range 0.9--1.1 seconds, allowing a
    clearly documented platform timing granularity), rather than returning
    immediately or taking materially longer.
+9. The normal launcher invocation `./run_Solaris112.sh` must work successfully
+   without test-only options: it must start QEMU, complete its normal
+   boot/monitoring path, and shut down cleanly.
 
 ## Evidence to retain
 

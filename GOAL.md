@@ -1,21 +1,7 @@
-# Goal: QEMU `exp` and an idle SunOS guest
-
-Keep the `exp` branch rebased onto the latest upstream QEMU 11.1.1 release
-candidate, and make an idle SunOS 4.1.4 guest relinquish host CPU time while
-remaining a usable, time-correct VM.
-
-## Primary focus
-
-The primary focus is proving and fixing low QEMU CPU use while SunOS is idle,
-especially at an idle PROM prompt and at the SunOS login prompt. Networking,
-telnet, and SSH are secondary until the PROM/login idle behavior is correct and
-verified from an elevated host measurement.
+Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable, time-correct VM.
 
 ## Scope
 
-- Rebase `exp` onto the latest upstream release-candidate commit for v11.1.1
-  (normally `upstream/staging-11.1`, confirmed against the upstream release
-  candidate/tag before the final rebase).
 - Diagnose and fix the QEMU/SunOS idle path. This includes changing and
   rebuilding `~/src/SunOS-4.1.4` if the guest kernel or drivers prevent an
   idle instruction, timer behavior, or interrupt-driven wakeup.
@@ -41,47 +27,43 @@ verified from an elevated host measurement.
 The goal is complete only when all of the following are demonstrated on the
 same tested QEMU/SunOS build:
 
-1. `exp` is rebased onto the latest upstream v11.1.1 release candidate, with
-   the downstream work represented as a reviewed net patch rather than a
-   replay of obsolete experiment commits; record the resulting history and
-   working tree.
-2. With the SunOS guest booted and deliberately idle at a stable `login:`
-   prompt or shell, repeated host measurements show that the QEMU process uses
-   drastically less CPU than the pre-fix baseline. For SunOS kernel idle, the
-   target is less than 3% QEMU CPU. Record the measurement method, host CPU
-   model, QEMU command line, sample duration, baseline, fixed result, and the
-   reduction. A useful pass criterion is at least a 90% reduction in QEMU CPU
-   usage, unless the measured host baseline makes a more meaningful equivalent
-   criterion necessary; any exception must be justified with measurements.
-3. Boot performance must not regress when idle detection is enabled. From the
-   same launcher start to the same boot-complete marker, `--cpuidle` must take
-   no more than 2% longer than the matching run without `--cpuidle` (at least
-   98% of the non-idled speed), measured over repeated runs.
-4. When the SunOS guest is doing no work except a long sleep (for example, the
-   logged-in shell is running `sleep 10`), the QEMU process must remain mostly
-   idle, at less than 3% instantaneous host CPU during that interval.
-5. When the guest is stopped at an idle SunOS PROM prompt, the QEMU process
-   must use less than 3% instantaneous host CPU, matching the SunOS kernel-idle
-   target.
-6. Guest activity still wakes the VM and the guest remains responsive after the
-   idle test.
-7. While the guest is idle, compare a guest-readable wall clock with the host
-   clock before and after a sustained observation interval. The offset and
-   accumulated drift must remain within one guest clock tick or one second,
-   whichever is larger, and the test must record the commands and timestamps.
-8. Run `sleep 1` inside SunOS repeatedly with host-side timing. Each run must
-   take approximately one second (target range 0.9--1.1 seconds, allowing a
-   clearly documented platform timing granularity), rather than returning
-   immediately or taking materially longer.
-9. The normal launcher invocation `./run_Solaris112.sh` must work successfully
-   without test-only options: it must start QEMU, complete its normal
-   boot/monitoring path on the `spod` bridge, and shut down cleanly. In
-   `--nographic` mode, startup must also avoid the current approximately
-   30-second `No Keyboard Detected` delay (targeting no more than five
-   seconds) without making the PROM hang or losing serial responsiveness.
-10. The running bridged SunOS guest must accept a verified telnet connection
-    and a verified SSH connection as `lily`. Building/porting the SSH server
-    and its required SunOS support is within scope.
+- With the SunOS guest booted and deliberately idle at a stable `login:`
+  prompt or shell, repeated host measurements show that the QEMU process uses
+  drastically less CPU than the pre-fix baseline. For SunOS kernel idle, the
+  target is less than 3% QEMU CPU. Record the measurement method, host CPU
+  model, QEMU command line, sample duration, baseline, fixed result, and the
+  reduction. A useful pass criterion is at least a 90% reduction in QEMU CPU
+  usage, unless the measured host baseline makes a more meaningful equivalent
+  criterion necessary; any exception must be justified with measurements.
+- Boot performance must not regress when idle detection is enabled. From the
+  same launcher start to the same boot-complete marker, `--cpuidle` must take
+  no more than 2% longer than the matching run without `--cpuidle` (at least
+  98% of the non-idled speed), measured over repeated runs.
+- When the SunOS guest is doing no work except a long sleep (for example, the
+  logged-in shell is running `sleep 10`), the QEMU process must remain mostly
+  idle, at less than 3% instantaneous host CPU during that interval.
+- When the guest is stopped at an idle SunOS PROM prompt, the QEMU process
+  must use less than 3% instantaneous host CPU, matching the SunOS kernel-idle
+  target.
+- Guest activity still wakes the VM and the guest remains responsive after the
+  idle test.
+- While the guest is idle, compare a guest-readable wall clock with the host
+  clock before and after a sustained observation interval. The offset and
+  accumulated drift must remain within one guest clock tick or one second,
+  whichever is larger, and the test must record the commands and timestamps.
+- Run `sleep 1` inside SunOS repeatedly with host-side timing. Each run must
+  take approximately one second (target range 0.9--1.1 seconds, allowing a
+  clearly documented platform timing granularity), rather than returning
+  immediately or taking materially longer.
+- The normal launcher invocation `./run_Solaris112.sh` must work successfully
+  without test-only options: it must start QEMU, complete its normal
+  boot/monitoring path on the `spod` bridge, and shut down cleanly. In
+  `--nographic` mode, startup must also avoid the current approximately
+  30-second `No Keyboard Detected` delay (targeting no more than five
+  seconds) without making the PROM hang or losing serial responsiveness.
+- The running bridged SunOS guest must accept a verified telnet connection
+  and a verified SSH connection as `lily`. Building/porting the SSH server
+  and its required SunOS support is within scope.
 
 ## Evidence to retain
 

@@ -228,6 +228,16 @@ static void nvram_init(Nvram *nvram, uint8_t *macaddr,
     Sun_init_header((struct Sun_nvram *)&image[0x1fd8], macaddr,
                     nvram_machine_id);
 
+    /* The original SS-5 PROM validates the main NVRAM area with its own
+     * checksum.  Preserve the CHRP signature byte while making the image
+     * valid for both PROM implementations. */
+    image[0x1dd7] = image[0];
+    uint8_t xsum = 0x7b;
+    for (i = 0x20; i < 0x1dd8; i++) {
+        xsum ^= image[i];
+    }
+    image[0] = xsum ^ 0xf0;
+
     for (i = 0; i < sizeof(image); i++) {
         (k->write)(nvram, i, image[i]);
     }
@@ -1033,7 +1043,10 @@ static void sun4m_hw_init(MachineState *machine)
     /* Slavio TTYA (base+4, Linux ttyS0) is the first QEMU serial device
        Slavio TTYB (base+0, Linux ttyS1) is the second QEMU serial device */
     dev = qdev_new(TYPE_ESCC);
-    qdev_prop_set_uint32(dev, "disabled", !machine->enable_graphics);
+    /* The SS-5 PROM probes the keyboard even when the display is disabled.
+     * Keep the controller present in --nographic mode so that PROM startup
+     * does not wait for the missing-keyboard diagnostic timeout. */
+    qdev_prop_set_uint32(dev, "disabled", 0);
     qdev_prop_set_uint32(dev, "frequency", ESCC_CLOCK);
     qdev_prop_set_uint32(dev, "it_shift", 1);
     qdev_prop_set_chr(dev, "chrB", NULL);

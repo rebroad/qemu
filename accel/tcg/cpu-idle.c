@@ -707,8 +707,8 @@ void cpu_idle_exec_hook(CPUState *cs)
                                            pc_only_mode)) {
                     is_known_idle = true;
                     pc_frequency = UINT32_MAX;
-                    sleep_us = current_sleep_cap;
                     builtin_prom_idle = g_strrstr(set->name, "PROM") != NULL;
+                    sleep_us = current_sleep_cap;
                     os_idle_hits++;
                     DEBUG_PRINTF("   built-in idle match: %s\n",
                                  set->name ? set->name : "(unnamed)");
@@ -937,8 +937,9 @@ void cpu_idle_exec_hook(CPUState *cs)
             }
 
             pos += snprintf(msg + pos, sizeof(msg) - pos,
-                "hook:%dms(%d%%) vcpu-wait:%dms(%d%%)",
-                hook_time_ms, hook_pct, vcpu_wait_ms, vcpu_wait_pct);
+                "hook:%dms(%d%%) vcpu-wait:%dms(%d%%) pc:%08" PRIx64 "/%08" PRIx64,
+                hook_time_ms, hook_pct, vcpu_wait_ms, vcpu_wait_pct,
+                pc_state.pc, pc_state.next_pc);
 
             // Warning if vCPU wait time is very low (approaching capacity limit) - disabled until we find reliable way to detect this
             /*if (vcpu_wait_pct < 10 && icount_enabled()) {

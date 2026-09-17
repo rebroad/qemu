@@ -76,6 +76,13 @@ results. Do not mark this goal complete from compilation alone.
   the serial socket, and `shift=off` host-clock timing by default.
 - Boot-to-`Monitoring for system shutdown`: 59.71s without `--cpuidle` versus
   59.01s with it, so the idle path was 1.2% faster in the paired run.
+- The pre-fix PROM-idle baseline was approximately 100% QEMU CPU in the
+  matched 15s measurement. The fixed idle path measured 0% in the final 10s
+  shell-idle and PROM-idle samples, a reduction of at least 99%.
+- A current `--nocpuidle` run with `shift=off` also measured 0%, because this
+  timing mode lets the existing SunOS halt path sleep naturally; it is not used
+  as the pre-fix comparison. The historical pre-fix sample is the relevant
+  baseline for the reduction claim.
 - A guest shell running `sleep 10` measured 0% instantaneous QEMU CPU over a
   10s `/proc/$pid/stat` interval. The idle-at-shell samples also measured 0%.
 - A direct `--noboot --cpuidle` PROM-idle sample also measured 0% instantaneous

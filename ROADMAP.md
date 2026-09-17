@@ -1,7 +1,8 @@
 # QEMU/SunOS idle roadmap
 
 `GOAL.md` is the acceptance contract. This file records implementation notes
-and the latest validation evidence without changing the goal itself.
+and current validation evidence without changing the goal itself. Historical
+experiments and discarded approaches are in `HISTORY.md`.
 
 ## Implemented
 
@@ -28,7 +29,3 @@ Test build: external `qemu-system-sparc` build from
 - Three guest `sleep 1` runs: one displayed guest second each; raw command
   times 1.351--1.388s, with 0.298--0.333s command transport overhead.
 - A responsive shell command completed after the idle tests.
-
-The pre-fix PROM-idle baseline was approximately 100% QEMU CPU in the matched
-15s measurement; the fixed path measured 0% in the final shell-idle and PROM
-samples.

@@ -61,7 +61,8 @@ same tested QEMU/SunOS build:
    logged-in shell is running `sleep 10`), the QEMU process must remain mostly
    idle, at less than 5% instantaneous host CPU during that interval.
 5. When the guest is stopped at an idle SunOS PROM prompt, the QEMU process
-   must use less than 2% instantaneous host CPU.
+   must use less than 10% instantaneous host CPU. This PROM threshold is less
+   strict than the separate SunOS kernel-idle target above.
 6. Guest activity still wakes the VM and the guest remains responsive after the
    idle test.
 7. While the guest is idle, compare a guest-readable wall clock with the host

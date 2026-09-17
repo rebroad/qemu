@@ -95,6 +95,11 @@ static const CPUPCState sunos414_prom_idle_pcs[] = {
         .pc = UINT64_C(0xffef0000),
         .next_pc = 0,
     },
+    {
+        /* SunOS SS-5 PROM idle loop at the PROM prompt. */
+        .pc = UINT64_C(0xffeff1e0),
+        .next_pc = UINT64_C(0xffeff1e4),
+    },
 };
 
 // ============================================================================

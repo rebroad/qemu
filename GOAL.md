@@ -12,6 +12,9 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
   responsive.
 - Keep source edits in the source repositories and perform QEMU builds in the
   corresponding external `.build` tree under `/mnt/kingston/builds/`.
+- Use `--throwaway` for every VM test unless persistence is explicitly the
+  purpose of that test. Persistent disks must not be used for exploratory
+  booting, kernel installation, or idle measurements.
 - Keep the SunOS source itself compilable by both the Debian host cross-build
   and a native SunOS build. Any difference required specifically by the host
   workflow or by QEMU testing must be generated and applied by the documented

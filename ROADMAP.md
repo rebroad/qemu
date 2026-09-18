@@ -34,10 +34,18 @@ identified.
 
 Current state: the reproducible cross-build now produces and packages a
 static SunOS SPARC a.out kernel, and a throwaway transfer has been exercised.
-The control kernel still fails during early startup because its PROM vector is
+The modified kernel still fails during early startup because its PROM vector is
 reported as `romp=ffd0c7f8 magic=0 version=0`; it has not reached the SunOS
 scheduler. The modified kernel therefore remains unvalidated and must not yet
 be used for CPU acceptance measurements.
+
+The latest elevated MMU trace narrowed this down further: the bootloader first
+translates PROM virtual pages such as `ffd3c000` to QEMU's PROM physical
+`7003c000`, but after the rebuilt kernel installs its temporary context the
+same virtual page translates to RAM near `03fed000`. A targeted PROM-window
+PTE override did not survive the later handoff and was discarded. The next
+kernel change must fix the final context/page-table installation itself; no
+CPU-idle result is valid until the modified kernel reaches the scheduler.
 
 ## Latest evidence
 

@@ -21,6 +21,10 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
   and a native SunOS build. Any difference required specifically by the host
   workflow or by QEMU testing must be generated and applied by the documented
   workflow, rather than maintained as a second source variant.
+- Follow this validation order: first build and boot the branch-`414` control
+  kernel with the native SunOS toolchain and verify that it is usable; only
+  after that control passes, build and boot the workflow-generated idle-patched
+  kernel and use it for idle, wakeup, clock, and responsiveness measurements.
 - Preserve unrelated existing work in the checkout.
 - The normal VM network must attach to the host `spod` bridge. Networking is
   part of the acceptance path, not an optional fallback to user-mode or no

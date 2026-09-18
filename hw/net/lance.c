@@ -125,10 +125,6 @@ static void lance_reset(DeviceState *dev)
     SysBusPCNetState *d = SYSBUS_PCNET(dev);
 
     pcnet_h_reset(&d->state);
-    /* Sun's LANCE does not implement the Am79C970 transmit-descriptor
-     * polling extension.  Leaving it enabled makes PROM network probing
-     * continue polling the ring after boot and wastes host CPU. */
-    d->state.csr[4] |= 0x1000;
 }
 
 static void lance_instance_init(Object *obj)

@@ -5,6 +5,10 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
 - Diagnose and fix the QEMU/SunOS idle path. This includes changing and
   rebuilding `~/src/SunOS-4.1.4` if the guest kernel or drivers prevent an
   idle instruction, timer behavior, or interrupt-driven wakeup.
+- Make the modified, rebuilt SunOS kernel a primary implementation path for
+  guest idling. Do not treat increasingly long host-side polling sleeps as
+  the final solution; the guest idle path must remain promptly interruptible
+  and responsive.
 - Keep source edits in the source repositories and perform QEMU builds in the
   corresponding external `.build` tree under `/mnt/kingston/builds/`.
 - Preserve unrelated existing work in the checkout.
@@ -18,6 +22,9 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
 - All QEMU CPU measurements must be taken from an elevated host shell against
   the live QEMU PID, using a real observation interval (at least 10 seconds);
   sandbox-limited or stale-PID readings are invalid evidence.
+- The acceptance tests must be run in both graphical and `--nographic` modes;
+  each mode must retain working prompt detection, idle CPU reduction, guest
+  wakeup, clock, and `sleep 1` behavior.
 - Keep adaptive icount diagnostics out of normal stderr output when requested
   by writing them to a dedicated `-icount debug-file=...` logfile, and make
   shift changes stable by enforcing a drift deadband and minimum dwell time.
@@ -47,6 +54,9 @@ same tested QEMU/SunOS build:
   target.
 - Guest activity still wakes the VM and the guest remains responsive after the
   idle test.
+- The modified SunOS kernel must be booted and tested as part of the final
+  idle implementation, with its idle entry and interrupt wakeup behavior
+  documented alongside the QEMU changes.
 - While the guest is idle, compare a guest-readable wall clock with the host
   clock before and after a sustained observation interval. The offset and
   accumulated drift must remain within one guest clock tick or one second,

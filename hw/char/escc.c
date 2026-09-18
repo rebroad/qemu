@@ -882,7 +882,7 @@ static void sunkbd_handle_event(DeviceState *dev, QemuConsole *src,
      * still decides whether and how the guest handles the key.
      */
     if (first_cpu) {
-        cpu_idle_notify_input();
+        cpu_idle_notify_input(evt->key.key == KEY_ENTER && evt->key.down);
         cpu_exit(first_cpu);
     }
 }

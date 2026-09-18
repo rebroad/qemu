@@ -38,6 +38,7 @@ __attribute__((weak)) void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
 #define PROM_IDLE_SLEEP_US 100000
 #define LOGIN_IDLE_SLEEP_US 500000
 #define INPUT_GRACE_NS 100000000
+#define INPUT_COMMAND_GRACE_NS 5000000000LL
 
 /*
  * Wait through the CPU condition variable rather than sleeping directly.
@@ -70,6 +71,7 @@ static bool cpu_idle_builtin_fallbacks = false;  // Allow built-in signatures
 static bool learned_os_data_enabled = false;  // Arm learned OS PCs only after live learning
 static bool cpu_idle_boot_complete = true;  // Do not sleep during guest boot
 static int64_t cpu_idle_input_grace_until_ns;
+static int64_t cpu_idle_command_grace_until_ns;
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -815,6 +817,8 @@ void cpu_idle_exec_hook(CPUState *cs)
      * repeated idle TB may be throttled again. */
     if (qatomic_load_acquire(&cs->exit_request) ||
         qatomic_load_acquire(&cpu_idle_input_grace_until_ns) >
+            qemu_clock_get_ns(QEMU_CLOCK_REALTIME) ||
+        qatomic_load_acquire(&cpu_idle_command_grace_until_ns) >
             qemu_clock_get_ns(QEMU_CLOCK_REALTIME)) {
         sleep_us = 0;
     }
@@ -1080,10 +1084,16 @@ void cpu_idle_exec_hook(CPUState *cs)
     total_hook_time_ns += (hook_exit_time_ns - hook_entry_time_ns);
 }
 
-void cpu_idle_notify_input(void)
+void cpu_idle_notify_input(bool command)
 {
-    qatomic_set(&cpu_idle_input_grace_until_ns,
-                qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + INPUT_GRACE_NS);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t grace = command ? INPUT_COMMAND_GRACE_NS : INPUT_GRACE_NS;
+
+    if (command) {
+        qatomic_set(&cpu_idle_command_grace_until_ns, now + grace);
+    } else {
+        qatomic_set(&cpu_idle_input_grace_until_ns, now + grace);
+    }
 }
 
 // Functions to control idle detection and debug output

@@ -68,6 +68,7 @@ static bool cpu_idle_pc_learning = false;  // Learn/store PC-only signatures in 
 static bool cpu_idle_builtin_fallbacks = false;  // Allow built-in signatures
 static bool learned_os_data_enabled = false;  // Arm learned OS PCs only after live learning
 static bool cpu_idle_boot_complete = true;  // Do not sleep during guest boot
+static bool cpu_idle_input_pending;
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -809,6 +810,13 @@ void cpu_idle_exec_hook(CPUState *cs)
     // (need unthrottled speed for accurate learning)
     static int64_t total_sleep_time_ns = 0;  // Track actual sleep time separately
 
+    /* A device wakeup requests one pass through the TCG loop before the
+     * repeated idle TB may be throttled again. */
+    if (qatomic_load_acquire(&cs->exit_request) ||
+        qatomic_xchg(&cpu_idle_input_pending, false)) {
+        sleep_us = 0;
+    }
+
     if (cpu_idle_enabled && cpu_idle_boot_complete &&
         learning_mode == LEARNING_OFF && sleep_us > 0) {
         /*
@@ -1068,6 +1076,11 @@ void cpu_idle_exec_hook(CPUState *cs)
     // Measure hook exit time and accumulate total (must be last thing in function!)
     int64_t hook_exit_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     total_hook_time_ns += (hook_exit_time_ns - hook_entry_time_ns);
+}
+
+void cpu_idle_notify_input(void)
+{
+    qatomic_set(&cpu_idle_input_pending, true);
 }
 
 // Functions to control idle detection and debug output

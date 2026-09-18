@@ -90,6 +90,12 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
         if (rw == 2 && (env->mmuregs[0] & env->def.mmu_bm)) {
             full->phys_addr = env->prom_addr | (address & 0x7ffffULL);
             full->prot = PAGE_READ | PAGE_EXEC;
+            if (address >= 0xffd00000ULL) {
+                qemu_log_mask(CPU_LOG_MMU,
+                              "PROM boot fetch va=" TARGET_FMT_lx
+                              " pa=" HWADDR_FMT_plx " csr=%08x\n",
+                              address, full->phys_addr, env->mmuregs[0]);
+            }
             return 0;
         }
         full->phys_addr = address;
@@ -105,6 +111,11 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
     pde_ptr = (env->mmuregs[1] << 4) + (env->mmuregs[2] << 2);
     pde = address_space_ldl_be(cs->as, pde_ptr,
                                MEMTXATTRS_UNSPECIFIED, &result);
+    if (address >= 0xffd00000ULL) {
+        qemu_log_mask(CPU_LOG_MMU,
+                      "PROM ctx addr=" HWADDR_FMT_plx " pde=%08x\n",
+                      pde_ptr, pde);
+    }
     if (result != MEMTX_OK) {
         return 4 << 2; /* Translation fault, L = 0 */
     }
@@ -121,6 +132,11 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
         pde_ptr = ((address >> 22) & ~3) + ((pde & ~3) << 4);
         pde = address_space_ldl_be(cs->as, pde_ptr,
                                    MEMTXATTRS_UNSPECIFIED, &result);
+        if (address >= 0xffd00000ULL) {
+            qemu_log_mask(CPU_LOG_MMU,
+                          "PROM l1 addr=" HWADDR_FMT_plx " pde=%08x\n",
+                          pde_ptr, pde);
+        }
         if (result != MEMTX_OK) {
             return (1 << 8) | (4 << 2); /* Translation fault, L = 1 */
         }
@@ -135,6 +151,11 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
             pde_ptr = ((address & 0xfc0000) >> 16) + ((pde & ~3) << 4);
             pde = address_space_ldl_be(cs->as, pde_ptr,
                                        MEMTXATTRS_UNSPECIFIED, &result);
+            if (address >= 0xffd00000ULL) {
+                qemu_log_mask(CPU_LOG_MMU,
+                              "PROM l2 addr=" HWADDR_FMT_plx
+                              " pde=%08x\n", pde_ptr, pde);
+            }
             if (result != MEMTX_OK) {
                 return (2 << 8) | (4 << 2); /* Translation fault, L = 2 */
             }
@@ -149,6 +170,11 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
                 pde_ptr = ((address & 0x3f000) >> 10) + ((pde & ~3) << 4);
                 pde = address_space_ldl_be(cs->as, pde_ptr,
                                            MEMTXATTRS_UNSPECIFIED, &result);
+                if (address >= 0xffd00000ULL) {
+                    qemu_log_mask(CPU_LOG_MMU,
+                                  "PROM l3 addr=" HWADDR_FMT_plx
+                                  " pde=%08x\n", pde_ptr, pde);
+                }
                 if (result != MEMTX_OK) {
                     return (3 << 8) | (4 << 2); /* Translation fault, L = 3 */
                 }
@@ -207,6 +233,12 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
     /* Even if large ptes, we map only one 4KB page in the cache to
        avoid filling it too fast */
     full->phys_addr = ((hwaddr)(pde & PTE_ADDR_MASK) << 4) + page_offset;
+    if (address >= 0xffd00000ULL) {
+        qemu_log_mask(CPU_LOG_MMU,
+                      "PROM walk va=" TARGET_FMT_lx " ctp=%08x "
+                      "pte-pa=" HWADDR_FMT_plx " pde=%08x\n",
+                      address, env->mmuregs[1], full->phys_addr, pde);
+    }
     return error_code;
 }
 
@@ -239,6 +271,14 @@ bool sparc_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                       address, full.phys_addr, vaddr);
         tlb_set_page_full(cs, mmu_idx, vaddr, &full);
         return true;
+    }
+
+    if (address >= 0xffd00000ULL) {
+        qemu_log_mask(CPU_LOG_MMU,
+                      "PROM fault va=%" VADDR_PRIx " error=%d "
+                      "access=%d mmu=%d csr=%08x\n",
+                      address, error_code, access_type, mmu_idx,
+                      env->mmuregs[0]);
     }
 
     if (env->mmuregs[3]) { /* Fault status register */

@@ -96,10 +96,10 @@ void cpu_idle_exec_hook(CPUState *cpu);
 
 /**
  * cpu_idle_notify_input - ensure the next idle-hook pass executes guest code
- * Device input may arrive while the idle hook is sleeping.  Mark one normal
- * execution pass so the input can be consumed before throttling resumes.
+ * Device input may arrive while the idle hook is sleeping.  Mark normal
+ * execution time so the input or submitted PROM command can be consumed.
  */
-void cpu_idle_notify_input(void);
+void cpu_idle_notify_input(bool command);
 
 /**
  * cpu_idle_set_enabled - Enable/disable idle detection

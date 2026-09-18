@@ -60,6 +60,10 @@ same tested QEMU/SunOS build:
   target.
 - Guest activity still wakes the VM and the guest remains responsive after the
   idle test.
+- For both graphical and `--nographic` operation, the latency from a guest
+  key press arriving at QEMU to the corresponding character being visible in
+  the GUI or serial output must remain below 100 ms while the idle path is
+  active.
 - The modified SunOS kernel must be booted and tested as part of the final
   idle implementation, with its idle entry and interrupt wakeup behavior
   documented alongside the QEMU changes.

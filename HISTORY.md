@@ -28,6 +28,14 @@ in `ROADMAP.md`.
   on every poll, adding timing noise. It now prints only newly received bytes
   while retaining the complete reply for prompt detection.
 
+## 2026-09-18
+
+- Cross-built the SunOS `sun4m` control kernel and verified the PROM accepts
+  its static a.out packaging. The kernel currently fails before the SunOS
+  banner: early diagnostics report `romp=ffd0c7f8 magic=0 version=0` and
+  `No handler for PROM?`. This is an unresolved PROM-vector handoff issue;
+  no idle-CPU result from that kernel is valid yet.
+
 ## Measurements
 
 - Historical pre-fix PROM-idle sampling was approximately 100% QEMU CPU over
@@ -40,4 +48,3 @@ in `ROADMAP.md`.
 - Three final guest `sleep 1` runs each advanced one guest second. Raw command
   times were 1.351--1.388s; the `true` command transport baseline was
   0.298--0.333s.
-

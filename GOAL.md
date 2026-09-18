@@ -7,8 +7,9 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
   idle instruction, timer behavior, or interrupt-driven wakeup.
 - Make the modified, rebuilt SunOS kernel a primary implementation path for
   guest idling. Do not treat increasingly long host-side polling sleeps as
-  the final solution; the guest idle path must remain promptly interruptible
-  and responsive.
+  the final solution, and do not replace idle with a periodic one-second
+  sleep; the guest idle path must remain promptly interruptible and
+  responsive.
 - Keep source edits in the source repositories and perform QEMU builds in the
   corresponding external `.build` tree under `/mnt/kingston/builds/`.
 - Preserve unrelated existing work in the checkout.

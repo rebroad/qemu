@@ -35,6 +35,12 @@ in `ROADMAP.md`.
   banner: early diagnostics report `romp=ffd0c7f8 magic=0 version=0` and
   `No handler for PROM?`. This is an unresolved PROM-vector handoff issue;
   no idle-CPU result from that kernel is valid yet.
+- Added a reproducible `SUNOS_QEMU_BINARY` launcher override for diagnostics,
+  allowing a traced QEMU binary to be selected without editing the launcher.
+- An elevated custom-kernel MMU trace showed the handoff changing PROM
+  mappings such as `ffd3c000 -> 7003c000` into RAM aliases near
+  `ffd3c000 -> 03fed000`. A targeted fixed PROM-window PTE override was
+  tested, did not survive the final context installation, and was discarded.
 
 ## Measurements
 

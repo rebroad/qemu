@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
@@ -34,6 +35,8 @@
 #include "ui/console.h"
 
 #include "qemu/cutils.h"
+#include "system/cpus.h"
+#include "system/cpu-idle.h"
 #include "trace.h"
 
 /*
@@ -198,6 +201,24 @@ static void handle_kbd_command(ESCCChannelState *s, int val);
 static int serial_can_receive(void *opaque);
 static void serial_receive_byte(ESCCChannelState *s, int ch);
 
+static bool escc_input_debug_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = getenv("QEMU_INPUT_DEBUG") ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+#define ESCC_INPUT_DEBUG(...) \
+    do { \
+        if (escc_input_debug_enabled()) { \
+            fprintf(stderr, "escc-input: " __VA_ARGS__); \
+            fflush(stderr); \
+        } \
+    } while (0)
+
 static int reg_shift(ESCCState *s)
 {
     return s->bit_swap ? s->it_shift + 1 : s->it_shift;
@@ -221,6 +242,8 @@ static void put_queue(void *opaque, int b)
     ESCCSERIOQueue *q = &s->queue;
 
     trace_escc_put_queue(CHN_C(s), b);
+    ESCC_INPUT_DEBUG("queue channel %c put 0x%02x (count=%u)\n",
+                     CHN_C(s), b, q->count);
     if (q->count >= ESCC_SERIO_QUEUE_SIZE) {
         return;
     }
@@ -248,6 +271,8 @@ static uint32_t get_queue(void *opaque)
         q->count--;
     }
     trace_escc_get_queue(CHN_C(s), val);
+    ESCC_INPUT_DEBUG("queue channel %c get 0x%02x (count=%u)\n",
+                     CHN_C(s), val, q->count);
     if (q->count > 0) {
         serial_receive_byte(s, 0);
     }
@@ -703,6 +728,7 @@ static uint64_t escc_mem_read(void *opaque, hwaddr addr,
             ret = s->rx;
         }
         trace_escc_mem_readb_data(CHN_C(s), ret);
+        ESCC_INPUT_DEBUG("guest channel %c read 0x%02x\n", CHN_C(s), ret);
         qemu_chr_fe_accept_input(&s->chr);
         return ret;
     default:
@@ -804,6 +830,8 @@ static void sunkbd_handle_event(DeviceState *dev, QemuConsole *src,
     qcode = qemu_input_linux_to_qcode(evt->key.key);
     trace_escc_sunkbd_event_in(qcode, QKeyCode_str(qcode),
                                evt->key.down);
+    ESCC_INPUT_DEBUG("host key channel %c qcode=%s down=%d\n",
+                     CHN_C(s), QKeyCode_str(qcode), evt->key.down);
 
     if (evt->key.key == KEY_CAPSLOCK) {
         if (evt->key.down) {
@@ -842,7 +870,21 @@ static void sunkbd_handle_event(DeviceState *dev, QemuConsole *src,
         keycode |= 0x80;
     }
     trace_escc_sunkbd_event_out(keycode);
+    ESCC_INPUT_DEBUG("translated channel %c keycode=0x%02x\n",
+                     CHN_C(s), keycode);
     put_queue(s, keycode);
+
+    /*
+     * The keyboard interrupt can already be asserted while a guest is in a
+     * repeated PROM instruction.  In that case raising the level again does
+     * not create an edge for the idle wait to observe.  Wake the vCPU
+     * explicitly when host keyboard input arrives; normal interrupt delivery
+     * still decides whether and how the guest handles the key.
+     */
+    if (first_cpu) {
+        cpu_idle_notify_input();
+        cpu_exit(first_cpu);
+    }
 }
 
 static const QemuInputHandler sunkbd_handler = {

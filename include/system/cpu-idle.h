@@ -95,6 +95,13 @@ void cpu_get_pc_state(CPUState *cpu, CPUPCState *state);
 void cpu_idle_exec_hook(CPUState *cpu);
 
 /**
+ * cpu_idle_notify_input - ensure the next idle-hook pass executes guest code
+ * Device input may arrive while the idle hook is sleeping.  Mark one normal
+ * execution pass so the input can be consumed before throttling resumes.
+ */
+void cpu_idle_notify_input(void);
+
+/**
  * cpu_idle_set_enabled - Enable/disable idle detection
  * @enable: true to enable, false to disable
  *

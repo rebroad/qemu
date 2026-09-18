@@ -475,7 +475,8 @@ static const sparc_def_t sparc_defs[] = {
         .mmu_sfsr_mask = 0x00016fff,
         .mmu_trcr_mask = 0x00ffffff,
         .nwindows = 8,
-        .features = CPU_DEFAULT_FEATURES,
+        /* SS-5 SunOS uses wr %g0, %g0, %asr19 for processor idle. */
+        .features = CPU_DEFAULT_FEATURES | CPU_FEATURE_POWERDOWN,
     },
     {
         .name = "Fujitsu-MB86907",

@@ -12,6 +12,10 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
   responsive.
 - Keep source edits in the source repositories and perform QEMU builds in the
   corresponding external `.build` tree under `/mnt/kingston/builds/`.
+- Keep the SunOS source itself compilable by both the Debian host cross-build
+  and a native SunOS build. Any difference required specifically by the host
+  workflow or by QEMU testing must be generated and applied by the documented
+  workflow, rather than maintained as a second source variant.
 - Preserve unrelated existing work in the checkout.
 - The normal VM network must attach to the host `spod` bridge. Networking is
   part of the acceptance path, not an optional fallback to user-mode or no
@@ -25,6 +29,8 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
   server suitable for SunOS 4.1.4, then verify SSH access to the running VM.
   The guest is recorded in `/etc/hosts` as `lily` and that name should be used
   when verifying the services.
+- If authentication is needed for testing, it is permitted to change the
+  `rebroad` or `root` password through SunOS single-user mode.
 - All QEMU CPU measurements must be taken from an elevated host shell against
   the live QEMU PID, using a real observation interval (at least 10 seconds);
   sandbox-limited or stale-PID readings are invalid evidence.
@@ -67,6 +73,13 @@ same tested QEMU/SunOS build:
 - The modified SunOS kernel must be booted and tested as part of the final
   idle implementation, with its idle entry and interrupt wakeup behavior
   documented alongside the QEMU changes.
+- Build the same modified kernel both inside SunOS and with the reproducible
+  host-side cross-build, then compare the resulting boot images byte-for-byte
+  (or record and justify any unavoidable toolchain metadata difference) before
+  using either image as final idle-performance evidence.
+  The source used by both builds must be the shared portable checkout; any
+  QEMU-only instrumentation or instruction must come from the reproducible
+  workflow patch applied to each build tree.
 - While the guest is idle, compare a guest-readable wall clock with the host
   clock before and after a sustained observation interval. The offset and
   accumulated drift must remain within one guest clock tick or one second,

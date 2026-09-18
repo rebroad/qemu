@@ -38,6 +38,28 @@ __attribute__((weak)) void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
 #define PROM_IDLE_SLEEP_US 100000
 #define LOGIN_IDLE_SLEEP_US 500000
 
+/*
+ * Wait through the CPU condition variable rather than sleeping directly.
+ * Input and other asynchronous device events wake a vCPU through
+ * qemu_cpu_kick(), which broadcasts this condition.  A plain g_usleep()
+ * cannot be interrupted by that path and can therefore make the GUI appear
+ * keyboard-dead while idle detection is active.
+ */
+static void cpu_idle_wait_interruptible(CPUState *cs, int sleep_us)
+{
+    int wait_ms = (sleep_us + 999) / 1000;
+
+    if (wait_ms <= 0) {
+        return;
+    }
+
+    /* cpu_exec_enter runs with the BQL released in TCG vCPU threads. */
+    g_assert(!bql_locked());
+    bql_lock();
+    qemu_cond_timedwait_bql(cs->halt_cond, wait_ms);
+    bql_unlock();
+}
+
 /* Global control flags */
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
 static bool cpu_idle_debug = false;    // Controls debug output
@@ -826,7 +848,7 @@ void cpu_idle_exec_hook(CPUState *cs)
              * this vCPU-side idle wait, just as it does for a halted vCPU. */
             icount_start_warp_timer();
         }
-        g_usleep(sleep_us);
+        cpu_idle_wait_interruptible(cs, sleep_us);
         int64_t sleep_end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         total_sleep_time_ns += (sleep_end_ns - sleep_start_ns);
     }

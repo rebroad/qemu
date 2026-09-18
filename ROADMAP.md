@@ -32,9 +32,12 @@ bytes verified before any CPU result is accepted. PROM probing may remain as a
 small, conservative fallback until an equivalent firmware idle instruction is
 identified.
 
-Current state: no SunOS kernel has been rebuilt or installed into the qcow2
-image yet. The image therefore contains neither the earlier experimental trap
-nor the proposed `wrpowerdown` idle path.
+Current state: the reproducible cross-build now produces and packages a
+static SunOS SPARC a.out kernel, and a throwaway transfer has been exercised.
+The control kernel still fails during early startup because its PROM vector is
+reported as `romp=ffd0c7f8 magic=0 version=0`; it has not reached the SunOS
+scheduler. The modified kernel therefore remains unvalidated and must not yet
+be used for CPU acceptance measurements.
 
 ## Latest evidence
 

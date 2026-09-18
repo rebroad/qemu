@@ -16,6 +16,11 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
 - The normal VM network must attach to the host `spod` bridge. Networking is
   part of the acceptance path, not an optional fallback to user-mode or no
   networking.
+- The guest must identify as `lily` and use the address expected by the host
+  (`10.205.192.4`, currently recorded in `/etc/hosts` as `lily sunos`). If an
+  existing snapshot already has that hostname and address, use that snapshot
+  for testing rather than recreating the state or changing the persistent
+  disk.
 - Provide working telnet access to the SunOS guest and port/build an SSH
   server suitable for SunOS 4.1.4, then verify SSH access to the running VM.
   The guest is recorded in `/etc/hosts` as `lily` and that name should be used

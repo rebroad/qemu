@@ -32,9 +32,14 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
 - The guest must identify as `lily` and use `137.205.192.4` on the `spod`
   bridge, with `137.205.192.1` as its default gateway. Use only this
   `137.205.192.x` guest/bridge network for VM testing; do not substitute a
-  user-mode or unrelated `10.x.x.x` address. If an existing snapshot already
-  has that hostname and address, use that snapshot for testing rather than
-  recreating the state or changing the persistent disk.
+  user-mode or unrelated `10.x.x.x` address.
+- Treat the current persistent disk as the authoritative VM state. Normal
+  exploratory tests must use a throwaway overlay of that current disk.
+  Internal qcow2 snapshots are immutable historical rollback points:
+  `--loadvm` restores the state captured when the snapshot was made and does
+  not include later disk changes. Never select a historical snapshot merely
+  because its name sounds suitable; verify its hostname, network, credentials,
+  and installed files before using it.
 - Provide working telnet access to the SunOS guest and port/build an SSH
   server suitable for SunOS 4.1.4, then verify SSH access to the running VM.
   The guest is recorded in `/etc/hosts` as `lily` and that name should be used

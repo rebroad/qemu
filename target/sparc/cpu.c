@@ -32,51 +32,6 @@
 #include "target/sparc/translate.h"
 #include "system/cpu-idle.h"
 
-static const CPUPCState sunos414_kernel_idle_pcs[] = {
-    /*
-     * SunOS 4.1.4 /vmunix extracted from sunos-hdd.qcow2.
-     * These are the code entry points in the idle path. Data/state symbols
-     * such as _whichqs, _qrunflag, _idleproc, and _cpu_idle are excluded.
-     */
-    {
-        .pc = UINT64_C(0xf0143cd0),
-        .next_pc = 0,
-    },
-    {
-        .pc = UINT64_C(0xf0143dbc),
-        .next_pc = 0,
-    },
-    {
-        .pc = UINT64_C(0xf0135fd8),
-        .next_pc = 0,
-    },
-    {
-        .pc = UINT64_C(0xf0038b1c),
-        .next_pc = 0,
-    },
-    {
-        .pc = UINT64_C(0xf004be20),
-        .next_pc = 0,
-    },
-    {
-        .pc = UINT64_C(0xf0038b84),
-        .next_pc = UINT64_C(0xf0038b88),
-    },
-};
-
-/* SunOS login(1M) input waits.  These are separated from general kernel
- * idle points so they can use a longer backoff without slowing boot paths. */
-static const CPUPCState sunos414_login_idle_pcs[] = {
-    {
-        .pc = UINT64_C(0xf01294f8),
-        .next_pc = UINT64_C(0xf01294fc),
-    },
-    {
-        .pc = UINT64_C(0xfe0221a0),
-        .next_pc = UINT64_C(0xfe0221a4),
-    },
-};
-
 static const CPUPCState sunos414_prom_idle_pcs[] = {
     {
         .pc = UINT64_C(0xffd16c88),
@@ -101,10 +56,6 @@ static const CPUPCState sunos414_prom_idle_pcs[] = {
     },
     {
         .pc = UINT64_C(0xffd2ba10),
-        .next_pc = 0,
-    },
-    {
-        .pc = UINT64_C(0xffef0000),
         .next_pc = 0,
     },
     {
@@ -1251,12 +1202,6 @@ static void sparc_cpu_register_types(void)
 {
     int i;
 
-    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 kernel",
-                                       sunos414_kernel_idle_pcs,
-                                       ARRAY_SIZE(sunos414_kernel_idle_pcs));
-    cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 login",
-                                       sunos414_login_idle_pcs,
-                                       ARRAY_SIZE(sunos414_login_idle_pcs));
     cpu_idle_register_builtin_idle_pcs("SunOS 4.1.4 PROM",
                                        sunos414_prom_idle_pcs,
                                        ARRAY_SIZE(sunos414_prom_idle_pcs));

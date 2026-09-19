@@ -50,6 +50,15 @@ Make an idle SunOS 4.1.4 guest relinquish host CPU time while remaining a usable
 - Keep adaptive icount diagnostics out of normal stderr output when requested
   by writing them to a dedicated `-icount debug-file=...` logfile, and make
   shift changes stable by enforcing a drift deadband and minimum dwell time.
+- Do not use SpeedStep-style virtual frequency scaling for this goal. QEMU
+  must emulate boot and active guest work at full speed; host CPU reduction
+  must come from an interruptible architectural wait, not from slowing the
+  guest clock or instruction rate.
+- Remove crude PC/NPC-learning, repeated-PC, and login-loop throttling from
+  the operational idle path. Learning may remain as diagnostic tooling, but
+  it must never classify boot work as idle or request host sleeping. The
+  modified SunOS kernel's explicit idle instruction is the primary OS path;
+  any PROM fallback must be separately enabled and narrowly gated.
 
 ## Definition of done
 
@@ -68,6 +77,10 @@ same tested QEMU/SunOS build:
   same launcher start to the same boot-complete marker, `--cpuidle` must take
   no more than 2% longer than the matching run without `--cpuidle` (at least
   98% of the non-idled speed), measured over repeated runs.
+- During boot, the idle gate must remain closed and QEMU must not perform
+  heuristic power-saving. The only permitted boot-time wait is an explicit
+  guest sleep/wait instruction that is interruptible and does not slow the
+  guest clock.
 - When the SunOS guest is doing no work except a long sleep (for example, the
   logged-in shell is running `sleep 10`), the QEMU process must remain mostly
   idle, at less than 3% instantaneous host CPU during that interval.

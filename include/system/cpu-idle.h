@@ -84,10 +84,9 @@ void cpu_get_pc_state(CPUState *cpu, CPUPCState *state);
  * cpu_idle_exec_hook - Main idle detection hook
  * @cpu: The CPU that is about to execute
  *
- * Called before each translation block execution. Performs:
- * - PC pattern learning (if in learning mode)
- * - Idle detection based on learned patterns
- * - Strategic sleeping to save host CPU
+ * Called before each translation block execution. Performs diagnostic
+ * sampling when requested and handles only explicit guest halt state or a
+ * separately enabled PROM fallback. It must not infer idle from PC frequency.
  * - Speed measurement and statistics
  *
  * Safe to call on all architectures. No-op if idle detection is disabled.
@@ -121,8 +120,8 @@ void cpu_idle_set_debug(bool enable);
  * cpu_idle_set_halt_on_idle - Enable/disable halt-on-idle behavior
  * @enable: true to enable, false to disable
  *
- * Controls whether idle detection will halt vCPUs (for icount warp) instead
- * of sleeping in the TCG thread.
+ * Retained for monitor compatibility. Guest architectural halt handling is
+ * performed by the CPU core; heuristic halt-on-idle behavior is removed.
  */
 void cpu_idle_set_halt_on_idle(bool enable);
 
@@ -130,8 +129,8 @@ void cpu_idle_set_halt_on_idle(bool enable);
  * cpu_idle_set_pc_learning - Enable/disable PC-based idle learning
  * @enable: true to enable, false to disable
  *
- * When enabled, learned idle signatures use PC-only matching in icount mode.
- * Outside icount, the matcher keeps using PC/NPC pairs.
+ * When enabled, PC-only learning is available for diagnostics. Learned
+ * signatures are never used to throttle operational guest execution.
  */
 void cpu_idle_set_pc_learning(bool enable);
 

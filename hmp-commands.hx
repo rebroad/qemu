@@ -744,8 +744,9 @@ ERST
 
 SRST
 ``cpu-idle`` *on*|*off*
-  Enable or disable CPU idle detection and power-saving system (architecture-agnostic).
-  When enabled, QEMU detects guest idle loops and sleeps to reduce host CPU usage.
+  Enable or disable the conservative CPU idle path. When enabled, QEMU can
+  honor explicit guest architectural waits and an explicitly registered PROM
+  fallback; it does not infer idleness from repeated PCs.
 ERST
 
     {
@@ -770,11 +771,10 @@ ERST
         .cmd        = hmp_cpu_idle_halt,
     },
 
-    SRST
+SRST
 ``cpu-idle-halt`` *on*|*off*
-  Enable or disable halting the vCPU when an idle loop is detected.
-  When enabled and icount is active, QEMU halts the vCPU and lets icount
-  warp virtual time forward, reducing host CPU while keeping guest time correct.
+  Retained for monitor compatibility. Architectural guest waits are handled
+  by the CPU core; heuristic halt-on-idle behavior is not available.
 ERST
 
     {

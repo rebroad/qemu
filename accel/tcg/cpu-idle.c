@@ -70,6 +70,12 @@ static bool cpu_idle_builtin_fallbacks = false;  // Allow built-in signatures
 static bool cpu_idle_boot_complete = false; // Closed until boot is complete
 static int64_t cpu_idle_input_grace_until_ns;
 static int64_t cpu_idle_command_grace_until_ns;
+static uint64_t architectural_powerdown_seen;
+static uint64_t architectural_powerdown_rejected;
+static uint64_t architectural_powerdown_accepted;
+static int64_t last_powerdown_trace_ns;
+static bool last_powerdown_trace_action;
+static bool powerdown_trace_initialized;
 
 /* Debug output helper - use stderr to not interfere with serial console */
 #define DEBUG_PRINTF(...) do { if (cpu_idle_debug) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
@@ -596,6 +602,9 @@ void cpu_idle_exec_hook(CPUState *cs)
     static int prom_idle_hits = 0;   // Count PROM idle detections per second
     static int busy_hits = 0;         // Count normal busy execs (not idle, not generic)
     static int halted_hits = 0;       // Count cpu halted state per second
+    static uint64_t builtin_idle_matches = 0;
+    static uint64_t builtin_idle_blocked_by_boot = 0;
+    static uint64_t idle_waits = 0;
     static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
     static double freq_pct_min = 100.0;  // Minimum PC frequency % this second
     static double freq_pct_max = 0.0;    // Maximum PC frequency % this second
@@ -680,8 +689,7 @@ void cpu_idle_exec_hook(CPUState *cs)
                     }
                     sleep_us = current_sleep_cap;
                     prom_idle_hits++;
-                    DEBUG_PRINTF("   built-in idle match: %s\n",
-                                 set->name ? set->name : "(unnamed)");
+                    builtin_idle_matches++;
                     break;
                 }
             }
@@ -723,6 +731,11 @@ void cpu_idle_exec_hook(CPUState *cs)
         sleep_us = 0;
     }
 
+    if (sleep_us > 0 && !(cpu_idle_enabled && cpu_idle_boot_complete &&
+                          learning_mode == LEARNING_OFF)) {
+        builtin_idle_blocked_by_boot++;
+    }
+
     if (cpu_idle_enabled && cpu_idle_boot_complete &&
         learning_mode == LEARNING_OFF && sleep_us > 0) {
         /*
@@ -751,6 +764,7 @@ void cpu_idle_exec_hook(CPUState *cs)
 
     if (cpu_idle_enabled && cpu_idle_boot_complete &&
         learning_mode == LEARNING_OFF && sleep_us > 0) {
+        idle_waits++;
         int64_t sleep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (icount_enabled() && icount_sleep_enabled()) {
             /* Let adaptive icount arm its normal real-time warp timer before
@@ -895,6 +909,16 @@ void cpu_idle_exec_hook(CPUState *cs)
                 hook_time_ms, hook_pct, vcpu_wait_ms, vcpu_wait_pct,
                 pc_state.pc, pc_state.next_pc);
 
+            pos += snprintf(msg + pos, sizeof(msg) - pos,
+                " decisions:wrpd=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                " prom=%" PRIu64 "/%" PRIu64 " waits=%" PRIu64,
+                architectural_powerdown_seen,
+                architectural_powerdown_rejected,
+                architectural_powerdown_accepted,
+                builtin_idle_matches,
+                builtin_idle_blocked_by_boot,
+                idle_waits);
+
             // Warning if vCPU wait time is very low (approaching capacity limit) - disabled until we find reliable way to detect this
             /*if (vcpu_wait_pct < 10 && icount_enabled()) {
                 pos += snprintf(msg + pos, sizeof(msg) - pos, " ⚠️ VCPU MAXED OUT!");
@@ -947,6 +971,12 @@ void cpu_idle_exec_hook(CPUState *cs)
         freq_pct_min = 100.0;  // Reset min/max for next second
         freq_pct_max = 0.0;
         total_hook_time_ns = 0;  // Reset hook overhead timer
+        architectural_powerdown_seen = 0;
+        architectural_powerdown_rejected = 0;
+        architectural_powerdown_accepted = 0;
+        builtin_idle_matches = 0;
+        builtin_idle_blocked_by_boot = 0;
+        idle_waits = 0;
     }
 
     // Measure hook exit time and accumulate total (must be last thing in function!)
@@ -1006,6 +1036,34 @@ void cpu_idle_set_boot_complete(bool complete)
 {
     cpu_idle_boot_complete = complete;
     fprintf(stderr, "CPU idle boot gate %s\n", complete ? "open" : "closed");
+}
+
+bool cpu_idle_boot_is_complete(void)
+{
+    return cpu_idle_boot_complete;
+}
+
+void cpu_idle_note_architectural_powerdown(bool accepted)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    architectural_powerdown_seen++;
+    if (accepted) {
+        architectural_powerdown_accepted++;
+    } else {
+        architectural_powerdown_rejected++;
+    }
+
+    if (cpu_idle_debug &&
+        (!powerdown_trace_initialized || accepted != last_powerdown_trace_action ||
+         now - last_powerdown_trace_ns >= 1000000000LL)) {
+        DEBUG_PRINTF("[IDLE-DECISION] path=WRPOWERDOWN action=%s gate=%s\n",
+                     accepted ? "accept" : "reject",
+                     cpu_idle_boot_complete ? "open" : "closed");
+        last_powerdown_trace_ns = now;
+        last_powerdown_trace_action = accepted;
+        powerdown_trace_initialized = true;
+    }
 }
 
 void hmp_cpu_idle_boot_complete(Monitor *mon, const QDict *qdict)

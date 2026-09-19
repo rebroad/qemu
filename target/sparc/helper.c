@@ -24,6 +24,7 @@
 #include "accel/tcg/cpu-loop.h"
 #include "exec/cpu-common.h"
 #include "exec/helper-proto.h"
+#include "system/cpu-idle.h"
 
 void cpu_raise_exception_ra(CPUSPARCState *env, int tt, uintptr_t ra)
 {
@@ -207,6 +208,15 @@ void helper_power_down(CPUSPARCState *env)
 {
     CPUState *cs = env_cpu(env);
 
+    /* SunOS executes WRPOWERDOWN from idlework() during early kernel boot,
+     * before the launcher has opened the guest-idle gate.  Preserve normal
+     * boot speed and responsiveness until that explicit hand-off. */
+    if (!cpu_idle_boot_is_complete()) {
+        cpu_idle_note_architectural_powerdown(false);
+        return;
+    }
+
+    cpu_idle_note_architectural_powerdown(true);
     cs->halted = 1;
     cs->exception_index = EXCP_HLT;
     env->pc = env->npc;

@@ -1,8 +1,9 @@
 /*
  * QEMU CPU Idle Detection and Power Saving
  *
- * Architecture-agnostic idle loop detection using PC pattern learning.
- * Currently used by SPARC, designed to be extensible to all architectures.
+ * The operational idle path is deliberately conservative: a guest must enter
+ * an architectural wait/halt state, or an explicitly enabled firmware fallback
+ * must identify a stable PROM prompt. PC/NPC learning is diagnostic only.
  *
  * Copyright (c) 2024 QEMU Contributors
  *
@@ -36,7 +37,6 @@ __attribute__((weak)) void cpu_get_pc_state(CPUState *cpu, CPUPCState *state)
 /* MAX_ICOUNT_SHIFT from icount-common.c */
 #define MAX_ICOUNT_SHIFT 10
 #define PROM_IDLE_SLEEP_US 100000
-#define LOGIN_IDLE_SLEEP_US 500000
 #define INPUT_GRACE_NS 100000000
 #define INPUT_COMMAND_GRACE_NS 5000000000LL
 
@@ -65,11 +65,9 @@ static void cpu_idle_wait_interruptible(CPUState *cs, int sleep_us)
 /* Global control flags */
 static bool cpu_idle_enabled = false;  // Controls whether idle detection is active
 static bool cpu_idle_debug = false;    // Controls debug output
-static bool cpu_idle_halt_on_idle = true;  // Use vCPU halt + icount warp when idle
 static bool cpu_idle_pc_learning = false;  // Learn/store PC-only signatures in icount mode
 static bool cpu_idle_builtin_fallbacks = false;  // Allow built-in signatures
-static bool learned_os_data_enabled = false;  // Arm learned OS PCs only after live learning
-static bool cpu_idle_boot_complete = true;  // Do not sleep during guest boot
+static bool cpu_idle_boot_complete = false; // Closed until boot is complete
 static int64_t cpu_idle_input_grace_until_ns;
 static int64_t cpu_idle_command_grace_until_ns;
 
@@ -438,9 +436,6 @@ static void cpu_idle_start_learning_internal(LearningMode mode)
     memset(collections[idx].pcs, 0, sizeof(collections[idx].pcs));
 
     // Now set learning mode (after reset to avoid counting during reset)
-    if (mode == LEARNING_OS_IDLE) {
-        learned_os_data_enabled = false;
-    }
     learning_mode = mode;
 
     if (mode == LEARNING_BUSY) {
@@ -462,10 +457,6 @@ static void cpu_idle_stop_learning_internal(void)
     PCCollection *coll = &collections[stopped_mode - 1];
 
     learning_mode = LEARNING_OFF;
-    if (stopped_mode == LEARNING_OS_IDLE) {
-        learned_os_data_enabled = true;
-    }
-
     bool auto_stopped = (coll->total_samples >= LEARNING_AUTO_STOP_SAMPLES);
     DEBUG_PRINTF("🎓 %s PC learning complete%s!\n", coll->name,
                 auto_stopped ? " (auto-stopped)" : "");
@@ -597,20 +588,12 @@ void cpu_idle_exec_hook(CPUState *cs)
     const char *arch_name = get_arch_name_from_cpu(cs);
     CPUPCState pc_state;
     cpu_get_pc_state(cs, &pc_state);
-    static uint64_t last_pc = 0;
-    static uint64_t last_npc = 0;
     static int total_sleep_us = 0;  // Track total sleep time per second
     static int min_sleep_us = INT_MAX;  // Track minimum sleep per second
     static int max_sleep_us = 0;  // Track maximum sleep per second
     static int sleep_events = 0;     // Count of actual sleep calls per second
     static int total_execs = 0;      // Total exec_enter calls per second (for percentage calculation)
-    static int prev_total_execs = 1;  // Previous second's total_execs (for PROM gating calculation)
-    static int prev_prom_total_hits = 0; // Previous second's total PROM hits
-    static int os_idle_hits = 0;  // Count OS idle detections per second
     static int prom_idle_hits = 0;   // Count PROM idle detections per second
-    static int generic_idle_hits = 0; // Count generic idle loop detections per second
-    static int antigeneric_hits = 0;  // Count generic repeats rejected by BUSY collection
-    static double antigeneric_freq_sum = 0.0; // Sum of BUSY freq % for antigeneric hits
     static int busy_hits = 0;         // Count normal busy execs (not idle, not generic)
     static int halted_hits = 0;       // Count cpu halted state per second
     static double freq_pct_sum = 0.0;  // Sum of PC frequency percentages (for weighted idle %)
@@ -670,68 +653,17 @@ void cpu_idle_exec_hook(CPUState *cs)
         }
     }
 
-    // Check for learned idle patterns and calculate sleep based on frequency
+    /* Never infer idleness from execution frequency. A repeated PC/NPC can be
+     * a boot probe, device wait, or live login loop. Learning remains useful
+     * for diagnostics, but cannot request a host wait. */
     bool is_known_idle = false;
     bool builtin_prom_idle = false;
-    bool builtin_login_idle = false;
     int sleep_us = 0;
-    uint32_t pc_frequency = 0;  // How often this PC appeared during learning
     total_execs++;  // Count every execution for percentage calculation
 
-    // Check both idle collections (PROM and OS) - use learned frequency!
-    for (int idle_type = 0; idle_type < 2 && !is_known_idle; idle_type++) {
-        if (idle_type == 1 && !learned_os_data_enabled) {
-            continue;
-        }
-        PCCollection *idle_coll = &collections[idle_type];  // 0=PROM, 1=OS
-
-        if (idle_coll->num_pcs > 0) {
-            // Use learned PCs WITH frequency data
-            for (int i = 0; i < idle_coll->num_pcs; i++) {
-                if (cpu_idle_state_matches(&pc_state, idle_coll->pcs[i].pc, idle_coll->pcs[i].npc,
-                                           pc_only_mode)) {
-                    is_known_idle = true;
-                    pc_frequency = idle_coll->pcs[i].effective_count;
-
-                    // Calculate sleep based on frequency: linear mapping, capped at current_sleep_cap
-                    if (idle_coll->total_samples > 0) {
-                        double freq_pct = (double)pc_frequency / idle_coll->total_samples * 100.0;
-
-                        // Clamp freq_pct to 100% max (effective_count can be UINT32_MAX for perfect idle indicators)
-                        if (freq_pct > 100.0) freq_pct = 100.0;
-
-                        freq_pct_sum += freq_pct;  // Accumulate for weighted idle % calculation
-                        if (freq_pct < freq_pct_min) freq_pct_min = freq_pct;
-                        if (freq_pct > freq_pct_max) freq_pct_max = freq_pct;
-                        sleep_us = (int)(freq_pct * 1000);  // Direct linear: 1%=10µs, 10%=100µs, 50%=500µs, 100%=1000µs
-                        if (sleep_us > current_sleep_cap) {
-                            sleep_us = current_sleep_cap;  // Cap at dynamically-adjusted limit
-                        }
-                    }
-
-                    // Count idle type for reporting
-                    if (idle_type == 1) {  // OS - always allow sleeping
-                        os_idle_hits++;
-                    } else {  // PROM - only sleep if >90% of execs were PROM idle in previous second
-                        /* A learned PROM record is trusted in the same way as
-                         * a built-in PROM signature.  Without this marker the
-                         * real-time guard below treats the learned hit as an
-                         * ordinary learned loop and removes its sleep. */
-                        builtin_prom_idle = true;
-                        prom_idle_hits++;
-                        // Use PREVIOUS second's data to avoid early-second false readings
-                        double prev_prom_pct = (double)prev_prom_total_hits / prev_total_execs * 100.0;
-                        if (prev_prom_pct < 90.0) {
-                            sleep_us = 0;  // Don't sleep - we're not truly PROM-idling
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!is_known_idle && cpu_idle_builtin_fallbacks && builtin_idle_set_count > 0) {
+    /* The only PC-based operational fallback is an explicitly enabled PROM
+     * signature. SunOS kernel/login idle paths must use WRPOWERDOWN. */
+    if (cpu_idle_builtin_fallbacks && builtin_idle_set_count > 0) {
         for (size_t set_idx = 0; set_idx < builtin_idle_set_count && !is_known_idle; set_idx++) {
             const BuiltinIdleSet *set = &builtin_idle_sets[set_idx];
 
@@ -741,11 +673,13 @@ void cpu_idle_exec_hook(CPUState *cs)
                                            set->pcs[i].next_pc,
                                            pc_only_mode)) {
                     is_known_idle = true;
-                    pc_frequency = UINT32_MAX;
                     builtin_prom_idle = g_strrstr(set->name, "PROM") != NULL;
-                    builtin_login_idle = g_strrstr(set->name, "login") != NULL;
+                    if (!builtin_prom_idle) {
+                        is_known_idle = false;
+                        continue;
+                    }
                     sleep_us = current_sleep_cap;
-                    os_idle_hits++;
+                    prom_idle_hits++;
                     DEBUG_PRINTF("   built-in idle match: %s\n",
                                  set->name ? set->name : "(unnamed)");
                     break;
@@ -754,41 +688,7 @@ void cpu_idle_exec_hook(CPUState *cs)
         }
     }
 
-    // Generic idle detection (PC/NPC repeat) - only if not already known-idle
-    if (!is_known_idle && pc_state.pc == last_pc &&
-        (!pc_only_mode ? (pc_state.next_pc == last_npc) : true)) {
-        // Check if this PC/NPC is in the BUSY collection (filter out busy loops!)
-        bool is_busy_pc = false;
-        PCCollection *busy_coll = &collections[LEARNING_BUSY - 1];
-        for (int i = 0; i < busy_coll->num_pcs; i++) {
-            if (cpu_idle_state_matches(&pc_state, busy_coll->pcs[i].pc, busy_coll->pcs[i].npc,
-                                       pc_only_mode)) {
-                is_busy_pc = true;
-                // Track the busy frequency for reporting (antigeneric = rejected generic idle)
-                if (busy_coll->total_samples > 0) {
-                    double busy_freq_pct = (double)busy_coll->pcs[i].count / busy_coll->total_samples * 100.0;
-                    antigeneric_freq_sum += busy_freq_pct;
-                    antigeneric_hits++;
-                }
-                break;
-            }
-        }
-
-        // Only treat as idle if NOT in busy collection
-        if (!is_busy_pc) {
-            generic_idle_hits++;
-            freq_pct_sum += 1.0;  // Low confidence (generic repeat)
-            if (1.0 < freq_pct_min) freq_pct_min = 1.0;
-            if (1.0 > freq_pct_max) freq_pct_max = 1.0;
-            /*
-             * A repeated TB is not sufficient evidence of an idle guest:
-             * boot-time polling, filesystem waits, and device probes all
-             * legitimately repeat PCs.  Count these repeats for diagnostics,
-             * but never throttle the vCPU from this generic fallback.
-             */
-            sleep_us = 0;
-        }
-    } else if (!is_known_idle && !cs->halted) {
+    if (!is_known_idle && !cs->halted) {
         // Normal busy execution (PC changed, not idle, not halted)
         busy_hits++;
     }
@@ -836,11 +736,6 @@ void cpu_idle_exec_hook(CPUState *cs)
              * confined to a trusted PROM signature and remains interruptible
              * by the normal QEMU thread scheduling path. */
             sleep_us = PROM_IDLE_SLEEP_US;
-        } else if (builtin_login_idle) {
-            /* Login waits are stable after boot; use a long, bounded wait
-             * without applying it to kernel paths that can occur during
-             * initialization. */
-            sleep_us = MAX(sleep_us, LOGIN_IDLE_SLEEP_US);
         } else if (icount_enabled() && last_speed_percent <= 100) {
             /* In ordinary host-clock mode, the guest clock follows the
              * host independently of this wait.  Only adaptive icount needs
@@ -891,7 +786,7 @@ void cpu_idle_exec_hook(CPUState *cs)
             }
         }
 
-        int total_idle = os_idle_hits + prom_idle_hits + generic_idle_hits + halted_hits;
+        int total_idle = prom_idle_hits + halted_hits;
         int64_t real_delta_ns = current_time_ns - last_report_time_ns;
         int64_t vm_delta_ns = vm_clock_ns - last_vm_clock_ns;
 
@@ -1016,26 +911,9 @@ void cpu_idle_exec_hook(CPUState *cs)
         if (total_idle > 0) {
             pos += snprintf(msg + pos, sizeof(msg) - pos, " [");
             bool first = true;
-            if (os_idle_hits > 0) {
-                double os_pct = (double)os_idle_hits / total_execs * 100.0;
-                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sO:%.1f%%", first ? "" : " ", os_pct);
-                first = false;
-            }
             if (prom_idle_hits > 0) {
                 double prom_pct = (double)prom_idle_hits / total_execs * 100.0;
                 pos += snprintf(msg + pos, sizeof(msg) - pos, "%sP:%.1f%%", first ? "" : " ", prom_pct);
-                first = false;
-            }
-            if (generic_idle_hits > 0) {
-                double generic_pct = (double)generic_idle_hits / total_execs * 100.0;
-                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sG:%.1f%%", first ? "" : " ", generic_pct);
-                first = false;
-            }
-            if (antigeneric_hits > 0) {
-                double antigen_pct = (double)antigeneric_hits / total_execs * 100.0;
-                double avg_antigen_freq = antigeneric_freq_sum / antigeneric_hits;
-                pos += snprintf(msg + pos, sizeof(msg) - pos, "%sAG:%.1f%%(freq:%.1f%%)",
-                               first ? "" : " ", antigen_pct, avg_antigen_freq);
                 first = false;
             }
             if (halted_hits > 0) {
@@ -1061,13 +939,8 @@ void cpu_idle_exec_hook(CPUState *cs)
         max_sleep_us = 0;
         sleep_events = 0;
         total_sleep_time_ns = 0;  // Reset sleep time
-        // Save current values as "previous" for next second's PROM gating check
-        prev_total_execs = total_execs > 0 ? total_execs : 1;  // Avoid div by zero
-        prev_prom_total_hits = prom_idle_hits;
-        os_idle_hits = prom_idle_hits = 0;
-        generic_idle_hits = halted_hits = 0;
-        antigeneric_hits = 0;
-        antigeneric_freq_sum = 0.0;
+        prom_idle_hits = 0;
+        halted_hits = 0;
         busy_hits = 0;
         total_execs = 0;  // Reset for next second
         freq_pct_sum = 0.0;  // Reset weighted idle % accumulator
@@ -1075,9 +948,6 @@ void cpu_idle_exec_hook(CPUState *cs)
         freq_pct_max = 0.0;
         total_hook_time_ns = 0;  // Reset hook overhead timer
     }
-
-    last_pc = pc_state.pc;
-    last_npc = pc_only_mode ? 0 : pc_state.next_pc;
 
     // Measure hook exit time and accumulate total (must be last thing in function!)
     int64_t hook_exit_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1111,7 +981,9 @@ void cpu_idle_set_debug(bool enable)
 
 void cpu_idle_set_halt_on_idle(bool enable)
 {
-    cpu_idle_halt_on_idle = enable;
+    /* Kept for monitor compatibility. Architectural guest halt handling is
+     * owned by the CPU core; the old heuristic halt mode was removed. */
+    (void)enable;
     fprintf(stderr, "CPU idle halt-on-idle %s\n", enable ? "enabled" : "disabled");
 }
 

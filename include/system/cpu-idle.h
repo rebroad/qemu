@@ -150,6 +150,20 @@ void cpu_idle_set_builtin_fallbacks(bool enable);
 void cpu_idle_set_boot_complete(bool complete);
 
 /**
+ * cpu_idle_boot_is_complete - query whether guest boot may use idle waits
+ *
+ * Architectural guest idle instructions must not suspend the vCPU while the
+ * launcher is still waiting for the guest to finish booting.
+ */
+bool cpu_idle_boot_is_complete(void);
+
+/**
+ * cpu_idle_note_architectural_powerdown - record a guest idle instruction
+ * @accepted: whether QEMU converted it into a halted vCPU
+ */
+void cpu_idle_note_architectural_powerdown(bool accepted);
+
+/**
  * cpu_idle_register_builtin_idle_pcs - Register built-in idle signatures
  * @name: Human-readable label for debug output
  * @pcs: Array of PC/NPC states to register

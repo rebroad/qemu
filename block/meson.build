@@ -20,6 +20,7 @@ block_ss.add(files(
   'io.c',
   'mirror.c',
   'nbd.c',
+  'partition-write-guard.c',
   'null.c',
   'preallocate.c',
   'progress_meter.c',

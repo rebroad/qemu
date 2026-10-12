@@ -3346,7 +3346,7 @@
             {'name': 'host_device', 'if': 'HAVE_HOST_BLOCK_DEVICE' },
             'http', 'https',
             { 'name': 'io_uring', 'if': 'CONFIG_BLKIO' },
-            'iscsi',
+            'iscsi', 'partition-write-guard',
             'luks', 'nbd', 'nfs', 'null-aio', 'null-co', 'nvme',
             { 'name': 'nvme-io_uring', 'if': 'CONFIG_BLKIO' },
             'parallels', 'preallocate', 'qcow', 'qcow2', 'qed', 'quorum',
@@ -4700,6 +4700,19 @@
              } }
 
 ##
+# @BlockdevOptionsPartitionWriteGuard:
+#
+# Restrict writes to GPT partitions while exposing the complete disk.
+#
+# @partitions: One-based GPT partition numbers allowed to be written.
+# @file: The complete disk block device.
+#
+# Since: 11.2
+##
+{ 'struct': 'BlockdevOptionsPartitionWriteGuard',
+  'data': { 'partitions': [ 'uint8' ], 'file': 'BlockdevRef' } }
+
+##
 # @BlockdevOptionsCor:
 #
 # Driver specific block device options for the copy-on-read driver.
@@ -4858,6 +4871,7 @@
       'iscsi':      'BlockdevOptionsIscsi',
       'luks':       'BlockdevOptionsLUKS',
       'nbd':        'BlockdevOptionsNbd',
+      'partition-write-guard': 'BlockdevOptionsPartitionWriteGuard',
       'nfs':        'BlockdevOptionsNfs',
       'null-aio':   'BlockdevOptionsNull',
       'null-co':    'BlockdevOptionsNull',

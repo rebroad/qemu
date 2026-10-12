@@ -4710,7 +4710,7 @@
 # Since: 11.2
 ##
 { 'struct': 'BlockdevOptionsPartitionWriteGuard',
-  'data': { 'partitions': [ 'uint8' ], 'file': 'BlockdevRef' } }
+  'data': { 'partitions': [ 'uint16' ], 'file': 'BlockdevRef' } }
 
 ##
 # @BlockdevOptionsCor:

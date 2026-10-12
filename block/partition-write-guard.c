@@ -9,12 +9,15 @@
 #include "block/block-io.h"
 #include "block/block_int.h"
 #include "block/qdict.h"
+#include "qemu/cutils.h"
 #include "qemu/crc32.h"
 #include "qemu/bswap.h"
 #include "qemu/host-utils.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
 #include "qobject/qdict.h"
+#include "qobject/qnum.h"
+#include "qobject/qstring.h"
 
 #define GPT_SECTOR_SIZE_MIN 512
 #define GPT_SECTOR_SIZE_MAX 4096
@@ -43,6 +46,22 @@ static uint32_t pwg_crc32(const uint8_t *data, size_t len)
     return crc ^ 0xffffffff;
 }
 
+static bool pwg_get_partition_number(const QObject *value, int64_t *number)
+{
+    if (qobject_type(value) == QTYPE_QNUM) {
+        return qnum_get_try_int(qobject_to(QNum, value), number);
+    }
+
+    if (qobject_type(value) == QTYPE_QSTRING) {
+        const char *str = qstring_get_str(qobject_to(QString, value));
+        const char *end;
+
+        return !qemu_strtoi64(str, &end, 0, number) && !*end;
+    }
+
+    return false;
+}
+
 static int pwg_read_gpt(BlockDriverState *bs, QDict *partitions,
                         Error **errp)
 {
@@ -69,9 +88,10 @@ static int pwg_read_gpt(BlockDriverState *bs, QDict *partitions,
     }
     for (entry = qdict_first(partitions); entry;
          entry = qdict_next(partitions, entry)) {
-        int64_t value = qdict_get_try_int(partitions,
-                                         qdict_entry_key(entry), -1);
-        if (value < 1 || value > GPT_MAX_ENTRIES) {
+        int64_t value;
+
+        if (!pwg_get_partition_number(qdict_entry_value(entry), &value) ||
+            value < 1 || value > GPT_MAX_ENTRIES) {
             error_setg(errp, "GPT partition numbers must be between 1 and %u",
                        GPT_MAX_ENTRIES);
             return -EINVAL;

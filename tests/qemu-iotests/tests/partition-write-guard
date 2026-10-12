@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+# group: rw quick auto
+#
+# Test that partition-write-guard permits writes only to selected GPT ranges.
+#
+# Copyright (C) 2026 QEMU contributors
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import json
+import os
+import struct
+import subprocess
+import zlib
+
+import iotests
+from iotests import qemu_io
+
+
+SECTOR_SIZE = 512
+IMAGE_SIZE = 1024 * 1024
+ENTRY_COUNT = 300
+ENTRY_SIZE = 128
+PARTITIONS = {
+    1: (128, 255),
+    2: (256, 383),
+    3: (384, 511),
+    7: (512, 639),
+    256: (640, 767),
+}
+
+
+def make_gpt(path: str) -> None:
+    with open(path, 'wb') as image:
+        image.truncate(IMAGE_SIZE)
+
+    entries = bytearray(ENTRY_COUNT * ENTRY_SIZE)
+    type_guid = bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
+    for number, (first, last) in PARTITIONS.items():
+        offset = (number - 1) * ENTRY_SIZE
+        entries[offset:offset + 16] = type_guid
+        entries[offset + 16:offset + 32] = number.to_bytes(16, 'little')
+        struct.pack_into('<QQQ', entries, offset + 32, first, last, 0)
+
+    table_lba = 2
+    table_sectors = (len(entries) + SECTOR_SIZE - 1) // SECTOR_SIZE
+    first_usable = table_lba + table_sectors + 1
+    last_usable = IMAGE_SIZE // SECTOR_SIZE - 2
+    header = bytearray(SECTOR_SIZE)
+    header[:8] = b'EFI PART'
+    struct.pack_into('<IIIIQQQQ16sQIII', header, 8,
+                     0x00010000, 92, 0, 0, 1,
+                     IMAGE_SIZE // SECTOR_SIZE - 1, first_usable,
+                     last_usable, b'partition-guard', table_lba,
+                     ENTRY_COUNT, ENTRY_SIZE, zlib.crc32(entries))
+    struct.pack_into('<I', header, 16, zlib.crc32(header[:92]))
+
+    with open(path, 'r+b') as image:
+        image.seek(SECTOR_SIZE)
+        image.write(header)
+        image.seek(table_lba * SECTOR_SIZE)
+        image.write(entries)
+
+
+class TestPartitionWriteGuard(iotests.QMPTestCase):
+    def setUp(self) -> None:
+        self.test_img = os.path.join(iotests.test_dir, 'disk.img')
+        make_gpt(self.test_img)
+        self.image_opts = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=file',
+            f'file.filename={self.test_img}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+            'partitions.3=256',
+        ])
+
+    def write(self, offset: int, command: str = 'write'):
+        return qemu_io('--image-opts', self.image_opts,
+                       '-c', f'{command} {offset} {SECTOR_SIZE}',
+                       check=False)
+
+    def test_allowed_and_denied_ranges(self) -> None:
+        for number in (1, 3, 7, 256):
+            offset = PARTITIONS[number][0] * SECTOR_SIZE
+            result = qemu_io('--image-opts', self.image_opts,
+                             '-c', f'write -P 0xab {offset} {SECTOR_SIZE}',
+                             check=False)
+            self.assertEqual(result.returncode, 0, result.stdout)
+
+        offset = PARTITIONS[2][0] * SECTOR_SIZE
+        for command in ('write', 'write -z', 'discard'):
+            result = self.write(offset, command)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+
+        for offset in (0, SECTOR_SIZE, 2 * SECTOR_SIZE, 900 * SECTOR_SIZE):
+            result = self.write(offset)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+
+        offset = PARTITIONS[1][1] * SECTOR_SIZE
+        result = qemu_io('--image-opts', self.image_opts,
+                         '-c', f'write -P 0xab {offset} {2 * SECTOR_SIZE}',
+                         check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+        with open(self.test_img, 'rb') as image:
+            for number in (1, 3, 7, 256):
+                image.seek(PARTITIONS[number][0] * SECTOR_SIZE)
+                self.assertEqual(image.read(SECTOR_SIZE), bytes([0xab]) * SECTOR_SIZE)
+            image.seek(PARTITIONS[2][0] * SECTOR_SIZE)
+            self.assertEqual(image.read(SECTOR_SIZE), bytes(SECTOR_SIZE))
+            image.seek(PARTITIONS[1][1] * SECTOR_SIZE)
+            self.assertEqual(image.read(SECTOR_SIZE), bytes(SECTOR_SIZE))
+
+    def test_qapi_integer_partition_numbers(self) -> None:
+        file_node = json.dumps({
+            'driver': 'file',
+            'filename': self.test_img,
+            'node-name': 'base',
+        })
+        guard_node = json.dumps({
+            'driver': 'partition-write-guard',
+            'file': 'base',
+            'partitions': [256],
+            'node-name': 'guard',
+        })
+        result = subprocess.run(
+            [iotests.qemu_prog, '-nodefaults', '-machine', 'none',
+             '-display', 'none', '-monitor', 'stdio',
+             '-blockdev', file_node, '-blockdev', guard_node],
+            input='quit\n', capture_output=True, text=True, timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+if __name__ == '__main__':
+    iotests.main(supported_fmts=['raw'], supported_protocols=['file'])

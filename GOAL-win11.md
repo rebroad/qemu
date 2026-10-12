@@ -1,3 +1,5 @@
 ok, so now we need to make the Windows 11 VM faster and more responsive. Can we minimize the amount of emulation it does? Also, can we set up with COW thing where it gives us the option to save the changes after powering down the VM? Is this feature GUI enabled via virt-manager? If not, we should make it so.
 
 The COW mode must be guarded: the guest may write only to GPT partitions 1, 3, and 7. Writes to every other partition and to disk areas outside those partitions must be rejected while running in the overlay, and changes must remain subject to the same allowlist when saved back to the physical disk.
+
+Also install the drivers (if they exist) within Windows 11 to help optimize the use within the VM.

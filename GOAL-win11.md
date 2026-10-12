@@ -1,0 +1,1 @@
+ok, so now we need to make the Windows 11 VM faster and more responsible. Can we minimize the amount of emulation it does? Also, can we set up with COW thing where it gives us the option to save the changes after powering down the VM? Is this feature GUI enabled via virt-manager? If not, we should make it so.

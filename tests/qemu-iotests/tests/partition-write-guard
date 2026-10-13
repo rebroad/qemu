@@ -25,7 +25,7 @@ import subprocess
 import zlib
 
 import iotests
-from iotests import qemu_io
+from iotests import qemu_img, qemu_io
 
 
 SECTOR_SIZE = 512
@@ -41,9 +41,10 @@ PARTITIONS = {
 }
 
 
-def make_gpt(path: str) -> None:
+def make_gpt(path: str, sector_size: int = SECTOR_SIZE,
+             image_size: int = IMAGE_SIZE) -> None:
     with open(path, 'wb') as image:
-        image.truncate(IMAGE_SIZE)
+        image.truncate(image_size)
 
     entries = bytearray(ENTRY_COUNT * ENTRY_SIZE)
     type_guid = bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
@@ -54,22 +55,22 @@ def make_gpt(path: str) -> None:
         struct.pack_into('<QQQ', entries, offset + 32, first, last, 0)
 
     table_lba = 2
-    table_sectors = (len(entries) + SECTOR_SIZE - 1) // SECTOR_SIZE
+    table_sectors = (len(entries) + sector_size - 1) // sector_size
     first_usable = table_lba + table_sectors + 1
-    last_usable = IMAGE_SIZE // SECTOR_SIZE - 2
-    header = bytearray(SECTOR_SIZE)
+    last_usable = image_size // sector_size - 2
+    header = bytearray(sector_size)
     header[:8] = b'EFI PART'
     struct.pack_into('<IIIIQQQQ16sQIII', header, 8,
                      0x00010000, 92, 0, 0, 1,
-                     IMAGE_SIZE // SECTOR_SIZE - 1, first_usable,
+                     image_size // sector_size - 1, first_usable,
                      last_usable, b'partition-guard', table_lba,
                      ENTRY_COUNT, ENTRY_SIZE, zlib.crc32(entries))
     struct.pack_into('<I', header, 16, zlib.crc32(header[:92]))
 
     with open(path, 'r+b') as image:
-        image.seek(SECTOR_SIZE)
+        image.seek(sector_size)
         image.write(header)
-        image.seek(table_lba * SECTOR_SIZE)
+        image.seek(table_lba * sector_size)
         image.write(entries)
 
 
@@ -77,6 +78,8 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
     def setUp(self) -> None:
         self.test_img = os.path.join(iotests.test_dir, 'disk.img')
         make_gpt(self.test_img)
+        with open(self.test_img, 'rb') as image:
+            self.base_before = image.read()
         self.image_opts = ','.join([
             'driver=partition-write-guard',
             'file.driver=file',
@@ -144,6 +147,162 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_guarded_cow_and_commit(self) -> None:
+        overlay = self.test_img + '.qcow2'
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
+                 '-o', 'cluster_size=512', '-b', self.test_img, overlay)
+
+        guarded_overlay = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=qcow2',
+            'file.file.driver=file',
+            f'file.file.filename={overlay}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+        ])
+        for number in (1, 3, 7):
+            first, last = PARTITIONS[number]
+            for offset, pattern in ((first * SECTOR_SIZE, number),
+                                    (last * SECTOR_SIZE, number + 0x10)):
+                allowed = qemu_io('--image-opts', guarded_overlay,
+                                  '-c', f'write -P 0x{pattern:02x} {offset} {SECTOR_SIZE}',
+                                  check=False)
+                self.assertEqual(allowed.returncode, 0, allowed.stdout)
+
+        denied_offset = PARTITIONS[2][0] * SECTOR_SIZE
+        denied = qemu_io('--image-opts', guarded_overlay,
+                         '-c', f'write -P 0x33 {denied_offset} {SECTOR_SIZE}',
+                         check=False)
+        self.assertNotEqual(denied.returncode, 0, denied.stdout)
+
+        guarded_backing = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=file',
+            f'file.filename={self.test_img}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+        ])
+        top_image_opts = ','.join([
+            'driver=qcow2',
+            'file.driver=file',
+            f'file.filename={overlay}',
+        ])
+        qemu_img('commit', '-d', '--image-opts', '--backing-image-opts',
+                 guarded_backing, top_image_opts)
+
+        expected = bytearray(self.base_before)
+        for number in (1, 3, 7):
+            first, last = PARTITIONS[number]
+            for offset, pattern in ((first * SECTOR_SIZE, number),
+                                    (last * SECTOR_SIZE, number + 0x10)):
+                expected[offset:offset + SECTOR_SIZE] = bytes([pattern]) * SECTOR_SIZE
+        with open(self.test_img, 'rb') as image:
+            self.assertEqual(image.read(), expected)
+        qemu_img('check', '-q', overlay)
+        for number in (1, 3, 7):
+            first, last = PARTITIONS[number]
+            for offset, pattern in ((first * SECTOR_SIZE, number),
+                                    (last * SECTOR_SIZE, number + 0x10)):
+                retained = qemu_io('-f', 'qcow2', overlay, '-c',
+                                   f'read -P 0x{pattern:02x} {offset} {SECTOR_SIZE}',
+                                   check=False)
+                self.assertEqual(retained.returncode, 0, retained.stdout)
+
+    def test_guarded_commit_rejects_off_allowlist_extent(self) -> None:
+        overlay = self.test_img + '.qcow2'
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
+                 '-o', 'cluster_size=512', '-b', self.test_img, overlay)
+        denied_offset = PARTITIONS[2][0] * SECTOR_SIZE
+        qemu_io('-f', 'qcow2', overlay, '-c',
+                f'write -P 0xcd {denied_offset} {SECTOR_SIZE}')
+
+        guarded_backing = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=file',
+            f'file.filename={self.test_img}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+        ])
+        top_image_opts = ','.join([
+            'driver=qcow2',
+            'file.driver=file',
+            f'file.filename={overlay}',
+        ])
+        result = qemu_img('commit', '-d', '--image-opts', '--backing-image-opts',
+                          guarded_backing, top_image_opts, check=False)
+        self.assertNotEqual(result.returncode, 0,
+                            (result.stdout or '') + (result.stderr or ''))
+        with open(self.test_img, 'rb') as image:
+            self.assertEqual(image.read(), self.base_before)
+        retained = qemu_io('-f', 'qcow2', overlay, '-c',
+                           f'read -P 0xcd {denied_offset} {SECTOR_SIZE}',
+                           check=False)
+        self.assertEqual(retained.returncode, 0, retained.stdout)
+
+    def test_guarded_cow_and_commit_4k_sectors(self) -> None:
+        sector_size = 4096
+        image_size = 1024 * sector_size
+        image = os.path.join(iotests.test_dir, 'disk-4k.img')
+        overlay = image + '.qcow2'
+        make_gpt(image, sector_size, image_size)
+        with open(image, 'rb') as stream:
+            base_before = stream.read()
+        qemu_img('create', '-q', '-f', 'qcow2',
+                 '-o', f'cluster_size={sector_size}', overlay,
+                 str(image_size))
+
+        guarded_overlay = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=qcow2',
+            'file.file.driver=file',
+            f'file.file.filename={overlay}',
+            'file.backing.driver=blkdebug',
+            f'file.backing.align={sector_size}',
+            'file.backing.image.driver=file',
+            f'file.backing.image.filename={image}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+        ])
+        expected = bytearray(base_before)
+        for number in (1, 3, 7):
+            first, last = PARTITIONS[number]
+            for lba, pattern in ((first, number), (last, number + 0x10)):
+                offset = lba * sector_size
+                result = qemu_io(
+                    '--image-opts', guarded_overlay, '-c',
+                    f'write -P 0x{pattern:02x} {offset} {sector_size}',
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
+                expected[offset:offset + sector_size] = bytes([pattern]) * sector_size
+
+        guarded_backing = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=blkdebug',
+            f'file.align={sector_size}',
+            'file.image.driver=file',
+            f'file.image.filename={image}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+        ])
+        top_image_opts = ','.join([
+            'driver=qcow2',
+            'file.driver=file',
+            f'file.filename={overlay}',
+        ])
+        result = qemu_img('commit', '-d', '--image-opts',
+                          '--backing-image-opts', guarded_backing,
+                          top_image_opts, check=False)
+        self.assertEqual(result.returncode, 0,
+                         (result.stdout or '') + (result.stderr or ''))
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), expected)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,44 @@
+#!/usr/bin/python3
+import json
+import os
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+HELPER = "/usr/local/libexec/qemu-guarded-cow"
+STATE = "/run/libvirt/qemu-guarded-cow/active.json"
+PWG_NS = "urn:qemu:partition-write-guard:1"
+
+
+def fail(message):
+    print(f"qemu-guarded-cow libvirt hook: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+if len(sys.argv) != 5:
+    fail("unexpected hook arguments")
+name, operation, suboperation, _extra = sys.argv[1:]
+if operation not in ("prepare", "start", "release"):
+    raise SystemExit(0)
+
+if operation in ("prepare", "start") and suboperation == "begin":
+    config_xml = sys.stdin.buffer.read()
+    try:
+        root = ET.fromstring(config_xml)
+    except Exception as exc:
+        fail(f"cannot parse domain XML: {exc}")
+    result = subprocess.run([HELPER, "check-start", name])
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    if root.find(f"./metadata/{{{PWG_NS}}}guardedCow") is not None:
+        action = "prepare" if operation == "prepare" else "verify"
+        result = subprocess.run([HELPER, action, name], input=config_xml)
+        raise SystemExit(result.returncode)
+elif operation == "release" and suboperation == "end" and os.path.exists(STATE):
+    try:
+        active = json.loads(open(STATE, encoding="utf-8").read()).get("domain")
+    except Exception as exc:
+        fail(f"cannot read active guarded-disk state: {exc}")
+    if active == name:
+        result = subprocess.run([HELPER, "restore", name])
+        raise SystemExit(result.returncode)

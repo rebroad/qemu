@@ -88,6 +88,7 @@ enum {
     OPTION_SKIP_BROKEN = 277,
     OPTION_LIMITS = 278,
     OPTION_REMOVE_ALL = 279,
+    OPTION_BACKING_IMAGE_OPTS = 280,
 };
 
 typedef enum OutputFormat {
@@ -904,15 +905,17 @@ static void run_block_job(BlockJob *job, Error **errp)
 static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
 {
     int c, ret, flags;
-    const char *filename, *fmt, *cache, *base;
+    const char *filename, *fmt, *cache, *base, *backing_opts_str = NULL;
     BlockBackend *blk;
     BlockDriverState *bs, *base_bs;
+    BlockDriverState *custom_backing_bs = NULL;
     BlockJob *job;
     bool progress = false, quiet = false, drop = false;
     bool writethrough;
     Error *local_err = NULL;
     CommonBlockJobCBInfo cbi;
     bool image_opts = false;
+    bool custom_backing = false;
     int64_t rate_limit = 0;
 
     fmt = NULL;
@@ -923,6 +926,8 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
             {"help", no_argument, 0, 'h'},
             {"format", required_argument, 0, 'f'},
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
+            {"backing-image-opts", required_argument, 0,
+             OPTION_BACKING_IMAGE_OPTS},
             {"cache", required_argument, 0, 't'},
             {"drop", no_argument, 0, 'd'},
             {"base", required_argument, 0, 'b'},
@@ -947,6 +952,9 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
 "  --image-opts\n"
 "     treat FILE as an option string (key=value,..), not a file name\n"
 "     (incompatible with -f|--format)\n"
+"  --backing-image-opts OPTS\n"
+"     open the backing image using these block options instead of the\n"
+"     backing filename recorded in FILE (requires --image-opts)\n"
 "  -t, --cache CACHE_MODE image cache mode (default: " BDRV_DEFAULT_CACHE ")\n"
 "  -d, --drop\n"
 "     skip emptying FILE on completion\n"
@@ -971,6 +979,10 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
             break;
         case OPTION_IMAGE_OPTS:
             image_opts = true;
+            break;
+        case OPTION_BACKING_IMAGE_OPTS:
+            backing_opts_str = optarg;
+            custom_backing = true;
             break;
         case 't':
             cache = optarg;
@@ -1020,8 +1032,63 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
         return 1;
     }
 
-    blk = img_open(image_opts, filename, fmt, flags, writethrough, quiet,
-                   false);
+    if (custom_backing) {
+        QemuOpts *top_opts;
+        QemuOpts *backing_opts;
+        QDict *top_options;
+        QDict *backing_options;
+        const char *backing_node = "qemu-img-commit-backing";
+
+        if (!image_opts || fmt || base) {
+            error_report("--backing-image-opts requires --image-opts and "
+                         "cannot be combined with --format or --base");
+            return 1;
+        }
+        top_opts = qemu_opts_parse_noisily(qemu_find_opts("source"),
+                                           filename, true);
+        backing_opts = qemu_opts_parse_noisily(qemu_find_opts("source"),
+                                               backing_opts_str, true);
+        if (!top_opts || !backing_opts) {
+            if (top_opts) {
+                qemu_opts_del(top_opts);
+            }
+            if (backing_opts) {
+                qemu_opts_del(backing_opts);
+            }
+            return 1;
+        }
+        top_options = qemu_opts_to_qdict(top_opts, NULL);
+        backing_options = qemu_opts_to_qdict(backing_opts, NULL);
+        qemu_opts_del(top_opts);
+        qemu_opts_del(backing_opts);
+        if (qdict_haskey(backing_options, "node-name")) {
+            error_report("--backing-image-opts must not specify node-name");
+            qobject_unref(top_options);
+            qobject_unref(backing_options);
+            return 1;
+        }
+        qdict_put_str(backing_options, "node-name", backing_node);
+        custom_backing_bs = bdrv_open(NULL, NULL, backing_options, flags,
+                                      &local_err);
+        if (!custom_backing_bs) {
+            error_reportf_err(local_err, "Could not open backing image: ");
+            qobject_unref(top_options);
+            return 1;
+        }
+        qdict_put_str(top_options, "backing", backing_node);
+        blk = blk_new_open(NULL, NULL, top_options, flags, &local_err);
+        if (!blk) {
+            error_reportf_err(local_err, "Could not open '%s': ", filename);
+            bdrv_unref(custom_backing_bs);
+            custom_backing_bs = NULL;
+            return 1;
+        }
+        blk_set_enable_write_cache(blk, !writethrough);
+        blk_set_force_allow_inactivate(blk);
+    } else {
+        blk = img_open(image_opts, filename, fmt, flags, writethrough, quiet,
+                       false);
+    }
     if (!blk) {
         return 1;
     }
@@ -1031,7 +1098,9 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
     qemu_progress_print(0.f, 100);
 
     bdrv_graph_rdlock_main_loop();
-    if (base) {
+    if (custom_backing_bs) {
+        base_bs = custom_backing_bs;
+    } else if (base) {
         base_bs = bdrv_find_backing_image(bs, base);
         if (!base_bs) {
             error_setg(&local_err,
@@ -1115,6 +1184,9 @@ done:
         error_setg_errno(&local_err, -ret, "Error while closing the image");
     }
     blk_unref(blk);
+    if (custom_backing_bs) {
+        bdrv_unref(custom_backing_bs);
+    }
 
     if (local_err) {
         error_report_err(local_err);

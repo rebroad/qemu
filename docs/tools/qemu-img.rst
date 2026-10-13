@@ -362,7 +362,7 @@ Command description:
   state after (the attempt at) repairing it. That is, a successful ``-r all``
   will yield the exit code 0, independently of the image state before.
 
-.. option:: commit [--object OBJECTDEF] [--image-opts] [-q] [-f FMT] [-t CACHE] [-b BASE] [-r RATE_LIMIT] [-d] [-p] FILENAME
+.. option:: commit [--object OBJECTDEF] [--image-opts] [--backing-image-opts OPTS] [-q] [-f FMT] [-t CACHE] [-b BASE] [-r RATE_LIMIT] [-d] [-p] FILENAME
 
   Commit the changes recorded in *FILENAME* in its base image or backing file.
   If the backing file is smaller than the snapshot, then the backing file will be
@@ -385,6 +385,13 @@ Command description:
   the top image stays valid).
 
   The rate limit for the commit process is specified by ``-r``.
+
+  ``--backing-image-opts`` opens the image's backing node using the supplied
+  block options instead of the backing filename recorded in *FILENAME*. It
+  requires ``--image-opts`` and is intended for block graphs that need a
+  backing filter or other explicitly configured node. The commit target is the
+  opened backing node; ``-d`` should be used when the caller will replace the
+  top image after a successful commit.
 
 .. option:: compare [--object OBJECTDEF] [--image-opts] [-f FMT] [-F FMT] [-T SRC_CACHE] [-p] [-q] [-s] [-U] FILENAME1 FILENAME2
 

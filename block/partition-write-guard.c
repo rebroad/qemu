@@ -119,7 +119,8 @@ static int pwg_read_gpt(BlockDriverState *bs, QDict *partitions,
     }
     if (memcmp(header, "EFI PART", 8)) {
         error_setg(errp, "Underlying disk does not contain a primary GPT"
-                   " header");
+                   " header at byte offset %u (logical sector size %u)",
+                   sector_size, sector_size);
         return -EINVAL;
     }
 
@@ -232,8 +233,18 @@ static int partition_write_guard_open(BlockDriverState *bs, QDict *options,
     }
 
     GRAPH_RDLOCK_GUARD_MAINLOOP();
-    s->sector_size = MAX(bs->file->bs->bl.request_alignment,
-                         GPT_SECTOR_SIZE_MIN);
+    /* A qcow2 overlay reports its own format alignment, which can be smaller
+     * than the physical disk's logical sector size. Follow the image backing
+     * chain to the base node so GPT LBAs use the physical disk geometry. */
+    {
+        BlockDriverState *base = bs->file->bs;
+
+        while (base->backing) {
+            base = base->backing->bs;
+        }
+        s->sector_size = MAX(base->bl.request_alignment,
+                             GPT_SECTOR_SIZE_MIN);
+    }
     if (s->sector_size > GPT_SECTOR_SIZE_MAX ||
         !is_power_of_2(s->sector_size)) {
         error_setg(errp, "Unsupported underlying logical block size %u",

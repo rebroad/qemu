@@ -1,0 +1,447 @@
+#!/usr/bin/python3
+"""Guard a libvirt qcow2 overlay backed by a partitioned physical disk."""
+
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+QEMU_IMG = "/usr/local/bin/qemu-img"
+HELPER_USER = "libvirt-qemu"
+RUN_DIR = Path("/run/libvirt/qemu-guarded-cow")
+STATE = RUN_DIR / "active.json"
+# Libvirt's hook PATH places /usr/local/sbin first, where this host has
+# command copies that libvirtd's AppArmor profile intentionally cannot run.
+os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
+PWG_NS = "urn:qemu:partition-write-guard:1"
+
+
+class GuardError(RuntimeError):
+    pass
+
+
+def run(*args, input=None):
+    return subprocess.run(args, input=input, check=True, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def fail(message):
+    raise GuardError(message)
+
+
+def domain_xml(domain):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", domain):
+        fail("invalid libvirt domain name")
+    return run("virsh", "dumpxml", "--inactive", domain).stdout
+
+
+def parse_config(domain, xml_data=None):
+    try:
+        root = ET.fromstring(xml_data if xml_data is not None else domain_xml(domain))
+    except Exception as exc:
+        fail(f"cannot read domain XML: {exc}")
+    if root.findtext("name") != domain:
+        fail("libvirt returned an unexpected domain")
+    metadata = root.find(f"./metadata/{{{PWG_NS}}}guardedCow")
+    if metadata is None:
+        fail("domain has no guarded COW configuration metadata")
+
+    partitions = []
+    seen_numbers = set()
+    seen_uuids = set()
+    for node in metadata.findall(f"{{{PWG_NS}}}partition"):
+        try:
+            number = int(node.get("number", ""), 10)
+        except ValueError:
+            fail("configured partition numbers must be decimal integers")
+        partuuid = (node.get("partuuid") or "").lower()
+        parttype = (node.get("type") or "").lower()
+        if (number < 1 or number > 4096 or number in seen_numbers
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", partuuid)
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", parttype)
+                or partuuid in seen_uuids):
+            fail(f"invalid or duplicate partition configuration for GPT partition {number}")
+        seen_numbers.add(number)
+        seen_uuids.add(partuuid)
+        partitions.append({"number": number, "partuuid": partuuid,
+                           "type": parttype, "mountpoint": node.get("mountpoint")})
+    if not partitions:
+        fail("guarded COW configuration contains no writable GPT partitions")
+    partitions.sort(key=lambda part: part["number"])
+
+    disks = [d for d in root.findall("./devices/disk") if d.get("device") == "disk"]
+    if len(disks) != 1:
+        fail("guarded COW domain must declare exactly one system disk")
+    disk = disks[0]
+    driver = disk.find("driver")
+    source = disk.find("source")
+    backing = disk.find("backingStore")
+    backing_format = backing.find("format") if backing is not None else None
+    backing_source = backing.find("source") if backing is not None else None
+    alias = disk.find("alias")
+    if (disk.get("type") != "file" or driver is None or driver.get("type") != "qcow2"
+            or source is None or not source.get("file")
+            or backing is None or backing.get("type") != "block"
+            or backing_format is None or backing_format.get("type") != "raw"
+            or backing_source is None or not backing_source.get("dev")
+            or alias is None or not alias.get("name") or disk.find("readonly") is not None):
+        fail("system disk must be a writable qcow2 overlay over one raw block device")
+    overlay = source.get("file")
+    disk_path = backing_source.get("dev")
+    if any(ch in overlay + disk_path for ch in (",", "\\", "=")):
+        fail("disk and overlay paths may not contain comma, backslash, or equals characters")
+
+    cmdline = root.find(f"{{{QEMU_NS}}}commandline")
+    args = [node.get("value", "") for node in cmdline.findall(f"{{{QEMU_NS}}}arg")] if cmdline is not None else []
+    if len(args) != 2 or args[0] != "-blockdev":
+        fail("QEMU command line must contain one explicit guarded block node")
+    try:
+        guard = json.loads(args[1])
+    except Exception as exc:
+        fail(f"invalid QEMU block node JSON: {exc}")
+    configured_numbers = [part["number"] for part in partitions]
+    node_name = guard.get("node-name", "")
+    if (guard.get("driver") != "partition-write-guard"
+            or guard.get("partitions") != configured_numbers
+            or not re.fullmatch(r"libvirt-[0-9]+-format", guard.get("file", ""))
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", node_name)):
+        fail("QEMU's guard node must wrap the qcow2 format node and match the VM partition allowlist")
+    overrides = root.findall(f"{{{QEMU_NS}}}override/{{{QEMU_NS}}}device")
+    if len(overrides) != 1 or overrides[0].get("alias") != alias.get("name"):
+        fail("QEMU override must select the declared system disk")
+    frontend = overrides[0].find(f"{{{QEMU_NS}}}frontend")
+    props = frontend.findall(f"{{{QEMU_NS}}}property") if frontend is not None else []
+    if (len(props) != 1 or props[0].get("name") != "drive"
+            or props[0].get("type") != "string" or props[0].get("value") != node_name):
+        fail("the system disk frontend must connect through the configured partition guard")
+
+    return {"domain": domain, "disk": disk_path, "overlay": overlay,
+            "partitions": partitions, "guard": guard}
+
+
+def part_devices(config):
+    devices = {}
+    disk_real = os.path.realpath(config["disk"])
+    for part in config["partitions"]:
+        link = f"/dev/disk/by-partuuid/{part['partuuid']}"
+        if not os.path.exists(link):
+            fail(f"missing configured GPT partition {part['number']} ({part['partuuid']})")
+        path = os.path.realpath(link)
+        if os.path.dirname(path) != os.path.dirname(disk_real) or not path.startswith(disk_real + "p"):
+            fail(f"configured partition {part['number']} is not on {config['disk']}: {path}")
+        number = run("lsblk", "-dnro", "PARTN", path).stdout.strip()
+        parttype = run("lsblk", "-dnro", "PARTTYPE", path).stdout.strip().lower()
+        if number != str(part["number"]) or parttype != part["type"]:
+            fail(f"partition {part['number']} identity or GPT type changed")
+        dev = os.stat(path).st_rdev
+        devices[part["number"]] = {"path": path, "mm": f"{os.major(dev)}:{os.minor(dev)}"}
+    return devices
+
+
+def mount_table():
+    rows = []
+    with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+        for line in stream:
+            fields = line.rstrip("\n").split()
+            sep = fields.index("-")
+            unescape = lambda value: value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
+            rows.append({"mm": fields[2], "target": unescape(fields[4]),
+                         "opts": set(fields[5].split(",")),
+                         "super": set(fields[sep + 3].split(","))})
+    return rows
+
+
+def mounts_for(devices, number):
+    mm = devices[number]["mm"]
+    return [row for row in mount_table() if row["mm"] == mm]
+
+
+def is_rw(row):
+    return "rw" in row["opts"] and "rw" in row["super"]
+
+
+def is_ro(row):
+    return "ro" in row["opts"] or "ro" in row["super"]
+
+
+def remount_readonly(row):
+    run("mount", "-o", "remount,ro", "--", row["target"])
+    current = [m for m in mount_table() if m["target"] == row["target"] and m["mm"] == row["mm"]]
+    if not current or any(not is_ro(m) for m in current):
+        fail(f"could not confirm read-only mount at {row['target']}")
+
+
+def disk_acl(disk):
+    return run("getfacl", "-cpn", disk).stdout
+
+
+def restore_disk_acl(disk, saved):
+    run("setfacl", "--set-file=-", disk, input=saved)
+
+
+def verify_qemu_readonly(disk):
+    user = pwd.getpwnam(HELPER_USER).pw_name
+    run("runuser", "-u", user, "--", "/usr/bin/test", "-r", disk)
+    result = subprocess.run(["runuser", "-u", user, "--", "/usr/bin/test", "-w", disk])
+    if result.returncode == 0:
+        fail("libvirt-qemu unexpectedly has write permission on the raw backing device")
+
+
+def write_state(data):
+    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix=".guarded-cow-", dir=RUN_DIR)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(path, STATE)
+    except Exception:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def validate_overlay(config):
+    try:
+        info = json.loads(run(QEMU_IMG, "info", "--output=json", config["overlay"]).stdout)
+        st = os.lstat(config["overlay"])
+        disk_size = int(run("blockdev", "--getsize64", config["disk"]).stdout.strip())
+        run(QEMU_IMG, "check", "-q", config["overlay"])
+    except Exception as exc:
+        fail(f"cannot inspect qcow2 overlay or its backing disk: {exc}")
+    if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+            or st.st_uid != pwd.getpwnam(HELPER_USER).pw_uid
+            or stat.S_IMODE(st.st_mode) != 0o600
+            or info.get("format") != "qcow2" or info.get("virtual-size") != disk_size
+            or info.get("backing-filename") != config["disk"]
+            or info.get("backing-filename-format") != "raw"
+            or info.get("format-specific", {}).get("data", {}).get("corrupt")):
+        fail("overlay ownership, format, backing path, size, or health is not approved")
+
+
+def prepare(config):
+    if STATE.exists():
+        fail("another guarded COW VM or maintenance action already holds the physical-disk lock")
+    devices = part_devices(config)
+    mounts = []
+    for part in config["partitions"]:
+        rows = mounts_for(devices, part["number"])
+        expected = part["mountpoint"]
+        if len(rows) > 1 or (rows and (not expected or rows[0]["target"] != expected)):
+            for row in rows:
+                if is_rw(row):
+                    remount_readonly(row)
+            fail(f"configured partition {part['number']} has an unexpected or multiply-mounted host mount")
+        if rows:
+            row = rows[0]
+            if not (is_rw(row) or is_ro(row)):
+                fail(f"cannot determine host mount mode for partition {part['number']}")
+            mounts.append({"number": part["number"], "target": row["target"],
+                           "mode": "rw" if is_rw(row) else "ro"})
+    state = {"domain": config["domain"], "disk": config["disk"],
+             "partitions": config["partitions"], "mounts": mounts,
+             "disk_acl": disk_acl(config["disk"])}
+    write_state(state)
+    try:
+        for mount in mounts:
+            row = next(row for row in mounts_for(devices, mount["number"])
+                       if row["target"] == mount["target"])
+            if is_rw(row):
+                remount_readonly(row)
+            run("umount", "--", mount["target"])
+        for part in config["partitions"]:
+            if mounts_for(devices, part["number"]):
+                fail(f"partition {part['number']} remained mounted after isolation")
+        uid = pwd.getpwnam(HELPER_USER).pw_uid
+        run("setfacl", "-m", f"u:{uid}:r--", config["disk"])
+        verify_qemu_readonly(config["disk"])
+    except Exception:
+        restore(config["domain"])
+        raise
+
+
+def restore(domain):
+    if not STATE.exists():
+        return
+    try:
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"cannot read guarded COW state: {exc}")
+    if state.get("domain") != domain:
+        fail("release hook domain does not match the guarded COW state")
+    if state.get("save_pending") and not state.get("save_complete"):
+        fail("a guarded COW save is incomplete; partitions remain isolated until the merge succeeds")
+    config = {"disk": state["disk"], "partitions": state["partitions"]}
+    restore_error = None
+    try:
+        devices = part_devices(config)
+        for part in config["partitions"]:
+            if mounts_for(devices, part["number"]):
+                fail(f"partition {part['number']} was mounted while guarded COW isolation was active")
+        for mount in state["mounts"]:
+            if mount["mode"] == "ro":
+                run("mount", "-o", "ro", "--", mount["target"])
+            else:
+                run("mount", "--", mount["target"])
+            rows = mounts_for(devices, mount["number"])
+            if len(rows) != 1 or rows[0]["target"] != mount["target"]:
+                fail(f"fresh mount for partition {mount['number']} did not resolve to {mount['target']}")
+            if (mount["mode"] == "ro") != is_ro(rows[0]):
+                run("umount", "--", mount["target"])
+                fail(f"fresh mount for partition {mount['number']} did not recover its prior access mode")
+    except Exception as exc:
+        restore_error = exc
+    try:
+        restore_disk_acl(state["disk"], state["disk_acl"])
+    except Exception as exc:
+        fail(f"host mount restoration failed ({restore_error}); disk ACL restoration also failed ({exc})")
+    if restore_error:
+        raise restore_error
+    STATE.unlink()
+
+
+def assert_vm_off(domain):
+    state = run("virsh", "domstate", domain).stdout.strip().lower()
+    if state != "shut off":
+        fail(f"VM must be fully shut off before save/discard (current state: {state})")
+    info = run("virsh", "dominfo", domain).stdout
+    if not re.search(r"^Managed save:\s+no\s*$", info, re.MULTILINE):
+        fail("VM has a managed-save state; clear it before save/discard")
+
+
+def replace_overlay(config):
+    sector_size = int(run("blockdev", "--getss", config["disk"]).stdout.strip())
+    if sector_size < 512 or sector_size > 4096 or sector_size & (sector_size - 1):
+        fail(f"unsupported logical sector size for guarded COW: {sector_size}")
+    directory = os.path.dirname(config["overlay"])
+    fd, temp_path = tempfile.mkstemp(prefix=".guarded-cow-", suffix=".qcow2", dir=directory)
+    os.close(fd)
+    os.unlink(temp_path)
+    try:
+        run(QEMU_IMG, "create", "-q", "-f", "qcow2", "-F", "raw", "-b", config["disk"],
+            "-o", f"cluster_size={sector_size},compat=1.1", temp_path)
+        uid = pwd.getpwnam(HELPER_USER).pw_uid
+        gid = pwd.getpwnam(HELPER_USER).pw_gid
+        os.chown(temp_path, uid, gid)
+        os.chmod(temp_path, 0o600)
+        candidate = dict(config)
+        candidate["overlay"] = temp_path
+        validate_overlay(candidate)
+        os.replace(temp_path, config["overlay"])
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+    validate_overlay(config)
+
+
+def commit_overlay(config):
+    parts = config["partitions"]
+    guard_options = ",".join([
+        "driver=partition-write-guard", "file.driver=file",
+        f"file.filename={config['disk']}",
+        *[f"partitions.{index}={part['number']}" for index, part in enumerate(parts)],
+    ])
+    overlay_options = ",".join([
+        "driver=qcow2", "file.driver=file", f"file.filename={config['overlay']}",
+    ])
+    run(QEMU_IMG, "commit", "-d", "--image-opts", "--backing-image-opts",
+        guard_options, overlay_options)
+    replace_overlay(config)
+
+
+def offline_action(domain, action):
+    assert_vm_off(domain)
+    config = parse_config(domain)
+    validate_overlay(config)
+    if action == "save":
+        if STATE.exists():
+            try:
+                state = json.loads(STATE.read_text(encoding="utf-8"))
+            except Exception as exc:
+                fail(f"cannot read guarded COW state for save retry: {exc}")
+            if (state.get("domain") != domain or state.get("disk") != config["disk"]
+                    or state.get("partitions") != config["partitions"]
+                    or not state.get("save_pending") or state.get("save_complete")):
+                fail("an unrelated guarded COW action already holds the physical-disk lock")
+            devices = part_devices(config)
+            if any(mounts_for(devices, part["number"]) for part in config["partitions"]):
+                fail("configured partitions were mounted during an incomplete save; refusing to retry")
+            verify_qemu_readonly(config["disk"])
+        else:
+            prepare(config)
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+            state["save_pending"] = True
+            write_state(state)
+        commit_overlay(config)
+        state["save_complete"] = True
+        write_state(state)
+        restore(domain)
+    else:
+        prepare(config)
+        try:
+            replace_overlay(config)
+        finally:
+            restore(domain)
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root")
+    if len(sys.argv) != 3:
+        fail("usage: qemu-guarded-cow prepare|verify|restore|initialize|save|discard|check-start DOMAIN")
+    action, domain = sys.argv[1:]
+    if action == "check-start":
+        if STATE.exists():
+            held = json.loads(STATE.read_text(encoding="utf-8")).get("domain")
+            if held != domain:
+                fail(f"domain {held} has the physical disk isolated for guarded COW")
+        return
+    if action == "restore":
+        restore(domain)
+        return
+    xml_data = None
+    if action in ("prepare", "verify") and not sys.stdin.isatty():
+        xml_data = sys.stdin.read()
+    config = parse_config(domain, xml_data)
+    if action == "prepare":
+        validate_overlay(config)
+        prepare(config)
+    elif action == "verify":
+        if not STATE.exists() or json.loads(STATE.read_text(encoding="utf-8")).get("domain") != domain:
+            fail("start hook has no matching prepared COW state")
+        devices = part_devices(config)
+        verify_qemu_readonly(config["disk"])
+        for part in config["partitions"]:
+            if mounts_for(devices, part["number"]):
+                fail(f"partition {part['number']} became mounted after pre-start isolation")
+    elif action == "initialize":
+        assert_vm_off(domain)
+        if os.path.exists(config["overlay"]):
+            fail(f"refusing to overwrite existing overlay {config['overlay']}")
+        replace_overlay(config)
+    elif action in ("save", "discard"):
+        offline_action(domain, action)
+    else:
+        fail("unknown action")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(f"qemu-guarded-cow: {exc}", file=sys.stderr)
+        sys.exit(1)

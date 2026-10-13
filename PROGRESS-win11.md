@@ -34,15 +34,20 @@ This file records dated implementation and host-state findings for the
   backing device logical sector size, and unsupported sizes fail closed.
 - A disposable 1 MiB GPT image check found exactly one intended 512-byte
   allowed-sector change and no other changed bytes.
+- The first 4 KiB fixture exposed that a qcow2 overlay can hide the physical
+  base's logical-sector alignment. The guard now follows the backing chain to
+  the base node when determining GPT sector geometry.
 - Focused test `./run ./tests/qemu-iotests/check -raw partition-write-guard`
-  passed all four cases. The test covers allowed writes and commit, denied
-  direct writes, rejection of a forbidden change, full-base comparison, and
-  retaining the healthy overlay.
+  passed all five cases, including 4 KiB-sector overlay writes at both ends of
+  each allowed partition and a guarded commit through a 4 KiB-aligned backing
+  node. The suite also checks denied direct writes, rejection of a forbidden
+  extent, full-base comparison, and retaining the source overlay.
 - `qemu-img` compiled in the external build tree. Helper, install-script,
-  domain XML, and Python/XML syntax checks passed.
-- 4 KiB logical-sector testing, performance/space measurements, graphical
-  review-map implementation, and end-to-end validation of the installed
-  binaries remain outstanding.
+  domain XML, and syntax checks passed. The guarded helper now checks qcow2
+  consistency and validates a freshly-created temporary overlay before
+  atomically replacing the existing overlay.
+- Performance/space measurements, graphical review-map implementation, and
+  end-to-end validation of the installed binaries remain outstanding.
 
 ### Installed files and remaining gates
 

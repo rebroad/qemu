@@ -98,26 +98,34 @@ block commit.
 
 ### Backing-disk freshness and conflict checks
 
-Before reviewing and again immediately before the first physical write, check
-that the backing device is still the same disk with the same capacity, logical
-sector size, GPT identity/layout, and configured partition identities. Also
-detect whether disk contents relevant to this save have changed since the COW
-base was established or since the review was generated. The review must record
-the baseline and the commit-time result, and any detected conflict must block
-the commit and require a fresh review/reconciliation.
+Capture a backing-device baseline when each new COW root is created, then check
+it again during review and immediately before the first physical write. Compare
+the stable device identity (including major/minor, serial/WWN where available),
+capacity, logical and physical sector sizes, GPT disk and partition identities,
+partition boundaries, and configured partition identities. Record device and
+filesystem metadata such as timestamps and size as useful diagnostic signals,
+but treat any change as a reason to stop and investigate rather than as a
+complete freshness test. The review must show the baseline and current values;
+any identity, geometry, or layout mismatch blocks commit and requires fresh
+reconciliation.
+
+Also detect writes to base content relevant to the selected save since the COW
+root was created, and detect conflicts since review. Record content fingerprints
+at COW-root creation, at review, and immediately before commit, covering the
+planned destination sectors plus GPT metadata and every other base sector on
+which the selected chain depends. A mismatch at either comparison blocks the
+commit and invalidates the review. Reads from the physical disk do not make the
+base stale, though they may be reported as diagnostics.
 
 Do not treat a block-device timestamp, inode timestamp, device name, or one
-process's byte count as proof that the disk is unchanged: these can miss raw
-writes, and reads generally do not update timestamps. Use stable device
-identity and geometry checks as well as content-based fingerprints for the
-sectors that the commit would overwrite, compared with fingerprints captured
-when that COW base/review was established. Include GPT metadata and any other
-base sectors on which the selected overlay chain depends. If complete
-unchanged-base detection is required for correctness, use a reliable
-whole-relevant-range fingerprint or write-tracking mechanism; do not claim
-that checking only planned destination extents proves the entire base is
-unchanged. Report the coverage and limitations of the selected check. A read
-of the disk is not itself evidence that it was modified.
+Timestamp checks cannot prove that no raw write occurred; reads generally do
+not update timestamps. Kernel block-device read/write counters can be useful
+diagnostics, but are system-wide, resettable, and do not identify which sectors
+changed, so they are not conflict protection either. Compare content, not just
+metadata. If complete unchanged-base detection is required for correctness,
+use a reliable whole-relevant-range fingerprint or write-tracking mechanism;
+do not claim that checking only planned destination extents proves the entire
+base is unchanged. Report the coverage and limitations of the selected check.
 
 The overlay geometry and merge algorithm must not expand a changed range across
 GPT partition boundaries. Derive the overlay cluster size from the backing

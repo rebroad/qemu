@@ -674,6 +674,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             if args[:2] == ('blockdev', '--getsize64'):
                 return subprocess.CompletedProcess(
                     args, 0, str(len(base_before)), '')
+            if args[:2] == ('blockdev', '--getss'):
+                return subprocess.CompletedProcess(
+                    args, 0, str(sector_size), '')
             return original_run(*args, input=input)
 
         helper.run = run_with_disposable_geometry
@@ -727,6 +730,50 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         with open(image, 'rb') as stream:
             self.assertEqual(stream.read(), base_before)
 
+        root_baseline = helper.capture_base_baseline(config, _inventory)
+        helper.store_base_baseline(config, root_baseline)
+
+        # Root freshness covers all configured writable partitions, not only
+        # clusters that happen to be dirty in the overlay at review time.
+        untouched_allowed_lba = PARTITIONS[1][0] + 1
+        untouched_allowed_offset = untouched_allowed_lba * sector_size
+        with open(image, 'r+b') as stream:
+            stream.seek(untouched_allowed_offset)
+            baseline_byte = stream.read(1)
+            stream.seek(untouched_allowed_offset)
+            stream.write(bytes([baseline_byte[0] ^ 0xff]))
+        with self.assertRaisesRegex(helper.GuardError,
+                                    'COW-root baseline.*physical save is blocked'):
+            helper.verify_root_baseline(config)
+        with open(image, 'r+b') as stream:
+            stream.seek(untouched_allowed_offset)
+            stream.write(baseline_byte)
+        # Restoring the bytes is not enough: the metadata timestamp changed,
+        # so this fixture must establish a fresh root just like production.
+        root_baseline = helper.capture_base_baseline(config, _inventory)
+        helper.store_base_baseline(config, root_baseline)
+        self.assertEqual(helper.verify_root_baseline(config)['content_sha256'],
+                         root_baseline['content_sha256'])
+
+        # A failure while staging the replacement baseline must leave the
+        # current overlay and its matching baseline intact.
+        old_overlay_inode = os.stat(overlay).st_ino
+        baseline_path = helper.base_baseline_path(config)
+        old_baseline = baseline_path.read_bytes()
+        stage_baseline = helper.stage_base_baseline
+
+        def fail_staging(_config, _baseline):
+            raise OSError('injected baseline staging failure')
+
+        helper.stage_base_baseline = fail_staging
+        try:
+            with self.assertRaisesRegex(OSError, 'injected baseline staging failure'):
+                helper.replace_overlay(config)
+        finally:
+            helper.stage_base_baseline = stage_baseline
+        self.assertEqual(os.stat(overlay).st_ino, old_overlay_inode)
+        self.assertEqual(baseline_path.read_bytes(), old_baseline)
+
         helper.RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         helper.STATE = helper.RUN_DIR / 'active.json'
         helper.REVIEW_DIR = helper.RUN_DIR / 'reviews'
@@ -766,9 +813,13 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         fingerprint_supported = 'base_content_sha256' in report['guard']
         if fingerprint_supported:
             self.assertEqual(report['guard']['base_content_coverage'],
-                             'planned commit extents at review time only')
+                             'planned commit extents at review time')
             self.assertRegex(report['guard']['base_content_sha256'],
                              r'^[0-9a-f]{64}$')
+            self.assertEqual(report['guard']['base_root_content_sha256'],
+                             root_baseline['content_sha256'])
+            self.assertEqual(report['guard']['base_root_content_coverage'],
+                             'all configured writable GPT partitions and GPT metadata')
         self.assertTrue(report['planned_extents'])
         self.assertIn('<svg ', report['disk_map_svg'])
         self.assertIn('primary GPT entry array', report['disk_map_svg'])
@@ -807,13 +858,15 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                 stream.seek(changed_offset)
                 stream.write(bytes([original_byte[0] ^ 0xff]))
             with self.assertRaisesRegex(helper.GuardError,
-                                        'changed after review.*base_content_sha256'):
+                                        'COW-root baseline.*physical save is blocked'):
                 helper.commit_review('disposable', commit_report['review_id'])
             self.assertNotIn('save_pending', json.loads(
                 helper.STATE.read_text(encoding='utf-8')))
             with open(image, 'r+b') as stream:
                 stream.seek(changed_offset)
                 stream.write(original_byte)
+            root_baseline = helper.capture_base_baseline(config, _inventory)
+            helper.store_base_baseline(config, root_baseline)
 
             review_output = io.StringIO()
             with contextlib.redirect_stdout(review_output):

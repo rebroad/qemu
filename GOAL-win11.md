@@ -2,6 +2,34 @@ ok, so now we need to make the Windows 11 VM faster and more responsive. Can we 
 
 The COW mode must be guarded: for this VM, the configured writable GPT partitions are 1, 3, and 7. The implementation must read the allowlist and disk identity from the VM configuration rather than hard-coding this example. Writes to every other partition and to disk areas outside the configured partitions must be rejected while running in the overlay, and changes must remain subject to the same allowlist when saved back to the physical disk.
 
+### Layered COW snapshots and commit semantics
+
+Treat the physical disk as the current ground state and each COW image as a
+versioned layer of block changes over its parent. Automatically seal the
+current layer as a snapshot after each clean guest shutdown; the next boot must
+continue in a new writable child layer. A crash or forced stop must not be
+reported as a clean-shutdown snapshot.
+
+Committing a selected snapshot means making its cumulative state from the
+physical-disk root through that snapshot the new physical-disk ground state.
+Descendant layers must remain usable by being correctly reconnected to the new
+ground. Any sibling branch that diverged before the selected snapshot, and any
+other history made invalid by changing the ground, must be identified in the
+review and discarded as part of the confirmed operation. Do not silently
+discard any layer. For example, committing A while later work is in a child
+layer must preserve that child on the new ground; a sibling C branched from an
+older point is discarded.
+
+Prefer QEMU's live block-commit/block-job mechanism when the VM is running. It
+must commit only the selected sealed layer and its required ancestors into the
+guarded physical base, while redirecting ongoing guest writes to a descendant
+layer that remains based on the resulting ground. This is a coordinated block
+operation, not FIFO cache draining or an offline `qemu-img commit` against an
+image that QEMU has open. If the selected point is the active writable layer,
+first establish an atomic snapshot boundary so subsequent guest writes land in
+a new child. If live commit through the custom partition guard cannot be
+proven safe, require a clean guest shutdown and use the validated offline path.
+
 ### Safe COW save review and commit
 
 Do not enable or use a physical-disk COW save until the guarded commit path has
@@ -13,16 +41,18 @@ status alone.
 Virt-manager must provide a two-step save flow:
 
 1. **Review COW save** performs a dry-run/preflight and makes no writes to the
-   physical disk. It verifies that the VM is fully shut off with no managed
-   save, the overlay is healthy and backed by the expected disk, the configured
-   GPT allowlist is valid, and the host partitions and swap are safely isolated
-   for a later commit. The review must state clearly that this step did not
-   write to the physical disk and that it does not itself prove a real commit
-   will succeed.
+   physical disk. It verifies the selected snapshot and full backing chain,
+   disk identity, configured GPT allowlist, host mount/swap isolation, VM/QEMU
+   state, and whether the selected point can use live commit or requires a
+   clean shutdown. The review must state clearly that it did not write to the
+   physical disk and does not by itself prove a real commit will succeed.
 2. **Commit COW changes** is a separate, explicit action enabled only when the
-   review passes. Recheck the VM, disk identity, overlay, GPT layout, and mount
-   state immediately before committing. Show the user the reviewed target and
-   require a separate confirmation before the first physical write.
+   review passes. Recheck the VM, QEMU block graph, disk identity, overlay
+   chain, GPT layout, and mount state immediately before committing. For a live
+   commit, use QEMU's block job and verify its completion and graph transition;
+   for the offline fallback, require a fully shut-off VM with no managed save.
+   Show the reviewed target and affected branches, then require a separate
+   confirmation before the first physical write.
 
 The review must include a verbose, inspectable report with the backing disk's
 stable identity and size, overlay path and health, the configured writable
@@ -56,12 +86,19 @@ planned to change in this save. The map and report must be generated from live
 disk/overlay state, not hard-coded partition numbers or a prior review.
 
 Before enabling the real commit action, validate the exact installed QEMU and
-helper versions end-to-end on disposable GPT disk images. Verify that changes
-in allowed partitions reach only those partitions, deliberately place a change
-in an off-limits region and prove the guard rejects it without changing that
-region, compare the full base image before/after, check the overlay, and confirm
-that success/failure status accurately reflects the completed writes and
-close/flush results. Do not write to the physical disk during this validation.
+helper versions end-to-end on disposable GPT disk images. Exercise a layered
+chain with a selected intermediate snapshot, a preserved descendant, and a
+divergent sibling. Validate live commit while guest writes continue in the
+descendant, verify the resulting block graph and data, and verify that the
+sibling is reported for discard. Also exercise the clean-shutdown fallback.
+Verify that changes in allowed partitions reach only those partitions,
+deliberately place a change in an off-limits region and prove the guard rejects
+it without changing that region, compare the full base image before/after,
+check every retained/discarded overlay, and confirm that success/failure status
+accurately reflects completed writes and close/flush results. Do not write to
+the physical disk during this validation. QEMU's general support for live
+block-commit is not evidence that this custom guarded chain is safe; both the
+live job and its graph transition must pass these tests before enabling it.
 
 On any failed or interrupted physical save, fail closed: keep the affected host
 partitions unmounted (or read-only), retain the isolation lock, preserve the

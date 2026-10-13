@@ -118,7 +118,8 @@ commit and invalidates the review. Reads from the physical disk do not make the
 base stale, though they may be reported as diagnostics.
 
 Do not treat a block-device timestamp, inode timestamp, device name, or one
-Timestamp checks cannot prove that no raw write occurred; reads generally do
+process's byte count as proof that the disk is unchanged. Timestamp checks
+cannot prove that no raw write occurred; reads generally do
 not update timestamps. Kernel block-device read/write counters can be useful
 diagnostics, but are system-wide, resettable, and do not identify which sectors
 changed, so they are not conflict protection either. Compare content, not just

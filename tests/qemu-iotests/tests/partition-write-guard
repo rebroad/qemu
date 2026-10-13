@@ -322,10 +322,10 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                 'filename': self.test_img, 'read-only': False,
             }])
             self.assertIn('return', result, result)
-            job_id = 'commit-selected-a'
+            job_id = 'commit-selected-b'
             result = vm.qmp('block-commit', device='active-guard',
                             **{'job-id': job_id, 'base-node': 'guarded-base',
-                               'top-node': 'layer-a', 'speed': 1,
+                               'top-node': 'layer-b', 'speed': 1,
                                'backing-file': self.test_img,
                                'backing-mask-protocol': True})
             self.assertIn('return', result, result)
@@ -343,8 +343,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                     self.fail(f'commit job {job_id} did not pause: {selected_job}')
                 time.sleep(0.01)
 
-            # A write made after the selected snapshot boundary must stay in
-            # the descendant even while the older layer is committed.
+            # A write made after the selected intermediate snapshot boundary
+            # must stay in the active descendant while its ancestors and the
+            # selected layer are committed.
             live_pattern = 0xd1
             live_write = vm.hmp_qemu_io(
                 'virtio0/virtio-backend',
@@ -368,12 +369,15 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         expected = bytearray(self.base_before)
         expected[allowed_offset:allowed_offset + allowed_length] = \
             bytes([0xa1]) * allowed_length
+        expected[b_offset:b_offset + SECTOR_SIZE] = bytes([0xb3]) * SECTOR_SIZE
         with open(self.test_img, 'rb') as image:
             self.assertEqual(image.read(), expected)
         for path in (layer_b, layer_c):
             qemu_img('check', '-q', path)
         b_info = json.loads(qemu_img('info', '--output=json', layer_b).stdout)
-        self.assertEqual(b_info.get('backing-filename'), self.test_img)
+        self.assertEqual(b_info.get('backing-filename'), layer_a)
+        c_info = json.loads(qemu_img('info', '--output=json', layer_c).stdout)
+        self.assertEqual(c_info.get('backing-filename'), self.test_img)
         for offset, pattern in ((allowed_offset, 0xd1),
                                 (b_offset, 0xb3), (c_offset, 0xc7)):
             result = qemu_io('-f', 'qcow2', layer_c, '-c',

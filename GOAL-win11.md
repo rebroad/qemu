@@ -4,11 +4,39 @@ The COW mode must be guarded: for this VM, the configured writable GPT partition
 
 ### Layered COW snapshots and commit semantics
 
+The desired user experience is a configurable write-back cache: guest writes
+are immediately visible to the guest, remain isolated until explicitly saved,
+and can later be applied to the physical disk while newer guest writes continue
+to accumulate. A qcow2 COW overlay can provide this behavior, but it is not
+itself a FIFO cache. It records changed blocks relative to a backing image;
+commit, discard, snapshot, and branch operations must preserve those block
+dependencies and the guest's current view. The physical disk cannot simply be
+updated underneath an overlay while QEMU continues using it as an unchanged
+backing image: doing so can make reads combine new base blocks with stale
+overlay assumptions, lose writes, or make rollback ambiguous.
+
 Treat the physical disk as the current ground state and each COW image as a
 versioned layer of block changes over its parent. Automatically seal the
 current layer as a snapshot after each clean guest shutdown; the next boot must
 continue in a new writable child layer. A crash or forced stop must not be
-reported as a clean-shutdown snapshot.
+reported as a clean-shutdown snapshot. A sealed layer can be selected as the
+save boundary while the VM runs only if QEMU atomically redirects subsequent
+guest writes to a descendant and the commit updates/reconnects the block graph
+so that descendant reads use the new ground plus its retained ancestors. The
+selected layer and its required ancestors are then applied in order; writes
+after the boundary stay in the descendant and are not part of that commit.
+This is a coordinated block-graph operation, not generic cache draining. If
+the guest is stopped, the same selection can use a validated offline commit.
+
+The design must make the chosen cache boundary and resulting history explicit:
+which sealed layers will become part of the physical ground, which active or
+later descendants will remain pending, and which divergent branches become
+invalid. Until a commit has completed and the graph or offline chain has been
+verified, retain all source overlays and keep host access isolated. A failed or
+interrupted commit may have partially changed allowed physical extents; it is
+not automatically rollbackable like discarding an overlay. Recovery must
+reconcile the actual base and overlay state before retrying, and must never
+silently discard the only copy of a write.
 
 Committing a selected snapshot means making its cumulative state from the
 physical-disk root through that snapshot the new physical-disk ground state.
@@ -25,10 +53,14 @@ must commit only the selected sealed layer and its required ancestors into the
 guarded physical base, while redirecting ongoing guest writes to a descendant
 layer that remains based on the resulting ground. This is a coordinated block
 operation, not FIFO cache draining or an offline `qemu-img commit` against an
-image that QEMU has open. If the selected point is the active writable layer,
-first establish an atomic snapshot boundary so subsequent guest writes land in
-a new child. If live commit through the custom partition guard cannot be
-proven safe, require a clean guest shutdown and use the validated offline path.
+image that QEMU has open. Committing an older sealed point while a newer layer
+is active is supported only if the live block job preserves that newer layer's
+view and routes concurrent writes to it throughout the operation. If the
+selected point is the active writable layer, first establish an atomic snapshot
+boundary so subsequent guest writes land in a new child. If live commit through
+the custom partition guard cannot be proven safe, require a clean guest
+shutdown and use the validated offline path; do not simulate live cache
+draining by copying blocks behind QEMU's back.
 
 ### Safe COW save review and commit
 
@@ -63,6 +95,29 @@ must come from the same commit traversal used by the real operation, include
 any cluster-aligned/padded writes, and be checked against the partition guard.
 Any planned extent outside the configured partitions must fail the review and
 block commit.
+
+### Backing-disk freshness and conflict checks
+
+Before reviewing and again immediately before the first physical write, check
+that the backing device is still the same disk with the same capacity, logical
+sector size, GPT identity/layout, and configured partition identities. Also
+detect whether disk contents relevant to this save have changed since the COW
+base was established or since the review was generated. The review must record
+the baseline and the commit-time result, and any detected conflict must block
+the commit and require a fresh review/reconciliation.
+
+Do not treat a block-device timestamp, inode timestamp, device name, or one
+process's byte count as proof that the disk is unchanged: these can miss raw
+writes, and reads generally do not update timestamps. Use stable device
+identity and geometry checks as well as content-based fingerprints for the
+sectors that the commit would overwrite, compared with fingerprints captured
+when that COW base/review was established. Include GPT metadata and any other
+base sectors on which the selected overlay chain depends. If complete
+unchanged-base detection is required for correctness, use a reliable
+whole-relevant-range fingerprint or write-tracking mechanism; do not claim
+that checking only planned destination extents proves the entire base is
+unchanged. Report the coverage and limitations of the selected check. A read
+of the disk is not itself evidence that it was modified.
 
 The overlay geometry and merge algorithm must not expand a changed range across
 GPT partition boundaries. Derive the overlay cluster size from the backing

@@ -2,13 +2,21 @@
 """Guard a libvirt qcow2 overlay backed by a partitioned physical disk."""
 
 import json
+import hashlib
+import fcntl
 import os
 import pwd
 import re
+import secrets
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
+import zlib
+from contextlib import contextmanager
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -16,6 +24,12 @@ QEMU_IMG = "/usr/local/bin/qemu-img"
 HELPER_USER = "libvirt-qemu"
 RUN_DIR = Path("/run/libvirt/qemu-guarded-cow")
 STATE = RUN_DIR / "active.json"
+REVIEW_DIR = RUN_DIR / "reviews"
+LOCK_FILE = RUN_DIR / "operation.lock"
+REVIEW_TTL = 3600
+# Keep physical-disk writes unavailable until the exact installed QEMU and
+# helper pass disposable-disk success, failure, and retry validation.
+PHYSICAL_COMMIT_ENABLED = False
 # Libvirt's hook PATH places /usr/local/sbin first, where this host has
 # command copies that libvirtd's AppArmor profile intentionally cannot run.
 os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
@@ -34,6 +48,20 @@ def run(*args, input=None):
 
 def fail(message):
     raise GuardError(message)
+
+
+@contextmanager
+def operation_lock():
+    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(RUN_DIR, 0o700)
+    fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC |
+                 getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def domain_xml(domain):
@@ -163,6 +191,13 @@ def mounts_for(devices, number):
     return [row for row in mount_table() if row["mm"] == mm]
 
 
+def verify_partitions_not_writable(devices, partitions):
+    for part in partitions:
+        rows = mounts_for(devices, part["number"])
+        if any(not is_ro(row) for row in rows):
+            fail(f"partition {part['number']} became writable while guarded COW isolation was active")
+
+
 def verify_no_allowed_swap(devices):
     try:
         swaps = run("swapon", "--show=NAME", "--noheadings",
@@ -258,9 +293,633 @@ def validate_overlay(config):
         fail("overlay ownership, format, backing path, size, or health is not approved")
 
 
+def guard_options(config, plan_path=None):
+    options = ["driver=partition-write-guard", "file.driver=file",
+               f"file.filename={config['disk']}"]
+    options.extend(f"partitions.{index}={part['number']}"
+                   for index, part in enumerate(config["partitions"]))
+    if plan_path is not None:
+        options.append(f"plan-file={plan_path}")
+    return ",".join(options)
+
+
+def overlay_options(config):
+    return ",".join(["driver=qcow2", "file.driver=file",
+                     f"file.filename={config['overlay']}"])
+
+
+def disk_inventory(config):
+    try:
+        tree = json.loads(run(
+            "lsblk", "--json", "--bytes", "--paths", "--output",
+            "PATH,TYPE,SIZE,LOG-SEC,PHY-SEC,MODEL,SERIAL,WWN,PTTYPE,PTUUID,PARTN,PARTUUID,PARTTYPE",
+            config["disk"]).stdout)["blockdevices"]
+    except Exception as exc:
+        fail(f"cannot inspect the backing disk identity and GPT: {exc}")
+    if len(tree) != 1:
+        fail("backing disk identity did not resolve to one block device")
+    disk = tree[0]
+    if (disk.get("type") != "disk" or os.path.realpath(disk.get("path", ""))
+            != os.path.realpath(config["disk"]) or disk.get("pttype") != "gpt"):
+        fail("configured backing device is not the expected GPT whole disk")
+    sector_size = int(disk.get("log-sec") or 0)
+    size = int(disk.get("size") or 0)
+    if (sector_size < 512 or sector_size > 4096
+            or sector_size & (sector_size - 1) or not size or size % sector_size):
+        fail("backing disk has unsupported logical-sector geometry")
+    if not (disk.get("wwn") or disk.get("serial")):
+        fail("backing disk has no stable hardware identity (WWN or serial)")
+    if not disk.get("ptuuid"):
+        fail("backing disk has no GPT disk identifier")
+
+    raw_partitions, disk_guid, metadata, gpt_sha256 = read_gpt(
+        config["disk"], sector_size, size)
+
+    # Linux sysfs reports partition starts and sizes in fixed 512-byte units,
+    # regardless of the device's logical sector size. Keep that conversion
+    # distinct from the live logical-sector size used for GPT LBAs and COW.
+    kernel_partitions = []
+    for node in disk.get("children") or []:
+        if node.get("type") != "part":
+            continue
+        number = int(node.get("partn") or 0)
+        if not number or not node.get("partuuid") or not node.get("parttype"):
+            fail("backing disk contains a partition with incomplete GPT identity")
+        try:
+            sysfs_name = os.path.basename(os.path.realpath(node["path"]))
+            with open(f"/sys/class/block/{sysfs_name}/start", encoding="ascii") as stream:
+                start_bytes = int(stream.read().strip()) * 512
+            with open(f"/sys/class/block/{sysfs_name}/size", encoding="ascii") as stream:
+                size_bytes = int(stream.read().strip()) * 512
+        except Exception as exc:
+            fail(f"cannot read GPT partition {number} bounds from sysfs: {exc}")
+        if start_bytes % sector_size or size_bytes % sector_size:
+            fail(f"GPT partition {number} is not aligned to the logical sector size")
+        kernel_partitions.append({"number": number, "path": node["path"],
+                                  "partuuid": node["partuuid"].lower(),
+                                  "type": node["parttype"].lower(),
+                                  "start_bytes": start_bytes,
+                                  "size_bytes": size_bytes})
+    kernel_partitions.sort(key=lambda part: part["number"])
+    raw_by_number = {part["number"]: part for part in raw_partitions}
+    if len(kernel_partitions) != len(raw_partitions):
+        fail("kernel partition nodes do not match the live GPT partition count")
+    for part in kernel_partitions:
+        raw = raw_by_number.get(part["number"])
+        if (raw is None or raw["partuuid"] != part["partuuid"]
+                or raw["type"] != part["type"]
+                or raw["start_bytes"] != part["start_bytes"]
+                or raw["size_bytes"] != part["size_bytes"]):
+            fail(f"kernel partition {part['number']} does not match the live GPT")
+    partitions = []
+    for part in raw_partitions:
+        kernel = next((entry for entry in kernel_partitions
+                       if entry["number"] == part["number"]), None)
+        if kernel is None:
+            fail(f"GPT partition {part['number']} has no kernel partition device")
+        partitions.append({**part, "path": kernel["path"]})
+    by_number = {part["number"]: part for part in partitions}
+    for configured in config["partitions"]:
+        live = by_number.get(configured["number"])
+        if (live is None or live["partuuid"] != configured["partuuid"]
+                or live["type"] != configured["type"]):
+            fail(f"configured GPT partition {configured['number']} identity changed")
+
+    if disk["ptuuid"].lower() != disk_guid:
+        fail("kernel GPT disk identifier does not match the on-disk primary GPT")
+    identity = {key: disk.get(key) for key in
+                ("path", "size", "log-sec", "phy-sec", "model", "serial", "wwn", "ptuuid")}
+    identity["gpt_sha256"] = gpt_sha256
+    return {"identity": identity, "sector_size": sector_size,
+            "size_bytes": size, "size_lba": size // sector_size,
+            "partitions": partitions, "gpt_metadata": metadata}
+
+
+def read_gpt(path, sector_size, disk_size):
+    def parse_header(stream, lba):
+        stream.seek(lba * sector_size)
+        raw = stream.read(sector_size)
+        if len(raw) != sector_size or raw[:8] != b"EFI PART":
+            fail(f"invalid GPT header at LBA {lba}")
+        header_size = struct.unpack_from("<I", raw, 12)[0]
+        expected_crc = struct.unpack_from("<I", raw, 16)[0]
+        if header_size < 92 or header_size > sector_size:
+            fail(f"invalid GPT header size at LBA {lba}")
+        checked = bytearray(raw[:header_size])
+        checked[16:20] = bytes(4)
+        if zlib.crc32(checked) & 0xffffffff != expected_crc:
+            fail(f"GPT header CRC failed at LBA {lba}")
+        current, backup, first_usable, last_usable = struct.unpack_from(
+            "<QQQQ", raw, 24)
+        disk_guid = str(uuid.UUID(bytes_le=raw[56:72]))
+        table_lba = struct.unpack_from("<Q", raw, 72)[0]
+        entry_count, entry_size, table_crc = struct.unpack_from("<III", raw, 80)
+        disk_sectors = disk_size // sector_size
+        if (current != lba or backup >= disk_sectors or backup == current
+                or first_usable < 2 or first_usable > last_usable
+                or last_usable >= disk_sectors - 1 or not entry_count
+                or entry_count > 4096 or entry_size < 128
+                or entry_size > 4096 or entry_size & 7):
+            fail(f"invalid GPT bounds or entry geometry at LBA {lba}")
+        table_bytes = entry_count * entry_size
+        table_offset = table_lba * sector_size
+        if table_offset > disk_size or table_bytes > disk_size - table_offset:
+            fail(f"GPT entry array is out of bounds at LBA {lba}")
+        stream.seek(table_offset)
+        table = stream.read(table_bytes)
+        if len(table) != table_bytes or zlib.crc32(table) & 0xffffffff != table_crc:
+            fail(f"GPT entry-array CRC failed at LBA {lba}")
+        return {"current": current, "backup": backup,
+                "first_usable": first_usable, "last_usable": last_usable,
+                "disk_guid": disk_guid, "table_lba": table_lba,
+                "entry_count": entry_count, "entry_size": entry_size,
+                "table_bytes": table_bytes, "table": table, "raw": raw}
+
+    with open(path, "rb", buffering=0) as stream:
+        protective_mbr = stream.read(sector_size)
+        primary = parse_header(stream, 1)
+        backup = parse_header(stream, primary["backup"])
+    if (protective_mbr[510:512] != b"\x55\xaa"
+            or protective_mbr[450] != 0xee
+            or struct.unpack_from("<I", protective_mbr, 454)[0] != 1):
+        fail("protective MBR signature or GPT partition entry is invalid")
+    if (primary["backup"] != disk_size // sector_size - 1
+            or backup["current"] != disk_size // sector_size - 1
+            or backup["backup"] != primary["current"]
+            or backup["disk_guid"] != primary["disk_guid"]
+            or backup["first_usable"] != primary["first_usable"]
+            or backup["last_usable"] != primary["last_usable"]
+            or backup["entry_count"] != primary["entry_count"]
+            or backup["entry_size"] != primary["entry_size"]
+            or backup["table"] != primary["table"]):
+        fail("primary and backup GPT metadata do not agree")
+    primary_table_end = (primary["table_lba"] * sector_size +
+                         primary["table_bytes"] + sector_size - 1) // sector_size
+    backup_table_end = (backup["table_lba"] * sector_size +
+                        backup["table_bytes"] + sector_size - 1) // sector_size
+    if (primary["table_lba"] < 2 or primary_table_end > primary["first_usable"]
+            or backup["table_lba"] <= backup["last_usable"]
+            or backup_table_end > backup["current"]):
+        fail("GPT entry arrays overlap usable or partitioned disk areas")
+    partitions = []
+    partuuids = set()
+    for index in range(primary["entry_count"]):
+        entry = primary["table"][index * primary["entry_size"]:
+                                  (index + 1) * primary["entry_size"]]
+        if entry[:16] == bytes(16):
+            continue
+        first, last = struct.unpack_from("<QQ", entry, 32)
+        if (first < primary["first_usable"] or last > primary["last_usable"]
+                or first > last):
+            fail(f"GPT partition {index + 1} has invalid bounds")
+        partuuid = str(uuid.UUID(bytes_le=entry[16:32]))
+        if partuuid in partuuids:
+            fail(f"GPT contains duplicate partition UUID {partuuid}")
+        partuuids.add(partuuid)
+        name = entry[56:primary["entry_size"]].decode(
+            "utf-16-le", errors="replace").rstrip("\x00")
+        partitions.append({"number": index + 1,
+                           "partuuid": partuuid,
+                           "type": str(uuid.UUID(bytes_le=entry[:16])),
+                           "start_bytes": first * sector_size,
+                           "size_bytes": (last - first + 1) * sector_size,
+                           "start_lba": first, "end_lba": last + 1,
+                           "name": name})
+    partitions.sort(key=lambda part: part["start_lba"])
+    for left, right in zip(partitions, partitions[1:]):
+        if left["end_lba"] > right["start_lba"]:
+            fail(f"GPT partitions {left['number']} and {right['number']} overlap")
+    metadata = [{"start_bytes": 0, "end_bytes": sector_size, "name": "protective MBR"},
+                {"start_bytes": sector_size, "end_bytes": 2 * sector_size,
+                 "name": "primary GPT header"},
+                {"start_bytes": primary["table_lba"] * sector_size,
+                 "end_bytes": primary["table_lba"] * sector_size + primary["table_bytes"],
+                 "name": "primary GPT entry array"},
+                {"start_bytes": backup["table_lba"] * sector_size,
+                 "end_bytes": backup["table_lba"] * sector_size + backup["table_bytes"],
+                 "name": "backup GPT entry array"},
+                {"start_bytes": primary["backup"] * sector_size,
+                 "end_bytes": (primary["backup"] + 1) * sector_size,
+                 "name": "backup GPT header"}]
+    fingerprint = hashlib.sha256(
+        protective_mbr + primary["raw"] + primary["table"] +
+        backup["raw"] + backup["table"]).hexdigest()
+    return partitions, primary["disk_guid"], metadata, fingerprint
+
+
+def host_disk_state(inventory, config):
+    allowed = {part["number"] for part in config["partitions"]}
+    allowed_mm = set()
+    for part in inventory["partitions"]:
+        if part["number"] in allowed:
+            st = os.stat(part["path"])
+            allowed_mm.add(f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}")
+    swaps = []
+    try:
+        swap_names = run("swapon", "--show=NAME", "--noheadings", "--raw").stdout.splitlines()
+    except Exception as exc:
+        fail(f"cannot inspect host swap state: {exc}")
+    for name in swap_names:
+        try:
+            st = os.stat(os.path.realpath(name))
+            if stat.S_ISBLK(st.st_mode):
+                mm = f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}"
+            elif stat.S_ISREG(st.st_mode):
+                mm = run("findmnt", "--noheadings", "--output", "MAJ:MIN",
+                         "--target", name).stdout.strip()
+            else:
+                mm = "unknown"
+        except Exception:
+            mm = "unknown"
+        swaps.append({"path": name, "major_minor": mm,
+                      "configured_partition": mm in allowed_mm})
+    mounts = mount_table()
+    rows = []
+    for part in inventory["partitions"]:
+        path = part["path"]
+        st = os.stat(path)
+        mm = f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}"
+        part_mounts = [row for row in mounts if row["mm"] == mm]
+        rows.append({"number": part["number"], "path": path,
+                     "allowed": part["number"] in allowed,
+                     "mounts": [{"target": row["target"],
+                                 "mode": "ro" if is_ro(row) else "rw"}
+                                for row in part_mounts],
+                     "swap": any(item["major_minor"] == mm for item in swaps)})
+    disk_stat = os.stat(config["disk"])
+    disk_mm = f"{os.major(disk_stat.st_rdev)}:{os.minor(disk_stat.st_rdev)}"
+    whole_disk_mounts = [row for row in mounts if row["mm"] == disk_mm]
+    if whole_disk_mounts:
+        fail("the whole backing disk is mounted on the host")
+    if any(row["allowed"] and (row["mounts"] or row["swap"]) for row in rows):
+        fail("a configured writable partition is mounted or used as swap")
+    return {"partitions": rows, "swap": swaps}
+
+
+def overlay_fingerprint(config):
+    info = json.loads(run(QEMU_IMG, "info", "--output=json", config["overlay"]).stdout)
+    st = os.stat(config["overlay"])
+    return {"path": config["overlay"], "device": st.st_dev,
+            "inode": st.st_ino, "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns, "format": info.get("format"),
+            "backing_filename": info.get("backing-filename"),
+            "backing_format": info.get("backing-filename-format"),
+            "virtual_size": info.get("virtual-size"),
+            "cluster_size": info.get("cluster-size"),
+            "health": "qemu-img check passed"}
+
+
+def make_write_plan(config):
+    inventory_before = disk_inventory(config)
+    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, plan_path = tempfile.mkstemp(prefix=".review-plan-", dir=RUN_DIR)
+    os.close(fd)
+    os.unlink(plan_path)
+    try:
+        result = subprocess.run(
+            [QEMU_IMG, "commit", "-d", "--image-opts", "--backing-image-opts",
+             guard_options(config, plan_path), overlay_options(config)],
+            check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode:
+            fail("guarded dry-run commit failed: " +
+                 (result.stderr.strip() or result.stdout.strip() or
+                  f"exit status {result.returncode}"))
+        with open(plan_path, "rb") as stream:
+            raw = stream.read()
+        records = [json.loads(line) for line in raw.splitlines()]
+        if (len(records) < 2 or records[0] != {
+                "type": "qemu-partition-write-guard-plan", "version": 1}
+                or records[-1].get("type") != "flush"
+                or records[-1].get("event_count") != len(records) - 2):
+            fail("guarded dry-run plan is incomplete or malformed")
+        extents = records[1:-1]
+        inventory = disk_inventory(config)
+        if inventory != inventory_before:
+            fail("backing disk identity or GPT layout changed during dry-run")
+        allowed = [next(part for part in inventory["partitions"]
+                        if part["number"] == configured["number"])
+                   for configured in config["partitions"]]
+        sector_size = inventory["sector_size"]
+        for extent in extents:
+            if (extent.get("type") != "write" or
+                    extent.get("operation") not in ("write", "write-zeroes", "discard") or
+                    type(extent.get("offset")) is not int or
+                    type(extent.get("length")) is not int or
+                    extent["offset"] < 0 or extent["length"] <= 0 or
+                    extent["offset"] % sector_size or extent["length"] % sector_size):
+                fail("dry-run returned an invalid or non-sector-aligned write extent")
+            end = extent["offset"] + extent["length"]
+            if not any(extent["offset"] >= part["start_bytes"] and
+                       end <= part["start_bytes"] + part["size_bytes"]
+                       for part in allowed):
+                fail("dry-run includes a write extent outside one configured GPT partition")
+            extent["start_lba"] = extent["offset"] // sector_size
+            extent["end_lba"] = end // sector_size
+        extents.sort(key=lambda extent: (extent["offset"], extent["length"],
+                                         extent["operation"]))
+        return raw, extents, inventory
+    finally:
+        try:
+            os.unlink(plan_path)
+        except FileNotFoundError:
+            pass
+
+
+def write_plan_sha256(extents):
+    canonical = {"type": "qemu-partition-write-guard-plan",
+                 "version": 1, "extents": extents}
+    encoded = json.dumps(canonical, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def base_content_fingerprint(disk, extents):
+    digest = hashlib.sha256()
+    fd = os.open(disk, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        for extent in sorted(extents, key=lambda item: (item["offset"],
+                                                        item["length"])):
+            offset = extent["offset"]
+            remaining = extent["length"]
+            digest.update(struct.pack(">QQ", offset, remaining))
+            while remaining:
+                chunk = os.pread(fd, min(1024 * 1024, remaining), offset)
+                if not chunk:
+                    fail("backing disk ended while fingerprinting planned commit extents")
+                digest.update(chunk)
+                offset += len(chunk)
+                remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+def disk_map_svg(inventory, config, extents):
+    width, left, right = 1100, 70, 1070
+    usable = right - left
+    total = inventory["size_bytes"]
+    sector = inventory["sector_size"]
+    allowed = {part["number"] for part in config["partitions"]}
+    scale = lambda offset: left + usable * offset / total
+    parts = inventory["partitions"]
+    segments = []
+    cursor = 0
+    for part in parts:
+        start, end = part["start_bytes"], part["start_bytes"] + part["size_bytes"]
+        if start > cursor:
+            segments.append((cursor, start, "unallocated", "#e6e8eb"))
+        color = "#75bd8c" if part["number"] in allowed else "#8e9aa6"
+        segments.append((start, end, f"partition {part['number']}", color))
+        cursor = end
+    if cursor < total:
+        segments.append((cursor, total, "unallocated", "#e6e8eb"))
+    height = max(200, 180 + 14 * len(parts))
+    svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+           '<rect width="100%" height="100%" fill="white"/>',
+           '<text x="70" y="24" font-family="sans-serif" font-size="16">Live GPT disk map (linear LBA scale)</text>',
+           f'<text x="{left}" y="42" font-family="monospace" font-size="11">LBA 0</text>',
+           f'<text x="{right}" y="42" text-anchor="end" font-family="monospace" font-size="11">LBA {inventory["size_lba"] - 1}</text>']
+    for start, end, title, color in segments:
+        x1, x2 = scale(start), scale(end)
+        svg.append(f'<rect x="{x1:.4f}" y="50" width="{max(0.02, x2-x1):.4f}" height="52" fill="{color}" stroke="#333" stroke-width="0.25"><title>{title}: bytes {start}..{end - 1}</title></rect>')
+    # Mark protective MBR, primary and backup GPT metadata, scaled to their
+    # actual LBAs. Exact extents remain listed below when marks are subpixel.
+    for item in inventory["gpt_metadata"]:
+        start, end = item["start_bytes"], item["end_bytes"]
+        x = scale(start)
+        svg.append(f'<line x1="{x:.4f}" y1="46" x2="{x:.4f}" y2="108" stroke="#ed8b00" stroke-width="2"><title>{item["name"]}: LBA {start // sector}..{(end-1) // sector}</title></line>')
+    for extent in extents:
+        x1 = scale(extent["offset"])
+        x2 = scale(extent["offset"] + extent["length"])
+        svg.append(f'<line x1="{x1:.4f}" y1="77" x2="{x2:.4f}" y2="77" stroke="#c3262e" stroke-width="5"><title>Planned {extent["operation"]}: LBA {extent["start_lba"]}..{extent["end_lba"] - 1}</title></line>')
+    svg += ['<rect x="70" y="118" width="14" height="12" fill="#75bd8c"/><text x="90" y="129" font-family="sans-serif" font-size="12">Configured writable (eligible only)</text>',
+            '<rect x="290" y="118" width="14" height="12" fill="#8e9aa6"/><text x="310" y="129" font-family="sans-serif" font-size="12">Other GPT partition (off-limits)</text>',
+            '<rect x="550" y="118" width="14" height="12" fill="#e6e8eb"/><text x="570" y="129" font-family="sans-serif" font-size="12">Unallocated / other area</text>',
+            '<line x1="790" y1="124" x2="810" y2="124" stroke="#ed8b00" stroke-width="3"/><text x="816" y="129" font-family="sans-serif" font-size="12">GPT metadata</text>',
+            '<line x1="930" y1="124" x2="950" y2="124" stroke="#c3262e" stroke-width="5"/><text x="956" y="129" font-family="sans-serif" font-size="12">Planned write</text>',
+            '<text x="70" y="157" font-family="sans-serif" font-size="12">GPT partitions:</text>']
+    y = 176
+    for part in parts:
+        access = "eligible" if part["number"] in allowed else "off-limits"
+        svg.append(f'<text x="80" y="{y}" font-family="monospace" font-size="11">p{part["number"]} {access}: LBA {part["start_lba"]}..{part["end_lba"] - 1} ({part["size_bytes"]} bytes; PARTUUID {part["partuuid"]})</text>')
+        y += 14
+    svg.append(f'<text x="620" y="157" font-family="sans-serif" font-size="12">{len(extents)} exact planned extents are listed in the report</text>')
+    svg.append('</svg>')
+    return "\n".join(svg)
+
+
+def review_action(domain):
+    assert_vm_off(domain)
+    config = parse_config(domain)
+    validate_overlay(config)
+    if not STATE.exists():
+        fail("guarded isolation state is missing; start and cleanly stop the VM before reviewing a save")
+    state = json.loads(STATE.read_text(encoding="utf-8"))
+    if (state.get("domain") != domain or state.get("disk") != config["disk"]
+            or state.get("partitions") != config["partitions"]
+            or state.get("guest_active") or
+            state.get("save_complete") or state.get("discard_complete")):
+        fail("guarded isolation state does not match a stopped, unsaved VM")
+    devices = part_devices(config)
+    verify_no_allowed_swap(devices)
+    verify_partitions_not_writable(devices, config["partitions"])
+    if any(mounts_for(devices, part["number"])
+           for part in config["partitions"]):
+        fail("configured writable partitions must be unmounted for save review")
+    verify_qemu_readonly(config["disk"])
+    _raw_plan, extents, inventory = make_write_plan(config)
+    base_fingerprint = base_content_fingerprint(config["disk"], extents)
+    host = host_disk_state(inventory, config)
+    overlay = overlay_fingerprint(config)
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    report = {"schema": "qemu-guarded-cow-review-v1", "review_id": token,
+              "domain": domain, "created_at": now, "expires_at": now + REVIEW_TTL,
+              "physical_disk_written": False,
+              "commit_enabled": PHYSICAL_COMMIT_ENABLED,
+              "notice": ("Dry-run only: no physical-disk writes were issued. "
+                         "This review does not prove a real commit will succeed. "
+                         "Physical commit remains disabled until the exact installed "
+                         "QEMU and helper pass disposable-disk success, failure, "
+                         "and retry validation."),
+              "disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
+                       "logical_sector_size": inventory["sector_size"],
+                       "size_lba": inventory["size_lba"]},
+              "shutdown": {"reason": state.get("last_shutdown_reason", "unknown"),
+                           "clean_snapshot_eligible":
+                               state.get("snapshot_eligible") is True},
+              "overlay": {**overlay, "health": "qemu-img check passed"},
+              "partitions": inventory["partitions"], "host_state": host,
+              "guard": {"driver": "partition-write-guard",
+                        "configured_partitions": config["partitions"],
+                        "plan_sha256": write_plan_sha256(extents),
+                        "base_content_sha256": base_fingerprint,
+                        "base_content_coverage": "planned commit extents at review time only"},
+              "planned_extents": extents}
+    report["disk_map_svg"] = disk_map_svg(inventory, config, extents)
+    REVIEW_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(REVIEW_DIR, 0o700)
+    review_path = REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
+    stored = {"report": report, "plan_sha256": report["guard"]["plan_sha256"]}
+    fd = os.open(review_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(stored, stream, separators=(",", ":"))
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    print(json.dumps(report, separators=(",", ":")))
+
+
+def commit_review(domain, token):
+    if not PHYSICAL_COMMIT_ENABLED:
+        fail("physical COW commit is disabled until the exact installed QEMU and helper pass disposable-disk success, failure, and retry validation")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,60}", token):
+        fail("invalid or missing review token")
+    review_path = REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
+    try:
+        saved = json.loads(review_path.read_text(encoding="utf-8"))
+        previous = saved["report"]
+    except Exception as exc:
+        fail(f"cannot load the reviewed save plan: {exc}")
+    if (previous.get("review_id") != token or previous.get("domain") != domain
+            or previous.get("expires_at", 0) < int(time.time())):
+        fail("save review expired or belongs to another VM; review again")
+    assert_vm_off(domain)
+    config = parse_config(domain)
+    validate_overlay(config)
+    if not STATE.exists():
+        fail("guarded isolation state is missing; refusing physical commit")
+    state = json.loads(STATE.read_text(encoding="utf-8"))
+    if (state.get("domain") != domain or state.get("disk") != config["disk"]
+            or state.get("partitions") != config["partitions"]
+            or state.get("guest_active") or state.get("save_complete")
+            or state.get("discard_complete")):
+        fail("guarded isolation state changed after review")
+    devices = part_devices(config)
+    verify_no_allowed_swap(devices)
+    verify_partitions_not_writable(devices, config["partitions"])
+    if any(mounts_for(devices, part["number"])
+           for part in config["partitions"]):
+        fail("configured writable partitions are no longer unmounted")
+    verify_qemu_readonly(config["disk"])
+    _raw_plan, extents, inventory = make_write_plan(config)
+    base_fingerprint = base_content_fingerprint(config["disk"], extents)
+    host = host_disk_state(inventory, config)
+    current = {"disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
+                        "logical_sector_size": inventory["sector_size"],
+                        "size_lba": inventory["size_lba"]},
+               "overlay": overlay_fingerprint(config),
+               "partitions": inventory["partitions"], "host_state": host,
+               "plan_sha256": write_plan_sha256(extents),
+               "base_content_sha256": base_fingerprint,
+               "planned_extents": extents}
+    reviewed_base_fingerprint = (
+        state.get("save_retry_base_content_sha256")
+        if state.get("save_pending") else
+        previous["guard"]["base_content_sha256"])
+    if state.get("save_pending") and not reviewed_base_fingerprint:
+        fail("incomplete save has no recorded retry fingerprint; manual reconciliation is required")
+    reviewed = {"disk": previous["disk"], "overlay": previous["overlay"],
+                "partitions": previous["partitions"],
+                "host_state": previous["host_state"],
+                "plan_sha256": previous["guard"]["plan_sha256"],
+                "base_content_sha256": reviewed_base_fingerprint,
+                "planned_extents": previous["planned_extents"]}
+    if current != reviewed:
+        changed = ", ".join(key for key in current if current[key] != reviewed[key])
+        review_path.unlink(missing_ok=True)
+        fail(f"disk, GPT, overlay, host isolation, or planned extents changed after review ({changed}); review again")
+
+    assert_vm_off(domain)
+    config_now = parse_config(domain)
+    if (config_now["disk"] != config["disk"]
+            or config_now["overlay"] != config["overlay"]
+            or config_now["partitions"] != config["partitions"]
+            or config_now["guard"] != config["guard"]):
+        fail("VM disk configuration changed at the commit boundary; isolation remains held")
+    devices = part_devices(config_now)
+    verify_no_allowed_swap(devices)
+    verify_partitions_not_writable(devices, config_now["partitions"])
+    if any(mounts_for(devices, part["number"])
+           for part in config_now["partitions"]):
+        fail("configured writable partitions are no longer unmounted")
+    verify_qemu_readonly(config_now["disk"])
+    _raw_plan_now, extents_now, inventory_now = make_write_plan(config_now)
+    base_fingerprint_now = base_content_fingerprint(config_now["disk"], extents_now)
+    host_now = host_disk_state(inventory_now, config_now)
+    final_check = {
+        "disk": {**inventory_now["identity"],
+                 "size_bytes": inventory_now["size_bytes"],
+                 "logical_sector_size": inventory_now["sector_size"],
+                 "size_lba": inventory_now["size_lba"]},
+        "overlay": overlay_fingerprint(config_now),
+        "partitions": inventory_now["partitions"], "host_state": host_now,
+        "plan_sha256": write_plan_sha256(extents_now),
+        "base_content_sha256": base_fingerprint_now,
+        "planned_extents": extents_now,
+    }
+    if final_check != current:
+        review_path.unlink(missing_ok=True)
+        fail("reviewed state changed at the commit boundary; isolation remains held and review must be repeated")
+
+    # The token represents a user-reviewed plan. The GUI calls this action
+    # only after its separate explicit commit confirmation.
+    state["save_pending"] = True
+    state["save_retry_base_content_sha256"] = final_check["base_content_sha256"]
+    write_state(state)
+    try:
+        commit_overlay(config)
+    except Exception as exc:
+        try:
+            state["save_retry_base_content_sha256"] = base_content_fingerprint(
+                config["disk"], extents_now)
+            write_state(state)
+        except Exception:
+            raise GuardError(
+                "physical save failed and retry-state fingerprinting also failed; "
+                "host isolation remains held and manual reconciliation is required"
+            ) from exc
+        raise
+    state["save_complete"] = True
+    write_state(state)
+    restore(domain)
+    review_path.unlink(missing_ok=True)
+
+
 def prepare(config):
     if STATE.exists():
-        fail("another guarded COW VM or maintenance action already holds the physical-disk lock")
+        try:
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            fail(f"cannot read existing guarded COW state: {exc}")
+        if (state.get("domain") != config["domain"]
+                or state.get("disk") != config["disk"]
+                or state.get("partitions") != config["partitions"]):
+            fail("another guarded COW VM or maintenance action holds the physical-disk lock")
+        if state.get("save_pending") and not state.get("save_complete"):
+            fail("a guarded COW save is incomplete; finish it before restarting the VM")
+        devices = part_devices(config)
+        verify_no_allowed_swap(devices)
+        for part in config["partitions"]:
+            rows = mounts_for(devices, part["number"])
+            expected = part["mountpoint"]
+            if len(rows) > 1 or (rows and (not expected or rows[0]["target"] != expected)):
+                for row in rows:
+                    if is_rw(row):
+                        remount_readonly(row)
+                fail(f"configured partition {part['number']} has an unexpected or multiply-mounted host mount")
+            for row in rows:
+                if is_rw(row):
+                    remount_readonly(row)
+                run("umount", "--", row["target"])
+            if mounts_for(devices, part["number"]):
+                fail(f"partition {part['number']} remained mounted after isolation")
+        uid = pwd.getpwnam(HELPER_USER).pw_uid
+        run("setfacl", "-m", f"u:{uid}:r--", config["disk"])
+        verify_qemu_readonly(config["disk"])
+        state["guest_active"] = False
+        write_state(state)
+        return
     devices = part_devices(config)
     verify_no_allowed_swap(devices)
     mounts = []
@@ -296,7 +955,9 @@ def prepare(config):
         run("setfacl", "-m", f"u:{uid}:r--", config["disk"])
         verify_qemu_readonly(config["disk"])
     except Exception:
-        restore(config["domain"])
+        # Keep the lock and the recorded prior mount state. No guest has
+        # started yet, but automatic restoration could expose a writable
+        # partition while this setup is being recovered.
         raise
 
 
@@ -311,13 +972,16 @@ def restore(domain):
         fail("release hook domain does not match the guarded COW state")
     if state.get("save_pending") and not state.get("save_complete"):
         fail("a guarded COW save is incomplete; partitions remain isolated until the merge succeeds")
+    if state.get("guest_active"):
+        fail("cannot release guarded COW isolation while the guest is active")
+    if not (state.get("save_complete") or state.get("discard_complete")):
+        fail("cannot restore host write access until guarded COW changes are saved or discarded")
     config = {"disk": state["disk"], "partitions": state["partitions"]}
-    restore_error = None
+    devices = part_devices(config)
+    for part in config["partitions"]:
+        if mounts_for(devices, part["number"]):
+            fail(f"partition {part['number']} was mounted while guarded COW isolation was active")
     try:
-        devices = part_devices(config)
-        for part in config["partitions"]:
-            if mounts_for(devices, part["number"]):
-                fail(f"partition {part['number']} was mounted while guarded COW isolation was active")
         for mount in state["mounts"]:
             if mount["mode"] == "ro":
                 run("mount", "-o", "ro", "--", mount["target"])
@@ -329,15 +993,49 @@ def restore(domain):
             if (mount["mode"] == "ro") != is_ro(rows[0]):
                 run("umount", "--", mount["target"])
                 fail(f"fresh mount for partition {mount['number']} did not recover its prior access mode")
-    except Exception as exc:
-        restore_error = exc
+    except Exception:
+        # A partial mount restoration must not leave a writable host mount
+        # while the isolation record still exists.
+        for mount in state["mounts"]:
+            for row in mounts_for(devices, mount["number"]):
+                if is_rw(row):
+                    remount_readonly(row)
+        raise
     try:
         restore_disk_acl(state["disk"], state["disk_acl"])
     except Exception as exc:
-        fail(f"host mount restoration failed ({restore_error}); disk ACL restoration also failed ({exc})")
-    if restore_error:
-        raise restore_error
+        fail(f"host mount restoration completed, but disk ACL restoration failed: {exc}")
     STATE.unlink()
+
+
+def guest_stopped(domain, reason):
+    if not STATE.exists():
+        return
+    try:
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"cannot read guarded COW state: {exc}")
+    if state.get("domain") != domain:
+        fail("release hook domain does not match the guarded COW state")
+    state["guest_active"] = False
+    state["last_shutdown_reason"] = reason
+    state["snapshot_eligible"] = reason == "shutdown"
+    write_state(state)
+
+
+def guest_started(domain):
+    if not STATE.exists():
+        fail("started hook has no guarded COW isolation state")
+    try:
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"cannot read guarded COW state: {exc}")
+    if state.get("domain") != domain:
+        fail("started hook domain does not match the guarded COW state")
+    state["guest_active"] = True
+    state["last_shutdown_reason"] = None
+    state["snapshot_eligible"] = False
+    write_state(state)
 
 
 def assert_vm_off(domain):
@@ -377,17 +1075,8 @@ def replace_overlay(config):
 
 
 def commit_overlay(config):
-    parts = config["partitions"]
-    guard_options = ",".join([
-        "driver=partition-write-guard", "file.driver=file",
-        f"file.filename={config['disk']}",
-        *[f"partitions.{index}={part['number']}" for index, part in enumerate(parts)],
-    ])
-    overlay_options = ",".join([
-        "driver=qcow2", "file.driver=file", f"file.filename={config['overlay']}",
-    ])
     run(QEMU_IMG, "commit", "-d", "--image-opts", "--backing-image-opts",
-        guard_options, overlay_options)
+        guard_options(config), overlay_options(config))
     replace_overlay(config)
 
 
@@ -403,13 +1092,26 @@ def offline_action(domain, action):
                 fail(f"cannot read guarded COW state for save retry: {exc}")
             if (state.get("domain") != domain or state.get("disk") != config["disk"]
                     or state.get("partitions") != config["partitions"]
-                    or not state.get("save_pending") or state.get("save_complete")):
+                    or state.get("guest_active")
+                    or state.get("save_complete") or state.get("discard_complete")):
                 fail("an unrelated guarded COW action already holds the physical-disk lock")
-            devices = part_devices(config)
-            verify_no_allowed_swap(devices)
-            if any(mounts_for(devices, part["number"]) for part in config["partitions"]):
-                fail("configured partitions were mounted during an incomplete save; refusing to retry")
-            verify_qemu_readonly(config["disk"])
+            if state.get("save_pending"):
+                devices = part_devices(config)
+                verify_no_allowed_swap(devices)
+                for part in config["partitions"]:
+                    rows = mounts_for(devices, part["number"])
+                    if any(not is_ro(row) for row in rows):
+                        fail("a configured partition became writable during an incomplete save; refusing to retry")
+                    for row in rows:
+                        run("umount", "--", row["target"])
+                    if mounts_for(devices, part["number"]):
+                        fail(f"partition {part['number']} remained mounted during save retry")
+                verify_qemu_readonly(config["disk"])
+            else:
+                prepare(config)
+                state = json.loads(STATE.read_text(encoding="utf-8"))
+                state["save_pending"] = True
+                write_state(state)
         else:
             prepare(config)
             state = json.loads(STATE.read_text(encoding="utf-8"))
@@ -421,18 +1123,14 @@ def offline_action(domain, action):
         restore(domain)
     else:
         prepare(config)
-        try:
-            replace_overlay(config)
-        finally:
-            restore(domain)
+        replace_overlay(config)
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+        state["discard_complete"] = True
+        write_state(state)
+        restore(domain)
 
 
-def main():
-    if os.geteuid() != 0:
-        fail("must run as root")
-    if len(sys.argv) != 3:
-        fail("usage: qemu-guarded-cow prepare|verify|restore|initialize|save|discard|check-start DOMAIN")
-    action, domain = sys.argv[1:]
+def dispatch(action, domain, operation_argument=None):
     if action == "check-start":
         if STATE.exists():
             held = json.loads(STATE.read_text(encoding="utf-8")).get("domain")
@@ -441,6 +1139,12 @@ def main():
         return
     if action == "restore":
         restore(domain)
+        return
+    if action == "guest-stopped":
+        guest_stopped(domain, operation_argument or "-")
+        return
+    if action == "guest-started":
+        guest_started(domain)
         return
     xml_data = None
     if action in ("prepare", "verify") and not sys.stdin.isatty():
@@ -455,18 +1159,45 @@ def main():
         devices = part_devices(config)
         verify_no_allowed_swap(devices)
         verify_qemu_readonly(config["disk"])
-        for part in config["partitions"]:
-            if mounts_for(devices, part["number"]):
-                fail(f"partition {part['number']} became mounted after pre-start isolation")
+        verify_partitions_not_writable(devices, config["partitions"])
     elif action == "initialize":
         assert_vm_off(domain)
         if os.path.exists(config["overlay"]):
             fail(f"refusing to overwrite existing overlay {config['overlay']}")
         replace_overlay(config)
-    elif action in ("save", "discard"):
+    elif action == "review":
+        review_action(domain)
+    elif action == "commit":
+        commit_review(domain, operation_argument)
+    elif action == "discard":
         offline_action(domain, action)
     else:
         fail("unknown action")
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root")
+    if len(sys.argv) not in (3, 4):
+        fail("usage: qemu-guarded-cow prepare|verify|guest-started|restore|initialize|review|commit DOMAIN [REVIEW_ID] | guest-stopped DOMAIN SHUTOFF_REASON | discard DOMAIN | check-start DOMAIN")
+    action, domain = sys.argv[1:3]
+    if action == "commit":
+        if len(sys.argv) != 4:
+            fail("commit requires the review identifier")
+        operation_argument = sys.argv[3]
+    elif action == "guest-stopped":
+        if len(sys.argv) != 4:
+            fail("guest-stopped requires libvirt's shutdown reason")
+        operation_argument = sys.argv[3]
+    else:
+        if len(sys.argv) != 3:
+            fail(f"{action} takes a domain name only")
+        operation_argument = None
+    if action == "check-start":
+        dispatch(action, domain)
+        return
+    with operation_lock():
+        dispatch(action, domain, operation_argument)
 
 
 if __name__ == "__main__":

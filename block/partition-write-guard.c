@@ -14,6 +14,7 @@
 #include "qemu/bswap.h"
 #include "qemu/host-utils.h"
 #include "qemu/module.h"
+#include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qobject/qdict.h"
 #include "qobject/qnum.h"
@@ -34,6 +35,10 @@ typedef struct BDRVPartitionWriteGuardState {
     PartitionRange *ranges;
     size_t range_count;
     uint32_t sector_size;
+    FILE *plan_file;
+    uint64_t plan_events;
+    bool dry_run;
+    bool plan_flushed;
 } BDRVPartitionWriteGuardState;
 
 static uint32_t pwg_crc32(const uint8_t *data, size_t len)
@@ -218,7 +223,21 @@ static int partition_write_guard_open(BlockDriverState *bs, QDict *options,
 {
     BDRVPartitionWriteGuardState *s = bs->opaque;
     QDict *partitions = NULL;
+    g_autofree char *plan_path = NULL;
     int ret;
+
+    s->dry_run = qdict_haskey(options, "plan-file");
+    if (s->dry_run &&
+        qobject_type(qdict_get(options, "plan-file")) != QTYPE_QSTRING) {
+        error_setg(errp, "plan-file must be a string naming a new write-plan file");
+        return -EINVAL;
+    }
+    plan_path = g_strdup(qdict_get_try_str(options, "plan-file"));
+    if (s->dry_run && (!plan_path || !*plan_path)) {
+        error_setg(errp, "plan-file must name a new write-plan file");
+        return -EINVAL;
+    }
+    qdict_del(options, "plan-file");
 
     qdict_extract_subqdict(options, &partitions, "partitions.");
     if (!partitions || !qdict_size(partitions)) {
@@ -259,12 +278,58 @@ static int partition_write_guard_open(BlockDriverState *bs, QDict *options,
          bs->file->bs->supported_zero_flags);
     ret = pwg_read_gpt(bs, partitions, errp);
     qobject_unref(partitions);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (s->dry_run) {
+        int fd = qemu_open_old(plan_path,
+                               O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
+
+        if (fd < 0) {
+            error_setg_errno(errp, errno, "Cannot create write plan '%s'",
+                             plan_path);
+            return -errno;
+        }
+        s->plan_file = fdopen(fd, "w");
+        if (!s->plan_file) {
+            int saved_errno = errno;
+
+            close(fd);
+            unlink(plan_path);
+            error_setg_errno(errp, saved_errno,
+                             "Cannot open write plan '%s'", plan_path);
+            return -saved_errno;
+        }
+        if (fprintf(s->plan_file,
+                    "{\"type\":\"qemu-partition-write-guard-plan\","
+                    "\"version\":1}\n") < 0 ||
+            fflush(s->plan_file)) {
+            int saved_errno = errno ? errno : EIO;
+
+            fclose(s->plan_file);
+            s->plan_file = NULL;
+            unlink(plan_path);
+            error_setg_errno(errp, saved_errno,
+                             "Cannot initialize write plan '%s'", plan_path);
+            return -saved_errno;
+        }
+    }
     return ret;
 }
 
 static void partition_write_guard_close(BlockDriverState *bs)
 {
     BDRVPartitionWriteGuardState *s = bs->opaque;
+
+    if (s->plan_file) {
+        if (!s->plan_flushed) {
+            error_report("Partition-write-guard plan did not complete its "
+                         "flush phase");
+        }
+        fclose(s->plan_file);
+        s->plan_file = NULL;
+    }
     g_clear_pointer(&s->ranges, g_free);
     s->range_count = 0;
 }
@@ -287,6 +352,28 @@ static bool partition_write_guard_allows(BlockDriverState *bs,
     return false;
 }
 
+static int partition_write_guard_write(BlockDriverState *bs, int64_t offset,
+                                       int64_t bytes, const char *operation)
+{
+    BDRVPartitionWriteGuardState *s = bs->opaque;
+
+    if (!partition_write_guard_allows(bs, offset, bytes)) {
+        return -EACCES;
+    }
+    if (!s->dry_run) {
+        return 1;
+    }
+    if (!s->plan_file ||
+        fprintf(s->plan_file,
+                "{\"type\":\"write\",\"operation\":\"%s\","
+                "\"offset\":%" PRId64 ",\"length\":%" PRId64 "}\n",
+                operation, offset, bytes) < 0) {
+        return -EIO;
+    }
+    s->plan_events++;
+    return 0;
+}
+
 static int coroutine_fn GRAPH_RDLOCK
 partition_write_guard_co_preadv(BlockDriverState *bs, int64_t offset,
                                 int64_t bytes, QEMUIOVector *qiov,
@@ -301,8 +388,10 @@ partition_write_guard_co_pwritev(BlockDriverState *bs, int64_t offset,
                                  int64_t bytes, QEMUIOVector *qiov,
                                  size_t qiov_offset, BdrvRequestFlags flags)
 {
-    if (!partition_write_guard_allows(bs, offset, bytes)) {
-        return -EACCES;
+    int ret = partition_write_guard_write(bs, offset, bytes, "write");
+
+    if (ret <= 0) {
+        return ret;
     }
     return bdrv_co_pwritev_part(bs->file, offset, bytes, qiov, qiov_offset,
                                 flags);
@@ -312,8 +401,10 @@ static int coroutine_fn GRAPH_RDLOCK
 partition_write_guard_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
                                        int64_t bytes, BdrvRequestFlags flags)
 {
-    if (!partition_write_guard_allows(bs, offset, bytes)) {
-        return -EACCES;
+    int ret = partition_write_guard_write(bs, offset, bytes, "write-zeroes");
+
+    if (ret <= 0) {
+        return ret;
     }
     return bdrv_co_pwrite_zeroes(bs->file, offset, bytes, flags);
 }
@@ -322,8 +413,10 @@ static int coroutine_fn GRAPH_RDLOCK
 partition_write_guard_co_pdiscard(BlockDriverState *bs, int64_t offset,
                                   int64_t bytes)
 {
-    if (!partition_write_guard_allows(bs, offset, bytes)) {
-        return -EACCES;
+    int ret = partition_write_guard_write(bs, offset, bytes, "discard");
+
+    if (ret <= 0) {
+        return ret;
     }
     return bdrv_co_pdiscard(bs->file, offset, bytes);
 }
@@ -337,7 +430,42 @@ partition_write_guard_co_getlength(BlockDriverState *bs)
 static int coroutine_fn GRAPH_RDLOCK
 partition_write_guard_co_flush(BlockDriverState *bs)
 {
-    return bdrv_co_flush(bs->file->bs);
+    BDRVPartitionWriteGuardState *s = bs->opaque;
+    int ret = bdrv_co_flush(bs->file->bs);
+
+    if (ret < 0 || !s->plan_file || s->plan_flushed) {
+        return ret;
+    }
+    if (fprintf(s->plan_file,
+                "{\"type\":\"flush\",\"event_count\":%" PRIu64
+                "}\n", s->plan_events) < 0 ||
+        fflush(s->plan_file) || qemu_fdatasync(fileno(s->plan_file)) < 0) {
+        int saved_errno = errno ? errno : EIO;
+
+        error_report("Could not flush partition-write-guard plan file");
+        return -saved_errno;
+    }
+    s->plan_flushed = true;
+    return 0;
+}
+
+static void GRAPH_RDLOCK
+partition_write_guard_child_perm(BlockDriverState *bs, BdrvChild *c,
+                                 BdrvChildRole role,
+                                 BlockReopenQueue *reopen_queue,
+                                 uint64_t parent_perm, uint64_t parent_shared,
+                                 uint64_t *nperm, uint64_t *nshared)
+{
+    BDRVPartitionWriteGuardState *s = bs->opaque;
+
+    bdrv_default_perms(bs, c, role, reopen_queue, parent_perm, parent_shared,
+                       nperm, nshared);
+    if (s->dry_run) {
+        /* The filter reports planned writes itself. Do not grant its backing
+         * child write permission during review, so a missed interception
+         * cannot modify the physical device. */
+        *nperm &= ~(BLK_PERM_WRITE | BLK_PERM_RESIZE);
+    }
 }
 
 static BlockDriver bdrv_partition_write_guard = {
@@ -345,7 +473,7 @@ static BlockDriver bdrv_partition_write_guard = {
     .instance_size = sizeof(BDRVPartitionWriteGuardState),
     .bdrv_open = partition_write_guard_open,
     .bdrv_close = partition_write_guard_close,
-    .bdrv_child_perm = bdrv_default_perms,
+    .bdrv_child_perm = partition_write_guard_child_perm,
     .bdrv_co_getlength = partition_write_guard_co_getlength,
     .bdrv_co_flush = partition_write_guard_co_flush,
     .bdrv_co_preadv_part = partition_write_guard_co_preadv,

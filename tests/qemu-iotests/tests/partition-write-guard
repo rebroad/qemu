@@ -18,10 +18,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import contextlib
+import io
 import json
+import importlib.util
+import importlib.machinery
 import os
+from pathlib import Path
 import struct
 import subprocess
+import time
 import zlib
 
 import iotests
@@ -56,22 +62,42 @@ def make_gpt(path: str, sector_size: int = SECTOR_SIZE,
 
     table_lba = 2
     table_sectors = (len(entries) + sector_size - 1) // sector_size
-    first_usable = table_lba + table_sectors + 1
-    last_usable = image_size // sector_size - 2
-    header = bytearray(sector_size)
-    header[:8] = b'EFI PART'
-    struct.pack_into('<IIIIQQQQ16sQIII', header, 8,
-                     0x00010000, 92, 0, 0, 1,
-                     image_size // sector_size - 1, first_usable,
-                     last_usable, b'partition-guard', table_lba,
-                     ENTRY_COUNT, ENTRY_SIZE, zlib.crc32(entries))
-    struct.pack_into('<I', header, 16, zlib.crc32(header[:92]))
+    backup_lba = image_size // sector_size - 1
+    backup_table_lba = backup_lba - table_sectors
+    first_usable = table_lba + table_sectors
+    last_usable = backup_table_lba - 1
+
+    def make_header(current_lba: int, alternate_lba: int,
+                    entries_lba: int) -> bytearray:
+        header = bytearray(sector_size)
+        header[:8] = b'EFI PART'
+        struct.pack_into('<IIIIQQQQ16sQIII', header, 8,
+                         0x00010000, 92, 0, 0, current_lba,
+                         alternate_lba, first_usable, last_usable,
+                         b'partition-guard', entries_lba, ENTRY_COUNT,
+                         ENTRY_SIZE, zlib.crc32(entries))
+        struct.pack_into('<I', header, 16, zlib.crc32(header[:92]))
+        return header
+
+    primary = make_header(1, backup_lba, table_lba)
+    backup = make_header(backup_lba, 1, backup_table_lba)
+    mbr = bytearray(sector_size)
+    mbr[446 + 4] = 0xee
+    struct.pack_into('<II', mbr, 446 + 8, 1,
+                     min(image_size // sector_size - 1, 0xffffffff))
+    mbr[510:512] = b'\x55\xaa'
 
     with open(path, 'r+b') as image:
+        image.seek(0)
+        image.write(mbr)
         image.seek(sector_size)
-        image.write(header)
+        image.write(primary)
         image.seek(table_lba * sector_size)
         image.write(entries)
+        image.seek(backup_table_lba * sector_size)
+        image.write(entries)
+        image.seek(backup_lba * sector_size)
+        image.write(backup)
 
 
 class TestPartitionWriteGuard(iotests.QMPTestCase):
@@ -89,6 +115,34 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             'partitions.2=7',
             'partitions.3=256',
         ])
+
+    def test_shutdown_reason_controls_snapshot_eligibility(self) -> None:
+        helper_path = Path(__file__).resolve().parents[3] / 'scripts/qemu-guarded-cow'
+        loader = importlib.machinery.SourceFileLoader(
+            'qemu_guarded_cow_shutdown_test', str(helper_path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        helper.RUN_DIR = Path(iotests.test_dir) / 'shutdown-reason-run'
+        helper.RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        helper.STATE = helper.RUN_DIR / 'active.json'
+
+        for reason, eligible in (('shutdown', True), ('destroyed', False),
+                                 ('crashed', False), ('-', False)):
+            helper.STATE.write_text(json.dumps({
+                'domain': 'disposable', 'guest_active': True,
+            }), encoding='utf-8')
+            helper.guest_stopped('disposable', reason)
+            state = json.loads(helper.STATE.read_text(encoding='utf-8'))
+            self.assertFalse(state['guest_active'])
+            self.assertEqual(state['last_shutdown_reason'], reason)
+            self.assertEqual(state['snapshot_eligible'], eligible)
+
+        helper.guest_started('disposable')
+        state = json.loads(helper.STATE.read_text(encoding='utf-8'))
+        self.assertTrue(state['guest_active'])
+        self.assertIsNone(state['last_shutdown_reason'])
+        self.assertFalse(state['snapshot_eligible'])
 
     def write(self, offset: int, command: str = 'write'):
         return qemu_io('--image-opts', self.image_opts,
@@ -211,6 +265,198 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                                    check=False)
                 self.assertEqual(retained.returncode, 0, retained.stdout)
 
+    def test_live_commit_selected_layer_through_guard(self) -> None:
+        layer_a = self.test_img + '.a.qcow2'
+        layer_b = self.test_img + '.b.qcow2'
+        layer_c = self.test_img + '.c.qcow2'
+        for backing, overlay, backing_format in (
+                (self.test_img, layer_a, 'raw'),
+                (layer_a, layer_b, 'qcow2'),
+                (layer_b, layer_c, 'qcow2')):
+            qemu_img('create', '-q', '-f', 'qcow2', '-F', backing_format,
+                     '-o', 'cluster_size=512', '-b', backing, overlay)
+
+        allowed_start, allowed_end = PARTITIONS[1]
+        allowed_offset = allowed_start * SECTOR_SIZE
+        allowed_length = (allowed_end - allowed_start + 1) * SECTOR_SIZE
+        qemu_io('-f', 'qcow2', layer_a, '-c',
+                f'write -P 0xa1 {allowed_offset} {allowed_length}')
+        b_offset = PARTITIONS[3][0] * SECTOR_SIZE
+        c_offset = PARTITIONS[7][0] * SECTOR_SIZE
+        qemu_io('-f', 'qcow2', layer_b, '-c',
+                f'write -P 0xb3 {b_offset} {SECTOR_SIZE}')
+        qemu_io('-f', 'qcow2', layer_c, '-c',
+                f'write -P 0xc7 {c_offset} {SECTOR_SIZE}')
+
+        with iotests.VM() as vm:
+            vm.add_blockdev(f'file,node-name=base-file,read-only=on,'
+                            f'filename={self.test_img}')
+            vm.add_blockdev('partition-write-guard,node-name=guard-file,'
+                            'file=base-file,partitions.0=1,partitions.1=3,'
+                            'partitions.2=7')
+            vm.add_blockdev('raw,node-name=guarded-base,file=guard-file')
+            backing_node = 'guarded-base'
+            for name, path in (('layer-a', layer_a),
+                               ('layer-b', layer_b),
+                               ('layer-c', layer_c)):
+                vm.add_blockdev(vm.qmp_to_opts({
+                    'driver': 'file', 'node-name': name + '-file',
+                    'filename': path,
+                }))
+                vm.add_blockdev(vm.qmp_to_opts({
+                    'driver': 'qcow2', 'node-name': name,
+                    'file': name + '-file', 'backing': backing_node,
+                }))
+                backing_node = name
+            vm.add_blockdev('partition-write-guard,node-name=active-guard,'
+                            'file=layer-c,partitions.0=1,partitions.1=3,'
+                            'partitions.2=7')
+            vm.add_device('virtio-blk-pci,drive=active-guard,id=virtio0')
+            vm.launch()
+
+            # Match the host policy: QEMU sees the physical base read-only
+            # while the guest runs, then is reopened writable only for the
+            # guarded commit job.
+            result = vm.qmp('blockdev-reopen', options=[{
+                'driver': 'file', 'node-name': 'base-file',
+                'filename': self.test_img, 'read-only': False,
+            }])
+            self.assertIn('return', result, result)
+            job_id = 'commit-selected-a'
+            result = vm.qmp('block-commit', device='active-guard',
+                            **{'job-id': job_id, 'base-node': 'guarded-base',
+                               'top-node': 'layer-a', 'speed': 1,
+                               'backing-file': self.test_img,
+                               'backing-mask-protocol': True})
+            self.assertIn('return', result, result)
+            vm.qmp('job-pause', id=job_id)
+            deadline = time.monotonic() + 5.0
+            while True:
+                jobs = vm.qmp('query-jobs')['return']
+                selected_job = next((job for job in jobs
+                                     if job['id'] == job_id), None)
+                if selected_job is None:
+                    self.fail(f'commit job {job_id} ended before it could be paused')
+                if selected_job['status'] == 'paused':
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail(f'commit job {job_id} did not pause: {selected_job}')
+                time.sleep(0.01)
+
+            # A write made after the selected snapshot boundary must stay in
+            # the descendant even while the older layer is committed.
+            live_pattern = 0xd1
+            live_write = vm.hmp_qemu_io(
+                'virtio0/virtio-backend',
+                f'write -P 0x{live_pattern:02x} '
+                f'{allowed_offset} {SECTOR_SIZE}', qdev=True)
+            self.assertNotIn('Error', str(live_write), live_write)
+            vm.qmp('block-job-set-speed', device=job_id, speed=0)
+            vm.qmp('job-resume', id=job_id)
+            vm.run_job(job_id, wait=60.0)
+
+            named = vm.qmp('query-named-block-nodes')['return']
+            names = {node.get('node-name') for node in named}
+            self.assertIn('layer-b', names, names)
+            self.assertIn('layer-c', names, names)
+            result = vm.qmp('blockdev-reopen', options=[{
+                'driver': 'file', 'node-name': 'base-file',
+                'filename': self.test_img, 'read-only': True,
+            }])
+            self.assertIn('return', result, result)
+
+        expected = bytearray(self.base_before)
+        expected[allowed_offset:allowed_offset + allowed_length] = \
+            bytes([0xa1]) * allowed_length
+        with open(self.test_img, 'rb') as image:
+            self.assertEqual(image.read(), expected)
+        for path in (layer_b, layer_c):
+            qemu_img('check', '-q', path)
+        b_info = json.loads(qemu_img('info', '--output=json', layer_b).stdout)
+        self.assertEqual(b_info.get('backing-filename'), self.test_img)
+        for offset, pattern in ((allowed_offset, 0xd1),
+                                (b_offset, 0xb3), (c_offset, 0xc7)):
+            result = qemu_io('-f', 'qcow2', layer_c, '-c',
+                             f'read -P 0x{pattern:02x} {offset} {SECTOR_SIZE}',
+                             check=False)
+            self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_live_commit_rejects_off_allowlist_write(self) -> None:
+        image = os.path.join(iotests.test_dir, 'live-denied.img')
+        layer_a = image + '.a.qcow2'
+        layer_b = image + '.b.qcow2'
+        layer_c = image + '.c.qcow2'
+        make_gpt(image)
+        with open(image, 'rb') as stream:
+            base_before = stream.read()
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
+                 '-o', 'cluster_size=512', '-b', image, layer_a)
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'qcow2',
+                 '-o', 'cluster_size=512', '-b', layer_a, layer_b)
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'qcow2',
+                 '-o', 'cluster_size=512', '-b', layer_b, layer_c)
+        denied_offset = PARTITIONS[2][0] * SECTOR_SIZE
+        qemu_io('-f', 'qcow2', layer_a, '-c',
+                f'write -P 0xcd {denied_offset} {SECTOR_SIZE}')
+
+        with iotests.VM() as vm:
+            vm.add_blockdev(f'file,node-name=base-file,read-only=on,'
+                            f'filename={image}')
+            vm.add_blockdev('partition-write-guard,node-name=guard-file,'
+                            'file=base-file,partitions.0=1,partitions.1=3,'
+                            'partitions.2=7')
+            vm.add_blockdev('raw,node-name=guarded-base,file=guard-file')
+            backing_node = 'guarded-base'
+            for name, path in (('layer-a', layer_a),
+                               ('layer-b', layer_b),
+                               ('layer-c', layer_c)):
+                vm.add_blockdev(vm.qmp_to_opts({
+                    'driver': 'file', 'node-name': name + '-file',
+                    'filename': path,
+                }))
+                vm.add_blockdev(vm.qmp_to_opts({
+                    'driver': 'qcow2', 'node-name': name,
+                    'file': name + '-file', 'backing': backing_node,
+                }))
+                backing_node = name
+            vm.add_blockdev('partition-write-guard,node-name=active-guard,'
+                            'file=layer-c,partitions.0=1,partitions.1=3,'
+                            'partitions.2=7')
+            vm.add_device('virtio-blk-pci,drive=active-guard,id=virtio0')
+            vm.launch()
+            vm.qmp('blockdev-reopen', options=[{
+                'driver': 'file', 'node-name': 'base-file',
+                'filename': image, 'read-only': False,
+            }])
+            job_id = 'commit-denied-layer'
+            result = vm.qmp('block-commit', device='active-guard',
+                            **{'job-id': job_id, 'base-node': 'guarded-base',
+                               'top-node': 'layer-a', 'speed': 0,
+                               'backing-file': image,
+                               'backing-mask-protocol': True})
+            self.assertIn('return', result, result)
+            event = vm.event_wait(name='BLOCK_JOB_ERROR',
+                                  match={'data': {'device': job_id}})
+            self.assertIsNotNone(event)
+            self.assertEqual(event['data']['action'], 'report')
+            self.assertEqual(event['data']['operation'], 'write')
+            vm.run_job(job_id, wait=60.0)
+            vm.qmp('blockdev-reopen', options=[{
+                'driver': 'file', 'node-name': 'base-file',
+                'filename': image, 'read-only': True,
+            }])
+
+        with open(image, 'rb') as stream:
+            stream.seek(denied_offset)
+            self.assertEqual(stream.read(SECTOR_SIZE),
+                             base_before[denied_offset:denied_offset + SECTOR_SIZE])
+        for path in (layer_a, layer_b, layer_c):
+            qemu_img('check', '-q', path)
+        retained = qemu_io('-f', 'qcow2', layer_a, '-c',
+                           f'read -P 0xcd {denied_offset} {SECTOR_SIZE}',
+                           check=False)
+        self.assertEqual(retained.returncode, 0, retained.stdout)
+
     def test_guarded_commit_rejects_off_allowlist_extent(self) -> None:
         overlay = self.test_img + '.qcow2'
         qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
@@ -242,6 +488,381 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                            f'read -P 0xcd {denied_offset} {SECTOR_SIZE}',
                            check=False)
         self.assertEqual(retained.returncode, 0, retained.stdout)
+
+    def test_guarded_commit_dry_run_rejects_off_allowlist_extent(self) -> None:
+        image = os.path.join(iotests.test_dir, 'dry-run-denied-disk.img')
+        overlay = image + '.qcow2'
+        plan = os.path.join(iotests.test_dir, 'dry-run-denied-plan.jsonl')
+        if os.path.exists(plan):
+            os.unlink(plan)
+        make_gpt(image)
+        with open(image, 'rb') as stream:
+            base_before = stream.read()
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
+                 '-o', 'cluster_size=512', '-b', image, overlay)
+        allowed_offset = PARTITIONS[1][0] * SECTOR_SIZE
+        qemu_io('-f', 'qcow2', overlay, '-c',
+                f'write -P 0xab {allowed_offset} {SECTOR_SIZE}')
+        denied_offset = PARTITIONS[2][0] * SECTOR_SIZE
+        qemu_io('-f', 'qcow2', overlay, '-c',
+                f'write -P 0xcd {denied_offset} {SECTOR_SIZE}')
+
+        guarded_backing = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=file',
+            f'file.filename={image}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+            f'plan-file={plan}',
+        ])
+        top_image_opts = ','.join([
+            'driver=qcow2',
+            'file.driver=file',
+            f'file.filename={overlay}',
+        ])
+        result = qemu_img('commit', '-d', '--image-opts',
+                          '--backing-image-opts', guarded_backing,
+                          top_image_opts, check=False)
+        self.assertNotEqual(result.returncode, 0,
+                            (result.stdout or '') + (result.stderr or ''))
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), base_before)
+
+        with open(plan, encoding='utf-8') as stream:
+            events = [json.loads(line) for line in stream]
+        # QEMU may flush the graph during error cleanup. The plan's flush
+        # marker is therefore not a success marker; the nonzero process status
+        # is what makes this review fail.
+        self.assertTrue(any(event.get('type') == 'write' and
+                            event.get('offset') == allowed_offset
+                            for event in events))
+        with open(image, 'rb') as stream:
+            stream.seek(allowed_offset)
+            self.assertEqual(stream.read(SECTOR_SIZE), bytes(SECTOR_SIZE))
+        retained = qemu_io('-f', 'qcow2', overlay, '-c',
+                           f'read -P 0xcd {denied_offset} {SECTOR_SIZE}',
+                           check=False)
+        self.assertEqual(retained.returncode, 0, retained.stdout)
+
+    def test_guarded_commit_dry_run_reports_exact_write_extent(self) -> None:
+        sector_size = SECTOR_SIZE
+        image = os.path.join(iotests.test_dir, 'dry-run-disk.img')
+        overlay = image + '.qcow2'
+        plan = os.path.join(iotests.test_dir, 'dry-run-plan.jsonl')
+        if os.path.exists(plan):
+            os.unlink(plan)
+        make_gpt(image, sector_size, IMAGE_SIZE)
+        with open(image, 'rb') as stream:
+            base_before = stream.read()
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
+                 '-o', f'cluster_size={sector_size}', '-b', image, overlay)
+
+        expected_writes = {}
+        for number in (1, 3, 7):
+            first, last = PARTITIONS[number]
+            for lba, pattern in ((first, number), (last, number + 0x10)):
+                offset = lba * sector_size
+                qemu_io('-f', 'qcow2', overlay, '-c',
+                        f'write -P 0x{pattern:02x} {offset} {sector_size}')
+                expected_writes[offset] = (pattern, sector_size)
+        guarded_backing = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=file',
+            f'file.filename={image}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+            f'plan-file={plan}',
+        ])
+        top_image_opts = ','.join([
+            'driver=qcow2',
+            'file.driver=file',
+            f'file.filename={overlay}',
+        ])
+
+        result = qemu_img('commit', '-d', '--image-opts',
+                          '--backing-image-opts', guarded_backing,
+                          top_image_opts, check=False)
+        self.assertEqual(result.returncode, 0,
+                         (result.stdout or '') + (result.stderr or ''))
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), base_before)
+        qemu_img('check', '-q', overlay)
+
+        with open(plan, encoding='utf-8') as stream:
+            events = [json.loads(line) for line in stream]
+        self.assertEqual(events[0], {
+            'type': 'qemu-partition-write-guard-plan', 'version': 1,
+        })
+        plan_writes = events[1:-1]
+        self.assertEqual(events[-1], {
+            'type': 'flush', 'event_count': len(plan_writes),
+        })
+        self.assertTrue(plan_writes)
+        ranges = [(first * sector_size, (last + 1) * sector_size)
+                  for number in (1, 3, 7)
+                  for first, last in (PARTITIONS[number],)]
+        for event in plan_writes:
+            self.assertEqual(event['type'], 'write')
+            self.assertEqual(event['operation'], 'write')
+            start, end = event['offset'], event['offset'] + event['length']
+            # These are the exact extents issued by qemu-img commit, which
+            # may be larger than the changed sector. Every full extent must
+            # remain inside one allowed partition.
+            self.assertTrue(any(start >= lo and end <= hi
+                                for lo, hi in ranges), event)
+        for offset in expected_writes:
+            self.assertTrue(any(event['offset'] <= offset <
+                                event['offset'] + event['length']
+                                for event in plan_writes), offset)
+
+        # Execute the same commit traversal for real on the disposable image.
+        guarded_backing = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=file',
+            f'file.filename={image}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+        ])
+        result = qemu_img('commit', '-d', '--image-opts',
+                          '--backing-image-opts', guarded_backing,
+                          top_image_opts, check=False)
+        self.assertEqual(result.returncode, 0,
+                         (result.stdout or '') + (result.stderr or ''))
+        expected = bytearray(base_before)
+        for offset, (pattern, length) in expected_writes.items():
+            expected[offset:offset + length] = bytes([pattern]) * length
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), expected)
+
+    def test_guarded_helper_builds_plan_with_qemu_img(self) -> None:
+        image = os.path.join(iotests.test_dir, 'helper-review-disk.img')
+        overlay = image + '.qcow2'
+        make_gpt(image)
+        with open(image, 'rb') as stream:
+            base_before = stream.read()
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
+                 '-o', 'cluster_size=512', '-b', image, overlay)
+        for number in (1, 3, 7):
+            first, last = PARTITIONS[number]
+            for lba in (first, last):
+                qemu_io('-f', 'qcow2', overlay, '-c',
+                        f'write -P 0x{number:02x} {lba * SECTOR_SIZE} {SECTOR_SIZE}')
+
+        helper_path = Path(os.environ.get(
+            'QEMU_GUARDED_COW_TEST_HELPER',
+            str(Path(__file__).resolve().parents[3] /
+                'scripts/qemu-guarded-cow')))
+        loader = importlib.machinery.SourceFileLoader(
+            'qemu_guarded_cow_test', str(helper_path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        helper.QEMU_IMG = os.environ.get(
+            'QEMU_GUARDED_COW_TEST_QEMU_IMG', iotests.qemu_img_args[0])
+        helper.RUN_DIR = Path(iotests.test_dir) / 'guard-helper-run'
+        sector_size = SECTOR_SIZE
+        original_run = helper.run
+
+        def run_with_disposable_geometry(*args, input=None):
+            if args[:2] == ('blockdev', '--getsize64'):
+                return subprocess.CompletedProcess(
+                    args, 0, str(len(base_before)), '')
+            return original_run(*args, input=input)
+
+        helper.run = run_with_disposable_geometry
+        original_getpwnam = helper.pwd.getpwnam
+        helper.pwd.getpwnam = lambda _name: helper.pwd.getpwuid(os.getuid())
+
+        def fixture_inventory(_config):
+            parts, guid, metadata, fingerprint = helper.read_gpt(
+                image, sector_size, len(base_before))
+            for part in parts:
+                part['path'] = image
+            return {
+                'identity': {'path': image, 'size': len(base_before),
+                             'log-sec': sector_size, 'phy-sec': sector_size,
+                             'model': 'test-disk', 'serial': 'fixture',
+                             'wwn': 'fixture-wwn', 'ptuuid': guid,
+                             'gpt_sha256': fingerprint},
+                'sector_size': sector_size,
+                'size_bytes': len(base_before),
+                'size_lba': len(base_before) // sector_size,
+                'partitions': parts,
+                'gpt_metadata': metadata,
+            }
+
+        helper.disk_inventory = fixture_inventory
+        fixture_parts, _guid, _metadata, _fingerprint = helper.read_gpt(
+            image, sector_size, len(base_before))
+        config = {
+            'disk': image,
+            'overlay': overlay,
+            'guard': {'driver': 'partition-write-guard',
+                      'partitions': [1, 3, 7],
+                      'file': 'libvirt-0-format',
+                      'node-name': 'disposable-guard'},
+            'partitions': [dict(number=part['number'],
+                                partuuid=part['partuuid'], type=part['type'])
+                           for part in fixture_parts
+                           if part['number'] in (1, 3, 7)],
+        }
+        raw, extents, _inventory = helper.make_write_plan(config)
+        self.assertTrue(raw)
+        allowed_ranges = [(first * sector_size, (last + 1) * sector_size)
+                          for number in (1, 3, 7)
+                          for first, last in (PARTITIONS[number],)]
+        self.assertTrue(extents)
+        for extent in extents:
+            start = extent['offset']
+            end = start + extent['length']
+            self.assertTrue(any(start >= first and end <= last
+                                for first, last in allowed_ranges), extent)
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), base_before)
+
+        helper.RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        helper.STATE = helper.RUN_DIR / 'active.json'
+        helper.REVIEW_DIR = helper.RUN_DIR / 'reviews'
+        helper.STATE.write_text(json.dumps({
+            'domain': 'disposable', 'disk': image,
+            'partitions': config['partitions'], 'guest_active': False,
+        }), encoding='utf-8')
+        helper.assert_vm_off = lambda _domain: None
+        helper.parse_config = lambda _domain: config
+        helper.part_devices = lambda _config: {
+            part['number']: {'path': image, 'mm': '0:0'}
+            for part in config['partitions']
+        }
+        helper.verify_no_allowed_swap = lambda _devices: None
+        helper.verify_partitions_not_writable = lambda _devices, _parts: None
+        helper.verify_qemu_readonly = lambda _disk: None
+        helper.mounts_for = lambda _devices, _number: []
+        helper.host_disk_state = lambda live, _config: {
+            'partitions': [{'number': part['number'], 'path': part['path'],
+                            'allowed': part['number'] in (1, 3, 7),
+                            'mounts': [], 'swap': False}
+                           for part in live['partitions']],
+            'swap': [],
+        }
+        review_output = io.StringIO()
+        with contextlib.redirect_stdout(review_output):
+            helper.review_action('disposable')
+        report = json.loads(review_output.getvalue())
+        self.assertFalse(report['physical_disk_written'])
+        self.assertFalse(report['commit_enabled'])
+        if 'shutdown' in report:
+            self.assertEqual(report['shutdown'], {
+                'reason': 'unknown', 'clean_snapshot_eligible': False,
+            })
+        self.assertIn('does not prove a real commit will succeed',
+                      report['notice'])
+        fingerprint_supported = 'base_content_sha256' in report['guard']
+        if fingerprint_supported:
+            self.assertEqual(report['guard']['base_content_coverage'],
+                             'planned commit extents at review time only')
+            self.assertRegex(report['guard']['base_content_sha256'],
+                             r'^[0-9a-f]{64}$')
+        self.assertTrue(report['planned_extents'])
+        self.assertIn('<svg ', report['disk_map_svg'])
+        self.assertIn('primary GPT entry array', report['disk_map_svg'])
+        with self.assertRaises(helper.GuardError):
+            helper.commit_review('disposable', report['review_id'])
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), base_before)
+
+        # Exercise the reviewed save path only against this disposable image.
+        # Simulate an ambiguous failure after qemu-img has completed its writes,
+        # then verify that the retained overlay and pending state support retry.
+        expected = bytearray(base_before)
+        for number in (1, 3, 7):
+            for lba in PARTITIONS[number]:
+                offset = lba * sector_size
+                expected[offset:offset + sector_size] = bytes([number]) * sector_size
+
+        helper.PHYSICAL_COMMIT_ENABLED = True
+        review_output = io.StringIO()
+        with contextlib.redirect_stdout(review_output):
+            helper.review_action('disposable')
+        commit_report = json.loads(review_output.getvalue())
+        self.assertTrue(commit_report['commit_enabled'])
+        _raw_recheck, extents_recheck, _inventory_recheck = helper.make_write_plan(config)
+        self.assertEqual(extents_recheck, commit_report['planned_extents'])
+        self.assertEqual(helper.write_plan_sha256(extents_recheck),
+                         commit_report['guard']['plan_sha256'])
+
+        # A reviewed physical extent changing after review invalidates the
+        # token before save-pending is recorded or any commit is attempted.
+        if fingerprint_supported:
+            changed_offset = commit_report['planned_extents'][0]['offset']
+            with open(image, 'r+b') as stream:
+                stream.seek(changed_offset)
+                original_byte = stream.read(1)
+                stream.seek(changed_offset)
+                stream.write(bytes([original_byte[0] ^ 0xff]))
+            with self.assertRaisesRegex(helper.GuardError,
+                                        'changed after review.*base_content_sha256'):
+                helper.commit_review('disposable', commit_report['review_id'])
+            self.assertNotIn('save_pending', json.loads(
+                helper.STATE.read_text(encoding='utf-8')))
+            with open(image, 'r+b') as stream:
+                stream.seek(changed_offset)
+                stream.write(original_byte)
+
+            review_output = io.StringIO()
+            with contextlib.redirect_stdout(review_output):
+                helper.review_action('disposable')
+            commit_report = json.loads(review_output.getvalue())
+        old_overlay_stat = os.stat(overlay)
+        fail_after_commit = True
+        restore_calls = []
+        helper.restore = lambda _domain: restore_calls.append(_domain)
+
+        def fail_once_after_commit(*args, input=None):
+            nonlocal fail_after_commit
+            if args[0] == 'blockdev' and args[1] == '--getss':
+                return subprocess.CompletedProcess(args, 0, '512\n', '')
+            result = run_with_disposable_geometry(*args, input=input)
+            if args[0] == helper.QEMU_IMG and 'commit' in args and fail_after_commit:
+                fail_after_commit = False
+                raise subprocess.CalledProcessError(
+                    1, args, output=result.stdout,
+                    stderr='injected failure after disposable-disk commit')
+            return result
+
+        helper.run = fail_once_after_commit
+        try:
+            with self.assertRaises(subprocess.CalledProcessError):
+                helper.commit_review('disposable', commit_report['review_id'])
+            failed_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
+            self.assertTrue(failed_state['save_pending'])
+            self.assertNotIn('save_complete', failed_state)
+            self.assertEqual(os.stat(overlay).st_ino, old_overlay_stat.st_ino)
+            self.assertEqual(restore_calls, [])
+            with open(image, 'rb') as stream:
+                self.assertEqual(stream.read(), expected)
+
+            helper.commit_review('disposable', commit_report['review_id'])
+            completed_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
+            self.assertTrue(completed_state['save_complete'])
+            self.assertEqual(restore_calls, ['disposable'])
+            self.assertNotEqual(os.stat(overlay).st_ino, old_overlay_stat.st_ino)
+            self.assertEqual(original_run(
+                helper.QEMU_IMG, 'check', '-q', overlay).returncode, 0)
+            new_info = json.loads(original_run(
+                helper.QEMU_IMG, 'info', '--output=json', overlay).stdout)
+            self.assertEqual(new_info['format'], 'qcow2')
+            self.assertEqual(new_info['backing-filename'], image)
+            self.assertEqual(new_info['backing-filename-format'], 'raw')
+            self.assertEqual(new_info['virtual-size'], len(base_before))
+            with open(image, 'rb') as stream:
+                self.assertEqual(stream.read(), expected)
+        finally:
+            helper.run = original_run
+            helper.pwd.getpwnam = original_getpwnam
+            helper.PHYSICAL_COMMIT_ENABLED = False
 
     def test_guarded_cow_and_commit_4k_sectors(self) -> None:
         sector_size = 4096
@@ -296,6 +917,35 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             'file.driver=file',
             f'file.filename={overlay}',
         ])
+        plan = os.path.join(iotests.test_dir, 'dry-run-plan-4k.jsonl')
+        if os.path.exists(plan):
+            os.unlink(plan)
+        planned_backing = ','.join([
+            guarded_backing,
+            f'plan-file={plan}',
+        ])
+        result = qemu_img('commit', '-d', '--image-opts',
+                          '--backing-image-opts', planned_backing,
+                          top_image_opts, check=False)
+        self.assertEqual(result.returncode, 0,
+                         (result.stdout or '') + (result.stderr or ''))
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), base_before)
+        with open(plan, encoding='utf-8') as stream:
+            events = [json.loads(line) for line in stream]
+        self.assertEqual(events[-1], {
+            'type': 'flush', 'event_count': len(events) - 2,
+        })
+        ranges = [(first * sector_size, (last + 1) * sector_size)
+                  for number in (1, 3, 7)
+                  for first, last in (PARTITIONS[number],)]
+        self.assertTrue(events[1:-1])
+        for event in events[1:-1]:
+            self.assertEqual(event['type'], 'write')
+            start, end = event['offset'], event['offset'] + event['length']
+            self.assertTrue(any(start >= lo and end <= hi
+                                for lo, hi in ranges), event)
+
         result = qemu_img('commit', '-d', '--image-opts',
                           '--backing-image-opts', guarded_backing,
                           top_image_opts, check=False)

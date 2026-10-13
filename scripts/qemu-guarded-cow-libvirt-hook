@@ -17,8 +17,8 @@ def fail(message):
 
 if len(sys.argv) != 5:
     fail("unexpected hook arguments")
-name, operation, suboperation, _extra = sys.argv[1:]
-if operation not in ("prepare", "start", "release"):
+name, operation, suboperation, extra = sys.argv[1:]
+if operation not in ("prepare", "start", "started", "release"):
     raise SystemExit(0)
 
 if operation in ("prepare", "start") and suboperation == "begin":
@@ -34,11 +34,19 @@ if operation in ("prepare", "start") and suboperation == "begin":
         action = "prepare" if operation == "prepare" else "verify"
         result = subprocess.run([HELPER, action, name], input=config_xml)
         raise SystemExit(result.returncode)
+elif operation == "started" and suboperation == "begin" and os.path.exists(STATE):
+    try:
+        active = json.loads(open(STATE, encoding="utf-8").read()).get("domain")
+    except Exception as exc:
+        fail(f"cannot read active guarded-disk state: {exc}")
+    if active == name:
+        result = subprocess.run([HELPER, "guest-started", name])
+        raise SystemExit(result.returncode)
 elif operation == "release" and suboperation == "end" and os.path.exists(STATE):
     try:
         active = json.loads(open(STATE, encoding="utf-8").read()).get("domain")
     except Exception as exc:
         fail(f"cannot read active guarded-disk state: {exc}")
     if active == name:
-        result = subprocess.run([HELPER, "restore", name])
+        result = subprocess.run([HELPER, "guest-stopped", name, extra])
         raise SystemExit(result.returncode)

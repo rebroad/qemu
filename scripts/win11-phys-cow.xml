@@ -40,7 +40,9 @@
     <smm state="on" />
     <ioapic driver="kvm" />
   </features>
-  <cpu mode="host-passthrough" check="none" migratable="off" />
+  <cpu mode="host-passthrough" check="none" migratable="off">
+    <topology sockets="1" dies="1" cores="4" threads="1" />
+  </cpu>
   <clock offset="localtime">
     <timer name="hypervclock" present="yes" />
   </clock>
@@ -52,7 +54,7 @@
     <disk type="file" device="disk">
       <driver name="qemu" type="qcow2" cache="none" discard="unmap" />
       <source file="/var/lib/libvirt/images/win11-phys-guarded-cow.qcow2" />
-      <backingStore type="block"><format type="raw" /><source dev="/dev/nvme0n1" /><backingStore /></backingStore><target dev="sda" bus="sata" />
+      <backingStore type="block"><format type="raw" /><source dev="/dev/nvme0n1" /><backingStore /></backingStore><target dev="sda" bus="scsi" />
       <alias name="ua-win11-phys-locator" />
       <address type="drive" controller="0" bus="0" target="0" unit="0" />
     </disk>
@@ -115,7 +117,7 @@
     <interface type="bridge">
       <mac address="52:54:00:d9:72:ce" />
       <source bridge="br-winproxy" />
-      <model type="rtl8139" />
+      <model type="virtio" />
       <address type="pci" domain="0x0000" bus="0x06" slot="0x01" function="0x0" />
     </interface>
     <serial type="pty">
@@ -147,7 +149,7 @@
     </sound>
     <audio id="1" type="spice" />
     <video>
-      <model type="qxl" ram="65536" vram="65536" vgamem="16384" heads="1" primary="yes" />
+      <model type="virtio" heads="1" primary="yes" />
       <address type="pci" domain="0x0000" bus="0x00" slot="0x01" function="0x0" />
     </video>
     <watchdog model="itco" action="reset" />

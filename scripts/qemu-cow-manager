@@ -2,18 +2,25 @@
 """Save or discard an offline libvirt qcow2 overlay."""
 
 import json
+import hashlib
 import os
 import pwd
 import re
+import secrets
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 QEMU_IMG = "/usr/local/bin/qemu-img"
 GUARDED_HELPER = "/usr/local/libexec/qemu-guarded-cow"
 PWG_NS = "urn:qemu:partition-write-guard:1"
+REVIEW_DIR = Path("/run/libvirt/qemu-cow-manager/reviews")
+REVIEW_TTL = 3600
+os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def run(*args):
@@ -25,25 +32,19 @@ def fail(message):
     raise RuntimeError(message)
 
 
-def main():
-    if os.geteuid() != 0:
-        fail("must run as root")
-    if len(sys.argv) != 3 or sys.argv[1] not in ("save", "discard"):
-        fail("usage: qemu-cow-manager save|discard DOMAIN")
-    action, domain = sys.argv[1:]
+def domain_config(domain):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", domain):
         fail("invalid libvirt domain name")
     root = ET.fromstring(run("virsh", "dumpxml", "--inactive", domain))
     if root.findtext("name") != domain:
         fail("libvirt returned an unexpected domain")
-    if root.find(f"./metadata/{{{PWG_NS}}}guardedCow") is not None:
-        os.execv(GUARDED_HELPER, [GUARDED_HELPER, action, domain])
-    if run("virsh", "domstate", domain).strip().lower() != "shut off":
-        fail("VM must be fully shut off before save/discard")
     info = run("virsh", "dominfo", domain)
+    if run("virsh", "domstate", domain).strip().lower() != "shut off":
+        fail("VM must be fully shut off before review, commit, or discard")
     if not re.search(r"^Managed save:\s+no\s*$", info, re.MULTILINE):
-        fail("VM has a managed-save state; clear it before save/discard")
-    disks = [disk for disk in root.findall("./devices/disk") if disk.get("device") == "disk"]
+        fail("VM has a managed-save state; clear it before review, commit, or discard")
+    disks = [disk for disk in root.findall("./devices/disk")
+             if disk.get("device") == "disk"]
     if len(disks) != 1:
         fail("COW save/discard requires exactly one system disk")
     disk = disks[0]
@@ -62,43 +63,63 @@ def main():
     if not backing_file or (is_block and backing_fmt != "raw"):
         fail("unsupported backing image source or format")
     overlay = source.get("file")
-    qinfo = json.loads(run(QEMU_IMG, "info", "--output=json", overlay))
-    st = os.lstat(overlay)
+    if any(ch in overlay + backing_file for ch in (",", "\\", "=")):
+        fail("disk and overlay paths may not contain comma, backslash, or equals characters")
+    return {"domain": domain, "root": root, "disk": disk,
+            "overlay": overlay, "backing": backing_file,
+            "backing_format": backing_fmt, "is_block": is_block}
+
+
+def validate_overlay(config):
+    qinfo = json.loads(run(QEMU_IMG, "info", "--output=json", config["overlay"]))
+    run(QEMU_IMG, "check", "-q", config["overlay"])
+    st = os.lstat(config["overlay"])
     owner = pwd.getpwnam("libvirt-qemu")
-    base_size = int(run("blockdev", "--getsize64", backing_file)) if is_block else os.stat(backing_file).st_size
-    if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != owner.pw_uid
-            or qinfo.get("format") != "qcow2" or qinfo.get("backing-filename") != backing_file
-            or qinfo.get("backing-filename-format") != backing_fmt
+    base_size = (int(run("blockdev", "--getsize64", config["backing"]))
+                 if config["is_block"] else os.stat(config["backing"]).st_size)
+    if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+            or st.st_uid != owner.pw_uid or stat.S_IMODE(st.st_mode) != 0o600
+            or qinfo.get("format") != "qcow2"
+            or qinfo.get("backing-filename") != config["backing"]
+            or qinfo.get("backing-filename-format") != config["backing_format"]
             or qinfo.get("virtual-size") != base_size
             or qinfo.get("format-specific", {}).get("data", {}).get("corrupt")):
         fail("overlay ownership, format, backing image, or health is not approved")
-    if action == "save":
-        if is_block:
-            tree = json.loads(run("lsblk", "--json", "--paths", "--output", "NAME,TYPE,MOUNTPOINTS", backing_file))
-            nodes = []
-            def collect(items):
-                for item in items:
-                    nodes.append(item)
-                    collect(item.get("children", []))
-            collect(tree.get("blockdevices", []))
-            if any(point for node in nodes for point in (node.get("mountpoints") or [])):
-                fail("cannot save an unguarded raw-disk overlay while any disk partition is mounted")
-            swaps = run("swapon", "--show", "--noheadings", "--raw", "--output", "NAME").splitlines()
-            disk_nodes = {os.path.realpath(node["name"]) for node in nodes}
-            for swap in swaps:
-                try:
-                    if os.path.realpath(swap) in disk_nodes:
-                        fail(f"cannot save while disk partition is active swap: {swap}")
-                except OSError:
-                    fail(f"cannot validate active swap device {swap}")
-        run(QEMU_IMG, "commit", overlay)
+    config["base_size"] = base_size
+    config["overlay_info"] = qinfo
+    config["overlay_stat"] = st
+
+
+def fingerprint(config):
+    st = config["overlay_stat"]
+    return {"path": config["overlay"], "device": st.st_dev,
+            "inode": st.st_ino, "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "format": config["overlay_info"].get("format"),
+            "backing": config["backing"],
+            "backing_format": config["backing_format"],
+            "virtual_size": config["overlay_info"].get("virtual-size"),
+            "cluster_size": config["overlay_info"].get("cluster-size"),
+            "base_size": config["base_size"],
+            "health": "qemu-img check passed"}
+
+
+def review_path(token):
+    return REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
+
+
+def make_overlay(config):
+    overlay = config["overlay"]
+    backing = config["backing"]
+    backing_fmt = config["backing_format"]
     directory = os.path.dirname(overlay)
     fd, new_overlay = tempfile.mkstemp(prefix=".qemu-cow-", suffix=".qcow2", dir=directory)
     os.close(fd)
     os.unlink(new_overlay)
     try:
         run(QEMU_IMG, "create", "-q", "-f", "qcow2", "-F", backing_fmt,
-            "-b", backing_file, new_overlay)
+            "-b", backing, new_overlay)
+        owner = pwd.getpwnam("libvirt-qemu")
         os.chown(new_overlay, owner.pw_uid, owner.pw_gid)
         os.chmod(new_overlay, 0o600)
         os.replace(new_overlay, overlay)
@@ -107,6 +128,74 @@ def main():
             os.unlink(new_overlay)
         except FileNotFoundError:
             pass
+    validate_overlay(config)
+
+
+def generic_review(domain, config):
+    validate_overlay(config)
+    if config["is_block"]:
+        fail("raw block backing requires the guarded partition-write configuration")
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    report = {"schema": "qemu-cow-review-v1", "review_id": token,
+              "domain": domain, "created_at": now, "expires_at": now + REVIEW_TTL,
+              "physical_disk_written": False,
+              "commit_enabled": True,
+              "notice": "Review only: no backing-disk writes were issued. Commit will write the qcow2 overlay into its file-backed image.",
+              "overlay": fingerprint(config)}
+    REVIEW_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(REVIEW_DIR, 0o700)
+    path = review_path(token)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(report, stream, separators=(",", ":"))
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    print(json.dumps(report, separators=(",", ":")))
+
+
+def generic_commit(domain, token, config):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,60}", token):
+        fail("invalid or missing review token")
+    path = review_path(token)
+    try:
+        reviewed = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"cannot load the reviewed COW save: {exc}")
+    if (reviewed.get("review_id") != token or reviewed.get("domain") != domain
+            or reviewed.get("expires_at", 0) < int(time.time())):
+        fail("COW review expired or belongs to another VM; review again")
+    validate_overlay(config)
+    if fingerprint(config) != reviewed.get("overlay"):
+        fail("overlay or backing image changed after review; review again")
+    run(QEMU_IMG, "commit", config["overlay"])
+    make_overlay(config)
+    path.unlink(missing_ok=True)
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root")
+    if len(sys.argv) not in (3, 4) or sys.argv[1] not in ("review", "commit", "discard"):
+        fail("usage: qemu-cow-manager review|discard DOMAIN | commit DOMAIN REVIEW_ID")
+    action, domain = sys.argv[1:3]
+    if (action == "commit") != (len(sys.argv) == 4):
+        fail("commit requires a review identifier; review and discard take only a domain")
+    config = domain_config(domain)
+    root = config["root"]
+    if root.find(f"./metadata/{{{PWG_NS}}}guardedCow") is not None:
+        args = [GUARDED_HELPER, action, domain]
+        if action == "commit":
+            args.append(sys.argv[3])
+        os.execv(GUARDED_HELPER, args)
+    if action == "discard":
+        validate_overlay(config)
+        make_overlay(config)
+    elif action == "review":
+        generic_review(domain, config)
+    elif action == "commit":
+        generic_commit(domain, sys.argv[3], config)
 
 
 if __name__ == "__main__":

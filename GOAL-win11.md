@@ -20,3 +20,34 @@ The new installation must be activated and properly licensed before it is consid
 If the existing license cannot cover the VM while preserving the existing `p3` installation and its license state, stop before treating the new installation as complete and identify the valid licensing options. Do not remove, overwrite, or invalidate the existing `p3` installation or its license state.
 
 Compare the lightweight installation's boot time, responsiveness, and memory use with the existing Windows 11 VM under the same KVM-backed configuration.
+
+## Host runtime files for the guarded-COW VM
+
+On the current host, keep these files for the `win11-phys` guarded-COW setup:
+
+| Installed path | Purpose | Source or caller |
+| --- | --- | --- |
+| `/usr/local/libexec/qemu-cow-manager` | Privileged entry point for the Virt-manager COW save/discard controls. | `scripts/qemu-cow-manager`; Virt-manager calls it with `pkexec`. |
+| `/usr/local/libexec/qemu-guarded-cow` | Validates the VM's configured partition allowlist, isolates the host mounts, and initializes, saves, or discards the guarded overlay. | `scripts/qemu-guarded-cow`; called by the libvirt hook and `qemu-cow-manager`. |
+| `/etc/libvirt/hooks/qemu` | Runs guarded-COW preparation, verification, and host-state restoration on libvirt domain lifecycle events. | Installed from `scripts/qemu-guarded-cow-libvirt-hook`. The hook is not installed under `/usr/local/libexec`. |
+| `/usr/local/bin/qemu-system-x86_64` | Custom QEMU executable selected by the `win11-phys` domain XML. | Built from this repository and installed by `scripts/build-install-qemu.sh`; includes `partition-write-guard`. |
+| `/usr/local/bin/qemu-img` | Companion custom image utility used by the guarded helper to initialize and merge overlays through the partition guard. | Built from this repository and installed by `scripts/build-install-qemu.sh`; includes `partition-write-guard`. |
+
+The current installed copies of both libexec helpers and the libvirt hook match
+their source files. The two installed QEMU binaries match the corresponding
+outputs in the external `qemu.build` tree. The live `win11-phys` process uses
+the custom QEMU executable and its guarded block node.
+
+`/usr/local/libexec/win11-phys-host-guard` is a legacy helper from the earlier
+physical-disk design. It hard-codes `/dev/nvme0n1` and the old partition IDs,
+and grants `libvirt-qemu` read/write access to the raw disk. The active libvirt
+hook, installer, current VM XML, and COW manager do not call it; no external
+references were found in the host configuration or user VM scripts during the
+2026-10-13 audit. It is not required by the current guarded-COW setup and is a
+candidate for removal after any private/manual invocations have been ruled out.
+
+`/usr/local/libexec/qemu-bridge-helper` is a separate symlink to the
+QEMU 9.2.50 bridge helper. The current VM uses a libvirt-managed tap on
+`br-winproxy`, so this integration does not call that helper; other local QEMU
+domains may. Do not remove package/application helpers from `/usr/local/libexec`
+based only on this VM-specific inventory.

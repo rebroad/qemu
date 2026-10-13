@@ -78,3 +78,19 @@ This file records dated implementation and host-state findings for the
   and rejected p4 when deliberately included in the allowlist.
 - No VM interaction, overlay check, physical-disk write, or device
   reconfiguration was performed while the VM was running.
+
+### Live performance baseline
+
+- The default `virsh` connection is a session connection and does not contain
+  `win11-phys`; the VM is owned by system libvirt. Use
+  `virsh -c qemu:///system` for subsequent host-side inspection.
+- A fresh system-libvirt listing confirmed domain ID 8 was running with QEMU
+  PID 3635886. A 10-second `/proc/PID/stat` sample showed 194.4% CPU on one
+  core (24.30% of the host's eight logical CPUs). This is a baseline only; it
+  does not distinguish Windows update workload from device-emulation cost.
+- The active configuration has KVM and host CPU passthrough, four vCPUs, and
+  8 GiB RAM. It still uses an IDE hard disk frontend over the guarded qcow2
+  disk, rtl8139 networking, and QXL/SPICE display/audio. The virtio-scsi
+  controller is present but not attached to the system disk. No runtime or
+  persistent hardware settings were changed; activation should be verified
+  before changing the VM hardware profile.

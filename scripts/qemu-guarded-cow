@@ -163,6 +163,33 @@ def mounts_for(devices, number):
     return [row for row in mount_table() if row["mm"] == mm]
 
 
+def verify_no_allowed_swap(devices):
+    try:
+        swaps = run("swapon", "--show=NAME", "--noheadings",
+                    "--raw").stdout.splitlines()
+    except Exception as exc:
+        fail(f"cannot inspect active swap devices: {exc}")
+    allowed = {device["mm"] for device in devices.values()}
+    for name in swaps:
+        try:
+            st = os.stat(os.path.realpath(name))
+            if stat.S_ISBLK(st.st_mode):
+                mm = f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}"
+            elif stat.S_ISREG(st.st_mode):
+                mm = run("findmnt", "--noheadings", "--output", "MAJ:MIN",
+                         "--target", name).stdout.strip()
+                if not re.fullmatch(r"[0-9]+:[0-9]+", mm):
+                    fail(f"cannot identify the backing partition for swap file {name}")
+            else:
+                fail(f"cannot determine the backing partition for active swap {name}")
+        except GuardError:
+            raise
+        except Exception as exc:
+            fail(f"cannot validate active swap {name}: {exc}")
+        if mm in allowed:
+            fail(f"configured writable partition is active swap: {name}")
+
+
 def is_rw(row):
     return "rw" in row["opts"] and "rw" in row["super"]
 
@@ -235,6 +262,7 @@ def prepare(config):
     if STATE.exists():
         fail("another guarded COW VM or maintenance action already holds the physical-disk lock")
     devices = part_devices(config)
+    verify_no_allowed_swap(devices)
     mounts = []
     for part in config["partitions"]:
         rows = mounts_for(devices, part["number"])
@@ -378,6 +406,7 @@ def offline_action(domain, action):
                     or not state.get("save_pending") or state.get("save_complete")):
                 fail("an unrelated guarded COW action already holds the physical-disk lock")
             devices = part_devices(config)
+            verify_no_allowed_swap(devices)
             if any(mounts_for(devices, part["number"]) for part in config["partitions"]):
                 fail("configured partitions were mounted during an incomplete save; refusing to retry")
             verify_qemu_readonly(config["disk"])
@@ -424,6 +453,7 @@ def main():
         if not STATE.exists() or json.loads(STATE.read_text(encoding="utf-8")).get("domain") != domain:
             fail("start hook has no matching prepared COW state")
         devices = part_devices(config)
+        verify_no_allowed_swap(devices)
         verify_qemu_readonly(config["disk"])
         for part in config["partitions"]:
             if mounts_for(devices, part["number"]):

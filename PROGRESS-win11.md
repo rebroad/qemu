@@ -60,3 +60,21 @@ This file records dated implementation and host-state findings for the
 - Do not enable physical-disk commit or write to the physical disk until the
   outstanding dry-run, installed-binary, failure/retry, and isolation gates in
   `GOAL-win11.md` have been implemented and validated.
+
+### Latest runtime and isolation check
+
+- The user started `win11-phys` after the earlier shut-off snapshot. A fresh
+  read-only `virsh` check confirmed it is running, with no managed save. The
+  live QEMU process is `/usr/local/bin/qemu-system-x86_64`, using KVM and the
+  guarded COW overlay. Its raw `/dev/nvme0n1` node is opened read-only, and the
+  partition guard is configured for p1, p3, and p7. The VM still has the IDE
+  disk frontend, rtl8139 NIC, and QXL display; SPICE audio is configured.
+- A fresh mount-table check while the VM was running showed `/boot/efi` resolves
+  to the host root filesystem, not p1; p1, p3, and p7 were unmounted. p4 and
+  p6 are active swap, both outside the configured write allowlist.
+- The helper now enumerates active swap using this host's supported
+  `swapon --show=NAME` syntax and rejects swap whose backing device matches an
+  allowlisted partition. A read-only check passed for the live p3/p4 layout
+  and rejected p4 when deliberately included in the allowlist.
+- No VM interaction, overlay check, physical-disk write, or device
+  reconfiguration was performed while the VM was running.

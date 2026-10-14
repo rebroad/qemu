@@ -113,44 +113,23 @@ descendant and are not part of that commit. This is a coordinated block-graph
 operation, not generic cache draining. If the guest is stopped, the same
 selection can use a validated offline commit.
 
-### Explicit snapshot consolidation
+### Snapshot deletion and chain reduction
 
-Provide a dedicated **Consolidate snapshots** operation to reduce external
-backing-chain depth. Do not present this as ordinary snapshot deletion or use
-an ambiguous label such as “merge with previous/next.” Libvirt's existing
-snapshot deletion can merge the selected snapshot's changes into its children
-when it has children, which is one specific direction and can obscure which
-states survive.
+Keep the existing **Delete snapshot** action; do not rename it to “merge with
+previous” or “merge with next.” A snapshot is a named point in time, so Delete
+clearly describes removing that point from the history. Libvirt's existing
+delete behavior can merge the selected snapshot's changes into its children
+when it has children, which can also shorten their backing chains.
 
-The user must select the exact adjacent snapshot pair by displayed name and
-stable identity, then choose the merge direction/retained point. Before any
-write, show the named source and destination layers, the resulting backing
-graph, which guest-visible snapshot states remain available, which snapshot
-identities or branches are retired, and estimated space/performance effects.
-Require explicit confirmation. Preserve unrelated branches and never mutate a
-snapshot's guest-visible contents while leaving its old identity/name attached
-to the changed state.
-
-Support two clearly distinguished outcomes:
-
-1. **Coalesce the pair into one retained point.** The user chooses which
-   resulting guest-visible state is kept. Retire the other point explicitly,
-   and preserve/reconnect descendants only when their contents remain valid.
-   Explain that both original point-in-time states cannot remain distinct as
-   one external layer without retaining additional data or creating another
-   snapshot representation.
-2. **Shorten the chain while retaining both points.** Rebase/flatten the
-   selected newer state onto an earlier common ancestor, or convert the
-   selected history to an equivalent internal-snapshot representation, while
-   preserving every retained snapshot's exact contents and identity. Report
-   that materializing cumulative changes can use more disk space even as it
-   shortens read chains. Validate all resulting backing relationships and
-   snapshot metadata before removing any old layer.
-
-Do not start a consolidation whose selected direction cannot be implemented
-without changing the meaning of a retained snapshot. On failure, retain all
-source layers and metadata until the guest-visible states and block graph have
-been verified.
+Before confirmation, identify the exact snapshot by display name and stable
+identity, show which children and backing layers are affected, and explain
+which point-in-time state will no longer be available. State explicitly when
+the operation will merge the selected snapshot's changes into its children,
+what resulting disk states remain, and whether any branch or overlay data will
+be removed. Keep unrelated branches intact. The deletion implementation must
+retain its existing semantics unless a separately justified requirement calls
+for changing them; do not add a separate direction-ambiguous merge action just
+to expose the current delete behavior under another name.
 
 The design must make the chosen cache boundary and resulting history explicit:
 which sealed layers will become part of the physical ground, which active or

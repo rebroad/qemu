@@ -17,16 +17,41 @@ overlay assumptions, lose writes, or make rollback ambiguous.
 
 Treat the physical disk as the current ground state and each COW image as a
 versioned layer of block changes over its parent. Automatically seal the
-current layer as a snapshot after each clean guest shutdown; the next boot must
-continue in a new writable child layer. A crash or forced stop must not be
-reported as a clean-shutdown snapshot. A sealed layer can be selected as the
-save boundary while the VM runs only if QEMU atomically redirects subsequent
-guest writes to a descendant and the commit updates/reconnects the block graph
-so that descendant reads use the new ground plus its retained ancestors. The
-selected layer and its required ancestors are then applied in order; writes
-after the boundary stay in the descendant and are not part of that commit.
-This is a coordinated block-graph operation, not generic cache draining. If
-the guest is stopped, the same selection can use a validated offline commit.
+current layer as a snapshot only after a clean guest shutdown has completed and
+libvirt confirms the VM is fully shut off; the next boot must continue in a new
+writable child layer based on the snapshot from which that boot started. A
+crash, forced stop, or incomplete shutdown must not be reported as a
+clean-shutdown snapshot. Snapshot creation must be automatic and idempotent for
+each completed clean shutdown.
+
+Register each sealed disk layer as a managed libvirt domain snapshot, so
+Virt-manager displays the history through the same snapshot mechanism and UI
+used for other libvirt snapshots. Generate a unique, useful name automatically
+when sealing a layer, and let the user edit that display name in Virt-manager.
+Keep a stable internal identity and parent relationship independent of the
+editable name. The display name is snapshot metadata managed through libvirt;
+QEMU stores disk data and may store qcow2-internal snapshot names, but the
+Virt-manager snapshot tree must not depend on QEMU's internal snapshot-name
+table.
+
+A later snapshot or unsealed COW layer must retain the exact parent snapshot it
+was created from. For example, if A is sealed at shutdown, B is created as the
+next boot's writable child of A, and C is later created as a child of B, their
+lineage is ground → A → B → C. Committing A to the physical disk advances the
+ground to A's cumulative state; it must not alter B's or C's stored deltas or
+guest-visible contents. Update only the backing references and snapshot
+metadata needed to reconnect B (and its descendants) to the new ground. Keep
+divergent branches distinct and apply the existing explicit review/discard
+rules to any branch invalidated by advancing the ground.
+
+A sealed layer can be selected as the save boundary while the VM runs only if
+QEMU atomically redirects subsequent guest writes to a descendant and the
+commit updates/reconnects the block graph so that descendant reads use the new
+ground plus its retained ancestors. The selected layer and its required
+ancestors are then applied in order; writes after the boundary stay in the
+descendant and are not part of that commit. This is a coordinated block-graph
+operation, not generic cache draining. If the guest is stopped, the same
+selection can use a validated offline commit.
 
 The design must make the chosen cache boundary and resulting history explicit:
 which sealed layers will become part of the physical ground, which active or
@@ -210,6 +235,18 @@ If the existing license cannot cover the VM while preserving the existing `p3` i
 Compare the lightweight installation's boot time, responsiveness, and memory use with the existing Windows 11 VM under the same KVM-backed configuration.
 
 ## Host runtime files for the guarded-COW VM
+
+### Libvirt domain XML permissions
+
+Persistent domain XML files, including `/etc/libvirt/qemu/win11-phys.xml`,
+must remain owned by `root:libvirt` with mode `0640` after every libvirt or
+Virt-manager rewrite. Do not assume the containing directory's SGID bit or
+libvirt's umask controls this: libvirt may atomically replace the XML using
+explicit ownership and mode settings. Determine and implement the narrowest
+supported way to preserve the required owner, group, and mode, and verify it
+after both `virsh` and Virt-manager configuration updates. Any post-write
+permission repair must be scoped to the intended domain XML files and must not
+weaken access to other libvirt configuration.
 
 On the current host, keep these files for the `win11-phys` guarded-COW setup:
 

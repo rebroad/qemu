@@ -121,6 +121,17 @@ clearly describes removing that point from the history. Libvirt's existing
 delete behavior can merge the selected snapshot's changes into its children
 when it has children, which can also shorten their backing chains.
 
+Reuse the upstream deletion paths instead of adding a second generic delete or
+merge implementation. QEMU already exposes live deletion of a qcow2 internal
+snapshot through `blockdev-snapshot-delete-internal-sync`; this removes that
+internal snapshot entry and releases clusters no longer referenced, but does
+not merge an external overlay into another image. For external snapshots,
+libvirt's QEMU snapshot-delete path performs the required block-job/metadata
+work and merges the selected snapshot's changes into its children where
+supported. The guarded physical-disk save remains separate: it applies a
+reviewed snapshot boundary to the physical base under the partition guard and
+freshness checks, rather than merely deleting a snapshot from the history.
+
 Before confirmation, identify the exact snapshot by display name and stable
 identity, show which children and backing layers are affected, and explain
 which point-in-time state will no longer be available. State explicitly when

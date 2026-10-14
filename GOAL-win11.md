@@ -47,13 +47,24 @@ physical ground advances.
 
 The alternative is one qcow2 image containing multiple internal snapshots.
 QEMU stores a snapshot table and a separate L1 mapping for each internal
-snapshot; unchanged clusters can be shared inside the image. This avoids an
-external file per point and avoids a chain of overlay files, but all history is
-coupled to that image. QEMU's internal snapshot table does not itself encode
-the libvirt parent/branch tree, and selecting an older internal point as the
-new physical ground while preserving newer snapshots and active writes still
-requires a carefully coordinated export/commit/reconnect operation. It does
-not remove the guarded-commit or freshness requirements.
+snapshot. “Shared clusters” means that if a data cluster is already allocated
+in the qcow2 image, several snapshot mappings can refer to that one stored
+cluster until a write needs a different version. If a sector is unallocated
+and reads from the backing device, it has no data cluster in the qcow2 file to
+share; the snapshot still needs mapping and snapshot-table metadata. The
+external-overlay design behaves similarly for unchanged data by leaving it
+unallocated in a child and reading it from its parent. Neither design normally
+copies unchanged guest data into every snapshot. Internal snapshots therefore
+do not inherently use more or less payload space; actual use depends on guest
+writes, qcow2 cluster allocation, backing data, and metadata overhead, and must
+be measured for the workload.
+
+Internal snapshots avoid an external file per point and a chain of overlay
+files, but all history is coupled to that image. QEMU's internal snapshot table
+does not itself encode the libvirt parent/branch tree, and selecting an older
+internal point as the new physical ground while preserving newer snapshots and
+active writes still requires a carefully coordinated export/commit/reconnect
+operation. It does not remove the guarded-commit or freshness requirements.
 
 Keep the per-layer external-overlay design as the default for the guarded
 physical-disk workflow because its backing relationships make the proposed
@@ -101,6 +112,45 @@ ancestors are then applied in order; writes after the boundary stay in the
 descendant and are not part of that commit. This is a coordinated block-graph
 operation, not generic cache draining. If the guest is stopped, the same
 selection can use a validated offline commit.
+
+### Explicit snapshot consolidation
+
+Provide a dedicated **Consolidate snapshots** operation to reduce external
+backing-chain depth. Do not present this as ordinary snapshot deletion or use
+an ambiguous label such as “merge with previous/next.” Libvirt's existing
+snapshot deletion can merge the selected snapshot's changes into its children
+when it has children, which is one specific direction and can obscure which
+states survive.
+
+The user must select the exact adjacent snapshot pair by displayed name and
+stable identity, then choose the merge direction/retained point. Before any
+write, show the named source and destination layers, the resulting backing
+graph, which guest-visible snapshot states remain available, which snapshot
+identities or branches are retired, and estimated space/performance effects.
+Require explicit confirmation. Preserve unrelated branches and never mutate a
+snapshot's guest-visible contents while leaving its old identity/name attached
+to the changed state.
+
+Support two clearly distinguished outcomes:
+
+1. **Coalesce the pair into one retained point.** The user chooses which
+   resulting guest-visible state is kept. Retire the other point explicitly,
+   and preserve/reconnect descendants only when their contents remain valid.
+   Explain that both original point-in-time states cannot remain distinct as
+   one external layer without retaining additional data or creating another
+   snapshot representation.
+2. **Shorten the chain while retaining both points.** Rebase/flatten the
+   selected newer state onto an earlier common ancestor, or convert the
+   selected history to an equivalent internal-snapshot representation, while
+   preserving every retained snapshot's exact contents and identity. Report
+   that materializing cumulative changes can use more disk space even as it
+   shortens read chains. Validate all resulting backing relationships and
+   snapshot metadata before removing any old layer.
+
+Do not start a consolidation whose selected direction cannot be implemented
+without changing the meaning of a retained snapshot. On failure, retain all
+source layers and metadata until the guest-visible states and block graph have
+been verified.
 
 The design must make the chosen cache boundary and resulting history explicit:
 which sealed layers will become part of the physical ground, which active or

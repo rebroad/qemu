@@ -36,13 +36,45 @@ have matching entries in a qcow2 internal-snapshot name table, and the
 Virt-manager snapshot tree must not depend on that table. Do not create
 redundant internal snapshots merely to mirror the editable display names.
 
-If a future implementation also uses QEMU internal snapshots for a point, keep
-their user-visible names consistent with the corresponding libvirt snapshot
-name. QEMU's current internal-snapshot interfaces provide create and delete
-operations, but no rename operation. Do not imitate a rename by deleting and
-recreating an internal snapshot, since that would capture a different disk
-state. Either add and validate a lossless QEMU rename operation before exposing
-such paired snapshots, or do not use internal snapshots for this layer design.
+### External overlay files versus internal snapshots
+
+The current design uses one external qcow2 overlay file per sealed or active
+COW layer, with each overlay backed by its parent layer. This makes each
+delta's dependency explicit and lets libvirt manage a tree of disk snapshots.
+The costs are more files and metadata to manage, backing-chain depth on reads,
+and the need to preserve or deliberately reconnect every descendant when the
+physical ground advances.
+
+The alternative is one qcow2 image containing multiple internal snapshots.
+QEMU stores a snapshot table and a separate L1 mapping for each internal
+snapshot; unchanged clusters can be shared inside the image. This avoids an
+external file per point and avoids a chain of overlay files, but all history is
+coupled to that image. QEMU's internal snapshot table does not itself encode
+the libvirt parent/branch tree, and selecting an older internal point as the
+new physical ground while preserving newer snapshots and active writes still
+requires a carefully coordinated export/commit/reconnect operation. It does
+not remove the guarded-commit or freshness requirements.
+
+Keep the per-layer external-overlay design as the default for the guarded
+physical-disk workflow because its backing relationships make the proposed
+lineage and descendant-preservation rules explicit. Evaluate the single-file
+internal-snapshot design as an alternative, but do not switch to it solely to
+reduce file count; validate snapshot branching, disk-full behavior, recovery,
+and committing a selected historical point before changing the design.
+
+Add a lossless rename operation to QEMU's internal-snapshot interface so
+libvirt can keep an internal snapshot's QEMU name synchronized when its
+managed snapshot is renamed. Expose it over QMP for live libvirt use and via
+`qemu-img` for offline maintenance. Identify the entry by stable snapshot ID,
+not only its mutable name; check name length and collisions; preserve the ID,
+disk mapping, VM-state data, and snapshot contents; and update the qcow2
+snapshot table safely. Add tests for successful rename, collision and invalid
+name failures, persistence after reopen, and unchanged restore/data behavior.
+Libvirt must coordinate the QEMU rename with its own snapshot metadata update
+and report or recover cleanly if either side fails. Never implement rename by
+deleting and recreating the snapshot, since that would capture a different
+state. External overlay layers do not get duplicate QEMU-internal entries just
+to mirror their libvirt display names.
 
 A later snapshot or unsealed COW layer must retain the exact parent snapshot it
 was created from. For example, if A is sealed at shutdown, B is created as the

@@ -34,6 +34,18 @@ view passes available non-repairing filesystem checks.
   `chkdsk`. A successful read-only mount is not, by itself, a complete NTFS
   integrity check.
 
+## Tooling changes are in scope
+
+The work may modify QEMU and/or Virt-manager if needed to provide a reliable,
+repeatable way to inspect the physical and composed p3 views through the
+configured guarded block graph. Do not stop merely because an existing command
+or UI does not expose the required view. Keep changes narrow, preserve the
+partition guard and disk-identity checks, and enforce read-only access at the
+overlay, backing-device, and exported-device layers. Never weaken or bypass the
+write guard to make inspection easier. Validate any new path against a
+disposable disk image before using it on the physical disk, and document the
+source changes, tests, commands, and remaining limitations in the report.
+
 ## Measurements and checks
 
 1. Record the physical disk identity, p3 GPT identity and boundaries, overlay

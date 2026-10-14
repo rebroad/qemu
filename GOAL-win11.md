@@ -29,10 +29,20 @@ Virt-manager displays the history through the same snapshot mechanism and UI
 used for other libvirt snapshots. Generate a unique, useful name automatically
 when sealing a layer, and let the user edit that display name in Virt-manager.
 Keep a stable internal identity and parent relationship independent of the
-editable name. The display name is snapshot metadata managed through libvirt;
-QEMU stores disk data and may store qcow2-internal snapshot names, but the
-Virt-manager snapshot tree must not depend on QEMU's internal snapshot-name
-table.
+editable name. The display name is snapshot metadata managed through libvirt.
+These layered COW snapshots are external snapshots: their disk data lives in
+separate qcow2 images linked by backing relationships. They do not automatically
+have matching entries in a qcow2 internal-snapshot name table, and the
+Virt-manager snapshot tree must not depend on that table. Do not create
+redundant internal snapshots merely to mirror the editable display names.
+
+If a future implementation also uses QEMU internal snapshots for a point, keep
+their user-visible names consistent with the corresponding libvirt snapshot
+name. QEMU's current internal-snapshot interfaces provide create and delete
+operations, but no rename operation. Do not imitate a rename by deleting and
+recreating an internal snapshot, since that would capture a different disk
+state. Either add and validate a lossless QEMU rename operation before exposing
+such paired snapshots, or do not use internal snapshots for this layer design.
 
 A later snapshot or unsealed COW layer must retain the exact parent snapshot it
 was created from. For example, if A is sealed at shutdown, B is created as the
@@ -43,6 +53,13 @@ guest-visible contents. Update only the backing references and snapshot
 metadata needed to reconnect B (and its descendants) to the new ground. Keep
 divergent branches distinct and apply the existing explicit review/discard
 rules to any branch invalidated by advancing the ground.
+
+This ancestry model follows the normal external-snapshot/backing-chain model:
+each layer records changes relative to its parent, while libvirt records the
+managed snapshot tree. The custom requirements are automatic clean-shutdown
+sealing, the guarded physical-partition backing device, and safely advancing
+the physical ground while retaining valid descendants. They are not properties
+provided automatically by an ordinary snapshot UI.
 
 A sealed layer can be selected as the save boundary while the VM runs only if
 QEMU atomically redirects subsequent guest writes to a descendant and the

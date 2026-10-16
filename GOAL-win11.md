@@ -190,8 +190,14 @@ Virt-manager must provide a two-step save flow:
    physical disk. It verifies the selected snapshot and full backing chain,
    disk identity, configured GPT allowlist, host mount/swap isolation, VM/QEMU
    state, and whether the selected point can use live commit or requires a
-   clean shutdown. The review must state clearly that it did not write to the
-   physical disk and does not by itself prove a real commit will succeed.
+   clean shutdown. It must state clearly that it did not write to the physical
+   disk and does not by itself prove a real commit will succeed. Before enabling
+   the separate commit confirmation, ask the user to confirm that they reviewed
+   the file-and-size differences for every affected partition, that the
+   read-only base and overlay comparisons completed without mount, scan, or
+   read errors, and that Windows shut down cleanly and this is the intended
+   overlay state. These acknowledgements supplement, and do not replace, the
+   machine-checked safety gates or disposable-disk validation.
 2. **Commit COW changes** is a separate, explicit action enabled only when the
    review passes. Recheck the VM, QEMU block graph, disk identity, overlay
    chain, GPT layout, and mount state immediately before committing. For a live
@@ -278,18 +284,6 @@ actual changed-sector map; do not hard-code a 512-byte sector assumption. Test
 each allowed partition. Measure the overlay performance and space cost of the
 selected geometry under the Windows workload before choosing it for normal VM
 use.
-
-Show a graphical disk map in the review: include every GPT partition, GPT and
-other out-of-partition areas, label each partition and its size/LBA range, and
-mark the configured writable partitions separately from off-limits regions.
-Use a proportional disk/LBA scale, a clear legend for allowed, off-limits, and
-planned-write markings, and visually distinguish GPT metadata and unallocated
-or otherwise unpartitioned space. Overlay the exact planned write extents on
-the map, with a readable text list of their LBA ranges for small or dense areas
-that cannot be distinguished at the map's scale. Make it clear that configured
-partitions are merely eligible for writes; only the highlighted extents are
-planned to change in this save. The map and report must be generated from live
-disk/overlay state, not hard-coded partition numbers or a prior review.
 
 Before enabling the real commit action, validate the exact installed QEMU and
 helper versions end-to-end on disposable GPT disk images. Exercise a layered

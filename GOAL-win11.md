@@ -210,6 +210,32 @@ any cluster-aligned/padded writes, and be checked against the partition guard.
 Any planned extent outside the configured partitions must fail the review and
 block commit.
 
+Show exact planned sector ranges for every affected GPT partition, both as
+partition-relative sectors and absolute disk LBAs. Merge only adjacent ranges
+with the same operation, report the logical sector size, operation, extent
+count, and total planned sectors, and identify unaffected partitions as having
+no planned writes. The report tool must run the guarded QEMU commit dry-run and
+must not infer commit targets from qcow2 allocation maps or from sectors whose
+current contents differ from the base. Recompute the plan for each review; a
+previous report is not valid after the overlay or backing disk changes. This
+plan identifies future commit targets, not the historical sequence or source
+of guest writes.
+
+The guarded block graph must select QEMU's block-device backend for a physical
+whole-disk device and retain the regular-file backend for disposable image
+fixtures. The dry-run must deny write permission to the backing node while
+collecting the exact operations and ranges that the commit traversal issues.
+
+The approved review path is incomplete until it also validates the overlay's
+owner and restrictive mode, confirms that the installed guarded helper matches
+the reviewed source, and has the required stopped-VM isolation/lifecycle state.
+For the current helper policy, the overlay must be owned by the configured
+libvirt QEMU user and have mode `0600`; a mismatch must fail review with a clear
+diagnostic. Fix and verify these review prerequisites before considering any
+real physical save. Keep physical commit disabled until the exact installed
+QEMU and helper have passed disposable-disk success, failure, and retry
+validation.
+
 ### Backing-disk freshness and conflict checks
 
 Capture a backing-device baseline when each new COW root is created, then check

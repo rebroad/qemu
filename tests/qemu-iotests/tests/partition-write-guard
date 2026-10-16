@@ -716,6 +716,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                            for part in fixture_parts
                            if part['number'] in (1, 3, 7)],
         }
+        # Disposable regular-file backing images use QEMU's file backend;
+        # physical block devices use host_device in the guarded helper.
+        self.assertIn('file.driver=file', helper.guard_options(config))
         raw, extents, _inventory = helper.make_write_plan(config)
         self.assertTrue(raw)
         allowed_ranges = [(first * sector_size, (last + 1) * sector_size)

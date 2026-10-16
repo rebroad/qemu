@@ -208,7 +208,9 @@ qcow2 allocation map alone as proof of what will be written. Planned extents
 must come from the same commit traversal used by the real operation, include
 any cluster-aligned/padded writes, and be checked against the partition guard.
 Any planned extent outside the configured partitions must fail the review and
-block commit.
+block commit. Implement the human-readable sector report as
+`scripts/qemu-cow-written-partitions DOMAIN`; it is a read-only planning tool,
+not a substitute for the approved save-review action.
 
 Show exact planned sector ranges for every affected GPT partition, both as
 partition-relative sectors and absolute disk LBAs. Merge only adjacent ranges

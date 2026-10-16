@@ -294,7 +294,12 @@ def validate_overlay(config):
 
 
 def guard_options(config, plan_path=None):
-    options = ["driver=partition-write-guard", "file.driver=file",
+    # Raw backing devices need QEMU's host_device backend. Keep file for the
+    # regular-file disk images used by disposable tests and local fixtures.
+    backing_driver = ("host_device" if stat.S_ISBLK(os.stat(config["disk"]).st_mode)
+                      else "file")
+    options = ["driver=partition-write-guard",
+               f"file.driver={backing_driver}",
                f"file.filename={config['disk']}"]
     options.extend(f"partitions.{index}={part['number']}"
                    for index, part in enumerate(config["partitions"]))

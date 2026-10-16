@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Report GPT partitions whose current contents come from a guarded qcow2 COW."""
+"""Report exact partition-sector targets from a guarded COW commit dry-run."""
 
 import argparse
 import importlib.machinery
@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
+import stat
 import subprocess
 import sys
 
@@ -20,15 +22,6 @@ def load_guard_helper():
     return module
 
 
-def command(*args):
-    result = subprocess.run(args, check=False, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(detail or f"command failed with status {result.returncode}: {args[0]}")
-    return result.stdout
-
-
 def ensure_overlay_closed(path):
     result = subprocess.run(["fuser", "-s", path], check=False)
     if result.returncode == 0:
@@ -37,98 +30,81 @@ def ensure_overlay_closed(path):
         raise RuntimeError(f"could not determine whether the overlay is in use: {path}")
 
 
-def map_options(helper, config):
-    # Every node is opened read-only. Keep the configured partition guard in
-    # the graph even though qemu-img map itself does not issue writes.
-    options = helper.overlay_options(config).split(",")
-    options.extend(("file.read-only=on", "read-only=on"))
-    guard = helper.guard_options(config).split(",")
-    guard[1] = "file.driver=host_device"
-    options.extend("backing." + option for option in guard)
-    options.extend(("backing.file.read-only=on", "backing.read-only=on"))
-    return ",".join(options)
-
-
-def map_allocations(helper, config, inventory):
-    info = json.loads(command(helper.QEMU_IMG, "info", "--output=json",
-                              config["overlay"]))
+def check_overlay(helper, config, inventory):
+    info = json.loads(helper.run(
+        helper.QEMU_IMG, "info", "--output=json", config["overlay"]).stdout)
+    helper.run(helper.QEMU_IMG, "check", "-q", config["overlay"])
     if (info.get("format") != "qcow2"
             or info.get("backing-filename") != config["disk"]
             or info.get("backing-filename-format") != "raw"
             or info.get("virtual-size") != inventory["size_bytes"]):
         raise RuntimeError("overlay format, backing device, or virtual size does not match the VM configuration")
-
-    output = command(helper.QEMU_IMG, "map", "--output=json", "--image-opts",
-                     map_options(helper, config))
-    rows = json.loads(output)
-    ranges = []
-    disk_size = inventory["size_bytes"]
-    for row in rows:
-        start = int(row["start"])
-        length = int(row["length"])
-        end = start + length
-        if start < 0 or length <= 0 or end > disk_size:
-            raise RuntimeError("qemu-img map returned an invalid range")
-        # map depth zero means this range is currently resolved by the qcow2
-        # overlay. This includes explicit zero clusters, not just nonzero data.
-        if int(row["depth"]) == 0:
-            ranges.append((start, end))
-    ranges.sort()
-    for previous, current in zip(ranges, ranges[1:]):
-        if current[0] < previous[1]:
-            raise RuntimeError("qemu-img map returned overlapping overlay ranges")
-    return ranges
+    st = os.stat(config["overlay"])
+    expected_uid = pwd.getpwnam(helper.HELPER_USER).pw_uid
+    permissions_ok = (st.st_uid == expected_uid
+                      and stat.S_IMODE(st.st_mode) == 0o600)
+    return st, expected_uid, permissions_ok
 
 
-def partition_totals(partitions, ranges):
-    result = {part["number"]: {"bytes": 0, "ranges": 0} for part in partitions}
-    outside_partition_bytes = 0
-    total_overlay_bytes = 0
-    for start, end in ranges:
-        total_overlay_bytes += end - start
-        covered = 0
-        for part in partitions:
-            p_start = part["start_bytes"]
-            p_end = p_start + part["size_bytes"]
-            overlap = max(0, min(end, p_end) - max(start, p_start))
-            if overlap:
-                result[part["number"]]["bytes"] += overlap
-                result[part["number"]]["ranges"] += 1
-                covered += overlap
-        outside_partition_bytes += end - start - covered
-    return result, total_overlay_bytes, outside_partition_bytes
+def partition_write_plan(extents, inventory, allowed_numbers):
+    sector_size = inventory["sector_size"]
+    partitions = inventory["partitions"]
+    by_partition = {}
+    operations = {}
+    for extent in extents:
+        start = extent["offset"]
+        end = start + extent["length"]
+        part = next((candidate for candidate in partitions
+                     if start >= candidate["start_bytes"]
+                     and end <= candidate["start_bytes"] + candidate["size_bytes"]),
+                    None)
+        if part is None:
+            raise RuntimeError("dry-run includes a write outside all GPT partitions")
+        number = part["number"]
+        if number not in allowed_numbers:
+            raise RuntimeError(f"dry-run includes a write to off-limits GPT partition {number}")
+        if start % sector_size or end % sector_size:
+            raise RuntimeError("dry-run returned a write not aligned to logical sectors")
+        first_disk = start // sector_size
+        last_disk_exclusive = end // sector_size
+        first_partition = first_disk - part["start_bytes"] // sector_size
+        last_partition_exclusive = last_disk_exclusive - part["start_bytes"] // sector_size
+        operation = extent["operation"]
+        by_partition.setdefault(number, []).append(
+            (first_partition, last_partition_exclusive,
+             first_disk, last_disk_exclusive, operation))
+        counts = operations.setdefault(number, {})
+        counts[operation] = counts.get(operation, 0) + 1
+
+    grouped = {}
+    for number, rows in by_partition.items():
+        rows.sort()
+        merged = []
+        for row in rows:
+            if (merged and merged[-1][1] == row[0]
+                    and merged[-1][4] == row[4]):
+                previous = merged[-1]
+                merged[-1] = (previous[0], row[1], previous[2], row[3], row[4])
+            else:
+                merged.append(row)
+        grouped[number] = merged
+    return grouped, operations
 
 
-def print_partition_ranges(part, ranges, sector_size):
-    p_start = part["start_bytes"]
-    p_end = p_start + part["size_bytes"]
-    print(f"\np{part['number']} current overlay-sourced ranges (inclusive LBAs):")
-    print("Disk LBA range                 Partition-relative LBA range   Bytes")
-    found = False
-    for start, end in ranges:
-        left, right = max(start, p_start), min(end, p_end)
-        if left >= right:
-            continue
-        if left % sector_size or right % sector_size:
-            raise RuntimeError("overlay range is not aligned to the disk's logical sectors")
-        found = True
-        disk_first, disk_last = left // sector_size, right // sector_size - 1
-        part_first = (left - p_start) // sector_size
-        part_last = (right - p_start) // sector_size - 1
-        print(f"{disk_first}..{disk_last:<21} {part_first}..{part_last:<25} {right-left:,}")
-    if not found:
-        print("(none)")
+def format_lba(first, end_exclusive):
+    return f"{first:,}–{end_exclusive - 1:,}"
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Show which GPT partitions currently have data supplied by a VM's guarded qcow2 overlay."
-    )
+        description="Show exact GPT sector ranges targeted by the guarded COW commit dry-run.")
     parser.add_argument("domain", help="libvirt domain name")
     parser.add_argument("--qemu-img", default=None,
-                        help="custom qemu-img executable (default: the guarded-COW helper's configured binary)")
-    parser.add_argument("--ranges", type=int, metavar="PARTITION",
-                        help="print exact overlay-sourced sector ranges for this GPT partition")
+                        help="custom qemu-img executable (default: helper-configured binary)")
+    parser.add_argument("--partition", type=int, metavar="NUMBER",
+                        help="show ranges for one GPT partition; default: all affected partitions")
+    parser.add_argument("--summary-only", action="store_true",
+                        help="omit the detailed sector-range lists")
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -143,44 +119,57 @@ def main():
         config = helper.parse_config(args.domain)
         ensure_overlay_closed(config["overlay"])
         inventory = helper.disk_inventory(config)
-        print(f"Domain: {args.domain} (shut off)")
-        print(f"Disk: {config['disk']} ({inventory['size_bytes']:,} bytes; GPT {inventory['identity']['ptuuid']})")
-        print(f"Overlay: {config['overlay']}")
-        allowed = ", ".join(str(p["number"]) for p in config["partitions"])
-        print(f"Partitions allowed by VM guard: {allowed}")
-        print("Mapping overlay allocations read-only...", file=sys.stderr)
-        ranges = map_allocations(helper, config, inventory)
+        overlay_stat, expected_uid, permissions_ok = check_overlay(
+            helper, config, inventory)
+        print("Running guarded QEMU commit dry-run; physical backing writes are disabled...",
+              file=sys.stderr)
+        _raw_plan, extents, planned_inventory = helper.make_write_plan(config)
+        if planned_inventory != inventory:
+            raise RuntimeError("disk identity or GPT layout changed during dry-run")
 
-    totals, overlay_bytes, outside_bytes = partition_totals(
-        inventory["partitions"], ranges)
-    if args.ranges is not None:
-        selected = next((part for part in inventory["partitions"]
-                         if part["number"] == args.ranges), None)
-        if selected is None:
-            raise RuntimeError(f"GPT partition {args.ranges} does not exist")
-        print_partition_ranges(selected, ranges, inventory["sector_size"])
     allowed_numbers = {part["number"] for part in config["partitions"]}
-    print("\nPartition  Guard  Overlay bytes  Ranges  GPT partition name")
-    print("---------  -----  -------------  ------  ------------------")
-    unexpected = False
+    grouped, operations = partition_write_plan(
+        extents, inventory, allowed_numbers)
+    if args.partition is not None and args.partition not in {
+            part["number"] for part in inventory["partitions"]}:
+        raise RuntimeError(f"GPT partition {args.partition} does not exist")
+
+    print(f"Domain: {args.domain} (shut off)")
+    print(f"Disk: {config['disk']} ({inventory['size_bytes']:,} bytes; GPT {inventory['identity']['ptuuid']})")
+    print(f"Overlay: {config['overlay']}")
+    print(f"Overlay permissions: uid={overlay_stat.st_uid}, mode={stat.S_IMODE(overlay_stat.st_mode):04o}; "
+          f"review requires uid={expected_uid}, mode=0600 — "
+          f"{'pass' if permissions_ok else 'FAIL'}")
+    print("Dry-run only: no physical-disk writes were issued.")
+    print("These are commit targets for the current overlay, not a historical guest-write log.")
+    print(f"Planned QEMU write extents: {len(extents):,}")
+
+    selected_numbers = ([args.partition] if args.partition is not None
+                        else sorted(grouped))
+    print("\nAffected partitions:")
+    print("Partition  Planned sectors  Raw extents  GPT partition name")
+    print("---------  ---------------  -----------  ------------------")
     for part in inventory["partitions"]:
         number = part["number"]
-        amount = totals[number]["bytes"]
-        guard = "write" if number in allowed_numbers else "no"
+        if number not in selected_numbers:
+            continue
+        sectors = sum(end - start for start, end, *_ in grouped.get(number, []))
+        raw_count = sum(operations.get(number, {}).values())
         label = part.get("name") or "—"
-        print(f"{number:>9}  {guard:>5}  {amount:>13,}  {totals[number]['ranges']:>6}  {label}")
-        if amount and number not in allowed_numbers:
-            unexpected = True
+        print(f"{number:>9}  {sectors:>15,}  {raw_count:>11,}  {label}")
 
-    print(f"\nOverlay-provided bytes across disk: {overlay_bytes:,}")
-    print(f"Overlay-provided bytes outside GPT partitions: {outside_bytes:,}")
-    if outside_bytes:
-        unexpected = True
-    if unexpected:
-        print("WARNING: overlay data was found outside the VM's configured writable partitions.",
-              file=sys.stderr)
-        return 2
-    print("Note: this reports current overlay allocations, not a historical write log.")
+    if not args.summary_only:
+        for part in inventory["partitions"]:
+            number = part["number"]
+            if number not in grouped or number not in selected_numbers:
+                continue
+            print(f"\np{number} planned commit ranges (inclusive LBAs; {inventory['sector_size']}-byte sectors):")
+            print("Partition-relative sectors   Physical-disk LBAs          Operation")
+            for first, end, disk_first, disk_end, operation in grouped[number]:
+                print(f"{format_lba(first, end):<28} {format_lba(disk_first, disk_end):<27} {operation}")
+
+    print("\nA range is included in the plan only when QEMU's commit traversal sends it to the guarded backing node.")
+    print("This report is not save approval; use the guarded review flow before any physical commit.")
     return 0
 
 

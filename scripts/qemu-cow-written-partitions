@@ -99,6 +99,27 @@ def partition_totals(partitions, ranges):
     return result, total_overlay_bytes, outside_partition_bytes
 
 
+def print_partition_ranges(part, ranges, sector_size):
+    p_start = part["start_bytes"]
+    p_end = p_start + part["size_bytes"]
+    print(f"\np{part['number']} current overlay-sourced ranges (inclusive LBAs):")
+    print("Disk LBA range                 Partition-relative LBA range   Bytes")
+    found = False
+    for start, end in ranges:
+        left, right = max(start, p_start), min(end, p_end)
+        if left >= right:
+            continue
+        if left % sector_size or right % sector_size:
+            raise RuntimeError("overlay range is not aligned to the disk's logical sectors")
+        found = True
+        disk_first, disk_last = left // sector_size, right // sector_size - 1
+        part_first = (left - p_start) // sector_size
+        part_last = (right - p_start) // sector_size - 1
+        print(f"{disk_first}..{disk_last:<21} {part_first}..{part_last:<25} {right-left:,}")
+    if not found:
+        print("(none)")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Show which GPT partitions currently have data supplied by a VM's guarded qcow2 overlay."
@@ -106,6 +127,8 @@ def main():
     parser.add_argument("domain", help="libvirt domain name")
     parser.add_argument("--qemu-img", default=None,
                         help="custom qemu-img executable (default: the guarded-COW helper's configured binary)")
+    parser.add_argument("--ranges", type=int, metavar="PARTITION",
+                        help="print exact overlay-sourced sector ranges for this GPT partition")
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -130,6 +153,12 @@ def main():
 
     totals, overlay_bytes, outside_bytes = partition_totals(
         inventory["partitions"], ranges)
+    if args.ranges is not None:
+        selected = next((part for part in inventory["partitions"]
+                         if part["number"] == args.ranges), None)
+        if selected is None:
+            raise RuntimeError(f"GPT partition {args.ranges} does not exist")
+        print_partition_ranges(selected, ranges, inventory["sector_size"])
     allowed_numbers = {part["number"] for part in config["partitions"]}
     print("\nPartition  Guard  Overlay bytes  Ranges  GPT partition name")
     print("---------  -----  -------------  ------  ------------------")

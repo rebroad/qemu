@@ -9,3 +9,7 @@ Never wrap a run using a persistent qcow2 disk in a hard timeout. A timeout may 
 Avoid taking focus from or injecting keyboard and mouse events into the host desktop while the user may be working. Prefer control paths that target the guest directly, such as SSH, the QEMU guest agent, QMP/HMP monitor input, or a guest remote-desktop interface. Do not use host-level automation such as `xdotool` for guest interaction when a direct guest-control path is available.  If host input automation is unavoidable, first confirm the target window and current focus, keep the action narrow, and restore the user's prior desktop state.
 
 Anything requiring network (e.g. the `virsh` command) will require an escalated shell to function.
+
+# Testing / building / temporary files
+
+Ensure testing is performed in the build sibling, ideally in a directory that is git-ignored (in the source tree)

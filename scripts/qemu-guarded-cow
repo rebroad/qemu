@@ -311,7 +311,7 @@ def overlay_options(config):
 def disk_inventory(config):
     try:
         tree = json.loads(run(
-            "lsblk", "--json", "--bytes", "--paths", "--output",
+            "lsblk", "--json", "--tree", "--bytes", "--paths", "--output",
             "PATH,TYPE,SIZE,LOG-SEC,PHY-SEC,MODEL,SERIAL,WWN,PTTYPE,PTUUID,PARTN,PARTUUID,PARTTYPE",
             config["disk"]).stdout)["blockdevices"]
     except Exception as exc:

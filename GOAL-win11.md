@@ -244,6 +244,47 @@ real physical save. Keep physical commit disabled until the exact installed
 QEMU and helper have passed disposable-disk success, failure, and retry
 validation.
 
+The command-line guarded commit must support an opt-in `--progress` flag. It
+should show phase messages while revalidating the reviewed plan, a live
+percentage during QEMU's physical merge, and a completion message only after
+the replacement overlay and host-state restoration succeed. The default CLI
+and Virt-manager flows remain quiet/machine-readable as they are today. The
+percentage covers QEMU's merge job; hashing and other safety checks may take
+time and should be identified as phases rather than presented as measured
+percentages.
+
+### Interrupted physical commits and power loss
+
+A physical commit is not an atomic disk transaction. If QEMU is terminated or
+the host loses power after writes begin, the raw backing disk may contain only
+part of the reviewed changes. The guarded path must retain the qcow2 overlay
+until QEMU reports success; QEMU's `-d` option skips emptying the overlay, and
+the helper replaces it only after the merge returns successfully. Keep the
+overlay and its baseline intact after any interruption. Do not boot or mount
+the raw partitions read/write, discard the overlay, or start Windows natively
+until recovery has reconciled the partial merge.
+
+The current isolation/review records live under `/run` and therefore do not
+survive a reboot. This is not power-loss recovery: after a crash the physical
+disk may be partially updated while the host no longer has the save-pending
+record that prevents mounts or identifies a safe retry. Before treating the
+workflow as power-cut-safe, persist a durable, fsynced commit journal containing
+the physical disk identity, overlay and baseline identities, reviewed plan
+fingerprint, and commit phase. Add an early-boot fail-closed guard that prevents
+the affected partitions from being mounted writable or used for native boot
+until that journal is reconciled. Make resume/retry idempotent and retain the
+overlay until the new base and replacement overlay are verified. Clear the
+journal only after durable completion and safe mount-state handling.
+
+Validate interruption recovery on disposable disks by terminating the commit
+at several points, including during writes and between merge completion and
+overlay replacement, then simulate reboot with volatile `/run` state removed.
+Verify that the overlay remains readable, the base is recognized as partially
+updated, startup blocks unsafe access, and recovery either safely resumes or
+requires explicit manual reconciliation. Include abrupt power-loss simulation
+where the test environment supports it. A successful ordinary failure/retry
+test does not establish power-loss safety.
+
 ### Backing-disk freshness and conflict checks
 
 Capture a backing-device baseline when each new COW root is created, then check

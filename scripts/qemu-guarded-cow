@@ -938,12 +938,53 @@ def review_action(domain):
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-    print(json.dumps(report, separators=(",", ":")))
+    if sys.stdout.isatty():
+        # Keep an interactive terminal readable while retaining the complete
+        # extent-by-extent report for inspection. Virt-manager captures stdout
+        # and continues to receive the machine-readable JSON below.
+        report_name = ("qemu-guarded-cow-review-" +
+                       hashlib.sha256(domain.encode("utf-8")).hexdigest()[:12] +
+                       "-" + token[:8] + ".json")
+        report_path = Path("/var/tmp") / report_name
+        report_fd = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                            getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(report_fd, "w", encoding="utf-8") as stream:
+            json.dump(report, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        planned_bytes = sum(extent["length"] for extent in extents)
+        bytes_by_partition = {}
+        for extent in extents:
+            end = extent["offset"] + extent["length"]
+            for part in inventory["partitions"]:
+                start = part["start_bytes"]
+                part_end = start + part["size_bytes"]
+                if extent["offset"] >= start and end <= part_end:
+                    number = part["number"]
+                    bytes_by_partition[number] = (
+                        bytes_by_partition.get(number, 0) + extent["length"])
+                    break
+        print("COW save review complete; no physical-disk writes were made.")
+        print(f"VM: {domain}; commit enabled: "
+              f"{'yes' if report['commit_enabled'] else 'no'}")
+        print(f"Plan: {len(extents)} extents, {planned_bytes} bytes total")
+        for number, byte_count in sorted(bytes_by_partition.items()):
+            print(f"  p{number}: {byte_count} bytes")
+        print(f"Full report: {report_path} (root-readable; use sudo to inspect)")
+        print(f"Review ID: {token}")
+        print("Commit only after reviewing the full report; this ID expires in one hour.")
+    else:
+        print(json.dumps(report, separators=(",", ":")))
 
 
-def commit_review(domain, token):
+def commit_review(domain, token, progress=False):
     if not PHYSICAL_COMMIT_ENABLED:
         fail("physical COW commit is disabled until the exact installed QEMU and helper pass disposable-disk success, failure, and retry validation")
+    if progress:
+        print("Guarded COW save: rechecking the reviewed disk, overlay, and write plan; no writes yet.",
+              file=sys.stderr, flush=True)
     if not re.fullmatch(r"[A-Za-z0-9_-]{40,60}", token):
         fail("invalid or missing review token")
     review_path = REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
@@ -955,6 +996,9 @@ def commit_review(domain, token):
     if (previous.get("review_id") != token or previous.get("domain") != domain
             or previous.get("expires_at", 0) < int(time.time())):
         fail("save review expired or belongs to another VM; review again")
+    if progress:
+        print("Guarded COW save: checking the reviewed state; physical disk unchanged.",
+              file=sys.stderr, flush=True)
     assert_vm_off(domain)
     config = parse_config(domain)
     validate_overlay(config)
@@ -1007,6 +1051,9 @@ def commit_review(domain, token):
         review_path.unlink(missing_ok=True)
         fail(f"disk, GPT, overlay, host isolation, or planned extents changed after review ({changed}); review again")
 
+    if progress:
+        print("Guarded COW save: repeating safety checks immediately before commit.",
+              file=sys.stderr, flush=True)
     assert_vm_off(domain)
     config_now = parse_config(domain)
     if (config_now["disk"] != config["disk"]
@@ -1049,7 +1096,7 @@ def commit_review(domain, token):
     state["save_retry_base_content_sha256"] = final_check["base_content_sha256"]
     write_state(state)
     try:
-        commit_overlay(config)
+        commit_overlay(config, progress=progress)
     except Exception as exc:
         try:
             state["save_retry_base_content_sha256"] = base_content_fingerprint(
@@ -1063,8 +1110,13 @@ def commit_review(domain, token):
         raise
     state["save_complete"] = True
     write_state(state)
+    if progress:
+        print("Guarded COW save: physical merge complete; restoring host mount state.",
+              file=sys.stderr, flush=True)
     restore(domain)
     review_path.unlink(missing_ok=True)
+    if progress:
+        print("Guarded COW save: complete.", file=sys.stderr, flush=True)
 
 
 def prepare(config):
@@ -1324,9 +1376,22 @@ def replace_overlay(config):
                 pass
 
 
-def commit_overlay(config):
-    run(QEMU_IMG, "commit", "-d", "--image-opts", "--backing-image-opts",
-        guard_options(config), overlay_options(config))
+def commit_overlay(config, progress=False):
+    args = [QEMU_IMG, "commit"]
+    if progress:
+        print("Guarded COW save: writing the reviewed extents to the physical disk.",
+              file=sys.stderr, flush=True)
+        args.append("-p")
+    args.extend(("-d", "--image-opts", "--backing-image-opts",
+                 guard_options(config), overlay_options(config)))
+    if progress:
+        # qemu-img prints its live percentage to stdout. Inherit the caller's
+        # terminal for this opt-in CLI mode; normal GUI runs keep captured IO.
+        subprocess.run(args, check=True)
+        print("Guarded COW save: replacing the committed overlay with a fresh root.",
+              file=sys.stderr, flush=True)
+    else:
+        run(*args)
     replace_overlay(config)
 
 
@@ -1380,7 +1445,7 @@ def offline_action(domain, action):
         restore(domain)
 
 
-def dispatch(action, domain, operation_argument=None):
+def dispatch(action, domain, operation_argument=None, progress=False):
     if action == "check-start":
         if STATE.exists():
             held = json.loads(STATE.read_text(encoding="utf-8")).get("domain")
@@ -1425,7 +1490,7 @@ def dispatch(action, domain, operation_argument=None):
     elif action == "review":
         review_action(domain)
     elif action == "commit":
-        commit_review(domain, operation_argument)
+        commit_review(domain, operation_argument, progress=progress)
     elif action == "discard":
         offline_action(domain, action)
     else:
@@ -1435,13 +1500,18 @@ def dispatch(action, domain, operation_argument=None):
 def main():
     if os.geteuid() != 0:
         fail("must run as root")
-    if len(sys.argv) not in (3, 4):
-        fail("usage: qemu-guarded-cow prepare|verify|guest-started|restore|initialize|review|commit DOMAIN [REVIEW_ID] | guest-stopped DOMAIN SHUTOFF_REASON | discard DOMAIN | check-start DOMAIN")
+    if len(sys.argv) not in (3, 4, 5):
+        fail("usage: qemu-guarded-cow prepare|verify|guest-started|restore|initialize|review|commit DOMAIN [REVIEW_ID [--progress]] | guest-stopped DOMAIN SHUTOFF_REASON | discard DOMAIN | check-start DOMAIN")
     action, domain = sys.argv[1:3]
+    progress = False
     if action == "commit":
-        if len(sys.argv) != 4:
+        if len(sys.argv) not in (4, 5):
             fail("commit requires the review identifier")
         operation_argument = sys.argv[3]
+        if len(sys.argv) == 5:
+            if sys.argv[4] != "--progress":
+                fail("commit's optional fifth argument must be --progress")
+            progress = True
     elif action == "guest-stopped":
         if len(sys.argv) != 4:
             fail("guest-stopped requires libvirt's shutdown reason")
@@ -1454,7 +1524,7 @@ def main():
         dispatch(action, domain)
         return
     with operation_lock():
-        dispatch(action, domain, operation_argument)
+        dispatch(action, domain, operation_argument, progress=progress)
 
 
 if __name__ == "__main__":

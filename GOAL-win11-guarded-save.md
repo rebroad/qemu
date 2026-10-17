@@ -32,3 +32,5 @@ The existing COW root predates baseline capture. Do not start Windows or create 
 ### Optional commit progress
 
 The command-line guarded commit must support opt-in `--progress`. Show phase messages during review-ID and safety validation, QEMU's percentage through virtual-disk traversal while creating the review dry-run plan, byte-count percentages for fingerprint scans with a known total, QEMU's live physical-merge traversal percentage, and completion only after overlay replacement and host-state restoration succeed. Label both QEMU percentages as traversal progress: they are not the fraction of planned extents or physical bytes processed. For a long phase without a reliable denominator, say it is in progress without inventing a percentage. The default CLI and Virt-manager flows remain quiet and machine-readable.
+
+Learned elapsed-time and remaining-time estimates, plus the explicit review-ID override behavior, are specified in [GOAL-win11-commit-estimates.md](GOAL-win11-commit-estimates.md).

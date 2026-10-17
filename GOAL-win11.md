@@ -11,6 +11,7 @@ The physical-disk VM uses a guarded COW overlay. For the current `win11-phys` co
 - [VM performance and guest drivers](GOAL-win11-performance.md): KVM/hardware acceleration, reduced emulation, and useful Windows drivers.
 - [COW layers and snapshots](GOAL-win11-snapshots.md): external versus internal snapshot design, lineage, renaming, deletion, and branching.
 - [Guarded COW save review and commit](GOAL-win11-guarded-save.md): review reports, review-ID lifetime, freshness policy, progress, and guarded write planning.
+- [Commit estimates and review-ID override](GOAL-win11-commit-estimates.md): learned per-phase time estimates and an explicit, safety-gated option to commit without a review ID.
 - [Interrupted-save recovery](GOAL-win11-save-recovery.md): partial writes, retry, flushes, reboot handling, and power-loss protection.
 - [Disposable-disk validation](GOAL-win11-validation.md): the tests required before enabling physical or live commits.
 - [Low-memory Windows comparison](GOAL-win11-low-memory.md): a separate licensed Windows installation and controlled performance comparison.

@@ -4,7 +4,7 @@
 
 Do not enable physical COW saves until the guarded path has passed the disposable-disk validation described below. A failed command may already have written some or all allowed extents; exit status alone does not prove whether the physical disk changed.
 
-The physical-disk save is an offline operation. The VM must already be fully shut off, with no managed-save state. Do not start or reboot Windows to prepare, review, or commit the existing overlay; running the VM is not a prerequisite. If the previous clean shutdown cannot be established without booting it, report that missing evidence and leave the commit blocked for the user's decision.
+The physical-disk save is an offline operation against the existing overlay. The VM must already be fully shut off, with no managed-save state. Do not start or reboot Windows at any point to prepare, review, validate, or commit this overlay; no guest-side inspection or filesystem check is required. If evidence of the prior clean shutdown is unavailable, report that limitation and ask the user whether to proceed; do not boot Windows to obtain it.
 
 Virt-manager must provide two separate actions:
 
@@ -26,6 +26,8 @@ The guarded block graph must use QEMU's block-device backend for a physical whol
 Capture a baseline when each new COW root is created. At review, compare and report stable device identity (including major/minor and serial/WWN where available), capacity, logical and physical sector sizes, GPT disk and partition identities, partition boundaries, configured partition identities, and relevant base content. Any identity, geometry, layout, or baseline mismatch blocks review and requires reconciliation. Device and filesystem timestamps and sizes are useful diagnostics, but a metadata change is a reason to stop and investigate, not a complete freshness test.
 
 Content fingerprints at COW-root creation and review must cover planned destination sectors, GPT metadata, and every other base sector on which the selected chain depends. Report coverage and limitations. Reads do not make the base stale, though they may be reported. Do not use a block-device timestamp, inode timestamp, device name, or process byte count as proof that the disk is unchanged. Kernel block-device read/write counters are system-wide, resettable, and do not identify sectors, so they are diagnostics, not conflict protection. If complete unchanged-base detection is required, use a reliable whole-relevant-range fingerprint or write-tracking mechanism; do not claim that hashing only planned destination extents proves the entire base is unchanged.
+
+The existing COW root predates baseline capture. Do not start Windows or create a retrospective record and present it as a creation-time baseline. If no baseline exists, review must clearly report that limitation, and the user must explicitly acknowledge that backing-disk changes since COW-root creation cannot be ruled out by the baseline check. If a baseline exists, verify it at review and bind its record to the review ID; at commit, check only that the reviewed baseline record has not changed. New COW roots must continue to receive a real creation-time baseline.
 
 ### Optional commit progress
 

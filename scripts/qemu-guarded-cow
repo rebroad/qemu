@@ -26,16 +26,21 @@ RUN_DIR = Path("/run/libvirt/qemu-guarded-cow")
 STATE = RUN_DIR / "active.json"
 REVIEW_DIR = RUN_DIR / "reviews"
 LOCK_FILE = RUN_DIR / "operation.lock"
+JOURNAL_DIR = Path("/var/lib/libvirt/qemu-guarded-cow")
+INSTALLED_HELPER = Path("/usr/local/libexec/qemu-guarded-cow")
+HELPER_SOURCE_MANIFEST = Path("/usr/local/libexec/qemu-guarded-cow.source.json")
+RECOVERY_SERVICE = "qemu-guarded-cow-recovery-check.service"
+RECOVERY_SERVICE_PATH = Path("/etc/systemd/system") / RECOVERY_SERVICE
 REVIEW_TTL = 3600
-# Disposable-disk success, failure, and retry validation passed with the
-# installed QEMU and qemu-img. Each physical save still requires a fresh review
-# plus two explicit user confirmations, with the plan rechecked before writing.
-PHYSICAL_COMMIT_ENABLED = True
+# Physical commits stay disabled until the current review, durability, and
+# interruption/recovery requirements have passed disposable-disk validation.
+PHYSICAL_COMMIT_ENABLED = False
 # Libvirt's hook PATH places /usr/local/sbin first, where this host has
 # command copies that libvirtd's AppArmor profile intentionally cannot run.
 os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 PWG_NS = "urn:qemu:partition-write-guard:1"
+EFI_SYSTEM_PARTITION_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 
 class GuardError(RuntimeError):
@@ -49,6 +54,102 @@ def run(*args, input=None):
 
 def fail(message):
     raise GuardError(message)
+
+
+def helper_identity(require_source=True):
+    helper_path = Path(__file__).resolve()
+    try:
+        helper_digest = hashlib.sha256(helper_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        fail(f"cannot fingerprint the guarded COW helper: {exc}")
+    installed = helper_path == INSTALLED_HELPER.resolve()
+    identity = {"path": str(helper_path), "sha256": helper_digest,
+                "installed": installed, "source_match": None,
+                "source_path": None}
+    if not installed:
+        return identity
+    try:
+        st = os.lstat(HELPER_SOURCE_MANIFEST)
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o644):
+            fail("guarded COW helper source manifest has unsafe ownership or mode")
+        manifest = json.loads(HELPER_SOURCE_MANIFEST.read_text(encoding="utf-8"))
+        source_path = Path(manifest["source"])
+        if not source_path.is_absolute():
+            fail("guarded COW helper source manifest path is not absolute")
+        source_digest = (hashlib.sha256(source_path.read_bytes()).hexdigest()
+                         if require_source else None)
+    except GuardError:
+        raise
+    except Exception as exc:
+        fail(f"cannot verify guarded COW helper against its installed source manifest: {exc}")
+    if (manifest.get("schema") != "qemu-guarded-cow-source-v1"
+            or manifest.get("sha256") != helper_digest
+            or (require_source and source_digest != helper_digest)):
+        fail("installed guarded COW helper does not match its recorded source")
+    identity.update(source_match=(True if require_source else None),
+                    source_path=str(source_path),
+                    manifest_sha256=hashlib.sha256(
+                        HELPER_SOURCE_MANIFEST.read_bytes()).hexdigest())
+    return identity
+
+
+def recovery_guard_identity(require_active=True):
+    if Path(__file__).resolve() != INSTALLED_HELPER.resolve():
+        return None
+    try:
+        st = os.lstat(RECOVERY_SERVICE_PATH)
+        content = RECOVERY_SERVICE_PATH.read_bytes()
+        properties = run(
+            "systemctl", "show", RECOVERY_SERVICE,
+            "-p", "LoadState", "-p", "ActiveState", "-p", "UnitFileState",
+            "-p", "FragmentPath", "-p", "DropInPaths", "-p", "ExecStart",
+            "-p", "Before", "-p", "After", "-p", "OnFailure",
+            "-p", "OnFailureJobMode", "-p", "DefaultDependencies",
+            "-p", "RequiresMountsFor").stdout
+    except Exception as exc:
+        fail(f"cannot verify the early-boot guarded COW recovery service: {exc}")
+    effective = dict(line.split("=", 1) for line in properties.splitlines()
+                     if "=" in line)
+    required = (b"DefaultDependencies=no", b"After=systemd-remount-fs.service",
+                b"Before=local-fs-pre.target", b"RequiresMountsFor=/var/lib/libvirt/qemu-guarded-cow",
+                b"OnFailure=emergency.target", b"OnFailureJobMode=isolate",
+                b"Type=oneshot", b"ExecStart=/usr/local/libexec/qemu-guarded-cow boot-check",
+                b"RemainAfterExit=yes")
+    expected_exec = "/usr/local/libexec/qemu-guarded-cow boot-check"
+    if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != 0
+            or stat.S_IMODE(st.st_mode) != 0o644
+            or any(line.startswith((b"Condition", b"Assert"))
+                   for line in content.splitlines())
+            or any(line not in content.splitlines() for line in required)
+            or effective.get("LoadState") != "loaded"
+            or (effective.get("ActiveState") != "active"
+                and not (not require_active
+                         and effective.get("ActiveState") == "failed"))
+            or effective.get("UnitFileState") != "enabled"
+            or effective.get("FragmentPath") != str(RECOVERY_SERVICE_PATH)
+            or effective.get("DropInPaths", "")
+            or effective.get("DefaultDependencies") != "no"
+            or "local-fs-pre.target" not in effective.get("Before", "").split()
+            or "systemd-remount-fs.service" not in effective.get("After", "").split()
+            or "emergency.target" not in effective.get("OnFailure", "").split()
+            or effective.get("OnFailureJobMode") != "isolate"
+            or "/var/lib/libvirt/qemu-guarded-cow" not in
+                effective.get("RequiresMountsFor", "").split()
+            or expected_exec not in effective.get("ExecStart", "")):
+        fail("early-boot recovery service is not installed, enabled, and fail-closed")
+    stable_properties = {
+        key: effective[key] for key in (
+            "LoadState", "UnitFileState", "FragmentPath", "DropInPaths",
+            "Before", "After", "OnFailure", "OnFailureJobMode",
+            "DefaultDependencies", "RequiresMountsFor")
+    }
+    stable_properties["ExecStart"] = expected_exec
+    return {"path": str(RECOVERY_SERVICE_PATH),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "enabled": True, "active": effective.get("ActiveState") == "active",
+            "failure_target": "emergency.target",
+            "effective_properties": stable_properties}
 
 
 @contextmanager
@@ -68,7 +169,14 @@ def operation_lock():
 def domain_xml(domain):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", domain):
         fail("invalid libvirt domain name")
-    return run("virsh", "dumpxml", "--inactive", domain).stdout
+    try:
+        return run("virsh", "dumpxml", "--inactive", domain).stdout
+    except (subprocess.CalledProcessError, OSError) as exc:
+        config_path = Path("/etc/libvirt/qemu") / f"{domain}.xml"
+        try:
+            return config_path.read_text(encoding="utf-8")
+        except OSError:
+            fail(f"libvirt is unavailable and the inactive domain XML cannot be read: {exc}")
 
 
 def parse_config(domain, xml_data=None):
@@ -226,6 +334,37 @@ def verify_no_allowed_swap(devices):
             fail(f"configured writable partition is active swap: {name}")
 
 
+def verify_no_block_device_users(config, devices):
+    """Fail closed if a process already has the target disk/partitions open."""
+    try:
+        targets = {os.stat(config["disk"]).st_rdev}
+        targets.update(os.stat(device["path"]).st_rdev
+                       for device in devices.values())
+    except OSError as exc:
+        fail(f"cannot identify guarded block devices before commit: {exc}")
+    users = {}
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdecimal() or int(proc.name) == os.getpid():
+            continue
+        try:
+            fds = (proc / "fd").iterdir()
+            for fd in fds:
+                try:
+                    st = os.stat(fd)
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    continue
+                if stat.S_ISBLK(st.st_mode) and st.st_rdev in targets:
+                    comm = (proc / "comm").read_text(encoding="utf-8").strip()
+                    users.setdefault(proc.name, comm)
+                    break
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    if users:
+        details = ", ".join(f"{pid} ({name})" for pid, name in sorted(users.items()))
+        fail("processes already hold the guarded disk or a configured partition open: "
+             + details)
+
+
 def is_rw(row):
     return "rw" in row["opts"] and "rw" in row["super"]
 
@@ -257,31 +396,176 @@ def verify_qemu_readonly(disk):
         fail("libvirt-qemu unexpectedly has write permission on the raw backing device")
 
 
-def write_state(data):
-    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, path = tempfile.mkstemp(prefix=".guarded-cow-", dir=RUN_DIR)
+def parse_firmware_boot(output, efi_partuuids):
+    boot_order_match = re.search(r"^BootOrder:\s*(.*)$", output, re.MULTILINE)
+    if not boot_order_match:
+        fail("cannot read UEFI BootOrder; physical commit is blocked")
+    boot_order = [item.upper() for item in boot_order_match.group(1).split(",")
+                  if re.fullmatch(r"[0-9A-Fa-f]{4}", item)]
+    entries = {}
+    for line in output.splitlines():
+        match = re.match(r"^Boot([0-9A-Fa-f]{4})(\*)?\s+(.+)$", line)
+        if match:
+            entries[match.group(1).upper()] = {
+                "active": bool(match.group(2)), "details": match.group(3),
+            }
+    windows = []
+    linux = []
+    efi_guids = {value.lower() for value in efi_partuuids}
+    for ident, entry in entries.items():
+        value = entry["details"]
+        lower = value.lower()
+        part_match = re.search(r"HD\(\d+,GPT,([0-9a-f-]{36})", value,
+                               re.IGNORECASE)
+        partuuid = part_match.group(1).lower() if part_match else None
+        is_windows = ("\\efi\\microsoft\\boot\\bootmgfw.efi" in lower
+                      or "windows boot manager" in lower)
+        if is_windows and partuuid in efi_guids:
+            windows.append({"id": ident, "active": entry["active"]})
+        elif (partuuid in efi_guids and "\\efi\\" in lower and entry["active"]
+              and not is_windows
+              and re.search(r"\\(?:shimx64|grubx64|systemd-bootx64)\.efi", lower)):
+            linux.append(ident)
+    if not linux:
+        fail("cannot identify an active Linux EFI boot entry; physical commit is blocked")
+    linux_entry = next((ident for ident in boot_order if ident in linux), linux[0])
+    return {"boot_order": boot_order, "linux_entry": linux_entry,
+            "windows_entries": sorted(windows, key=lambda item: item["id"]),
+            "efi_partuuids": sorted(efi_guids)}
+
+
+def firmware_boot_snapshot(config, inventory):
+    if not stat.S_ISBLK(os.stat(config["disk"]).st_mode):
+        return None
+    if not Path("/sys/firmware/efi/efivars").is_dir():
+        fail("physical commit requires UEFI boot protection; EFI variables are unavailable")
+    efi_partuuids = [part["partuuid"] for part in inventory["partitions"]
+                     if part["type"].lower() == EFI_SYSTEM_PARTITION_GUID]
+    if not efi_partuuids:
+        fail("physical disk has no identified EFI System Partition; cannot guard native boot")
+    return parse_firmware_boot(
+        run("efibootmgr", "-v").stdout, efi_partuuids)
+
+
+def apply_firmware_boot_guard(snapshot):
+    if not snapshot:
+        return
+    # Make the currently installed Linux loader the only automatic boot target
+    # before deactivating Windows entries. The durable transaction already
+    # exists at this point; the boot-check service will hold Linux mounts until
+    # recovery completes after a crash.
+    run("efibootmgr", "-o", snapshot["linux_entry"])
+    for entry in snapshot["windows_entries"]:
+        if entry["active"]:
+            run("efibootmgr", "-b", entry["id"], "-A")
+    current = parse_firmware_boot(
+        run("efibootmgr", "-v").stdout, snapshot["efi_partuuids"])
+    if (current["boot_order"] != [snapshot["linux_entry"]]
+            or current["linux_entry"] != snapshot["linux_entry"]
+            or any(entry["active"] for entry in current["windows_entries"])):
+        fail("could not verify that UEFI will boot Linux and skip native Windows during recovery")
+
+
+def restore_firmware_boot(snapshot):
+    if not snapshot:
+        return
+    for entry in snapshot["windows_entries"]:
+        run("efibootmgr", "-b", entry["id"],
+            "-a" if entry["active"] else "-A")
+    if snapshot["boot_order"]:
+        run("efibootmgr", "-o", ",".join(snapshot["boot_order"]))
+    else:
+        run("efibootmgr", "-O")
+    current = parse_firmware_boot(
+        run("efibootmgr", "-v").stdout, snapshot["efi_partuuids"])
+    if (current["boot_order"] != snapshot["boot_order"]
+            or current["linux_entry"] != snapshot["linux_entry"]
+            or current["windows_entries"] != snapshot["windows_entries"]):
+        fail("could not restore the original UEFI boot order and Windows entry states")
+
+
+def atomic_json(path, data, prefix):
+    directory_existed = path.parent.exists()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not directory_existed:
+        fsync_directory(path.parent.parent)
+    parent_stat = os.lstat(path.parent)
+    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.geteuid():
+        fail(f"guarded COW state directory is not owned by the effective user: {path.parent}")
+    os.chmod(path.parent, 0o700)
+    fd, temp_path = tempfile.mkstemp(prefix=prefix, dir=path.parent)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(data, stream)
+            json.dump(data, stream, sort_keys=True, separators=(",", ":"))
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(path, STATE)
+        os.replace(temp_path, path)
+        fsync_directory(path.parent)
     except Exception:
         try:
-            os.unlink(path)
+            os.unlink(temp_path)
         except FileNotFoundError:
             pass
         raise
 
 
-def validate_overlay(config):
+def journal_path(domain):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", domain):
+        fail("invalid domain name for guarded COW journal")
+    return JOURNAL_DIR / f"{domain}.json"
+
+
+def read_journal(domain):
+    path = journal_path(domain)
+    try:
+        directory_stat = os.lstat(path.parent)
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISDIR(directory_stat.st_mode)
+            or directory_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(directory_stat.st_mode) != 0o700):
+        fail(f"durable guarded COW journal directory is not private: {path.parent}")
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+            or st.st_uid != os.geteuid()
+            or stat.S_IMODE(st.st_mode) != 0o600):
+        fail(f"guarded COW journal is not a root-owned regular file: {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"cannot read durable guarded COW journal {path}: {exc}")
+
+
+def write_state(data):
+    # Persist the transaction record before updating volatile /run state. The
+    # durable copy is the recovery authority after a crash or power loss.
+    if data.get("save_pending") and data.get("save_transaction"):
+        atomic_json(journal_path(data["domain"]), data, ".guarded-cow-journal-")
+    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    atomic_json(STATE, data, ".guarded-cow-")
+
+
+def remove_journal(domain):
+    path = journal_path(domain)
+    try:
+        path.unlink()
+        fsync_directory(path.parent)
+    except FileNotFoundError:
+        pass
+
+
+def validate_overlay(config, check=True):
     try:
         info = json.loads(run(QEMU_IMG, "info", "--output=json", config["overlay"]).stdout)
         st = os.lstat(config["overlay"])
         disk_size = int(run("blockdev", "--getsize64", config["disk"]).stdout.strip())
-        run(QEMU_IMG, "check", "-q", config["overlay"])
+        if check:
+            run(QEMU_IMG, "check", "-q", config["overlay"])
     except Exception as exc:
         fail(f"cannot inspect qcow2 overlay or its backing disk: {exc}")
     if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
@@ -839,6 +1123,34 @@ def verify_root_baseline(config, inventory=None, progress=False,
     return baseline
 
 
+def base_baseline_digest(config):
+    path = base_baseline_path(config)
+    if not os.path.lexists(path):
+        return None
+    try:
+        load_base_baseline(config)
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        fail(f"cannot fingerprint the COW-root baseline record: {exc}")
+
+
+def offline_review_state(domain, config, devices):
+    """Create /run isolation metadata without booting or starting the VM."""
+    if read_journal(domain) is not None:
+        fail("an incomplete guarded COW save must be recovered before a new review")
+    verify_no_allowed_swap(devices)
+    verify_no_block_device_users(config, devices)
+    verify_partitions_not_writable(devices, config["partitions"])
+    if any(mounts_for(devices, part["number"])
+           for part in config["partitions"]):
+        fail("configured writable partitions must be unmounted for offline save review")
+    verify_qemu_readonly(config["disk"])
+    return {"domain": domain, "disk": config["disk"],
+            "partitions": config["partitions"], "mounts": [],
+            "disk_acl": disk_acl(config["disk"]), "guest_active": False,
+            "last_shutdown_reason": "unknown", "snapshot_eligible": False}
+
+
 def disk_map_svg(inventory, config, extents):
     width, left, right = 1100, 70, 1070
     usable = right - left
@@ -896,51 +1208,77 @@ def disk_map_svg(inventory, config, extents):
 def review_action(domain):
     assert_vm_off(domain)
     config = parse_config(domain)
+    helper_info = helper_identity()
+    recovery_guard = recovery_guard_identity()
     validate_overlay(config)
     if not STATE.exists():
-        fail("guarded isolation state is missing; start and cleanly stop the VM before reviewing a save")
-    state = json.loads(STATE.read_text(encoding="utf-8"))
+        devices = part_devices(config)
+        state = offline_review_state(domain, config, devices)
+        write_state(state)
+    else:
+        try:
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            fail(f"cannot read guarded isolation state: {exc}")
     if (state.get("domain") != domain or state.get("disk") != config["disk"]
             or state.get("partitions") != config["partitions"]
             or state.get("guest_active") or
-            state.get("save_complete") or state.get("discard_complete")):
+            state.get("save_pending") or state.get("save_complete")
+            or state.get("discard_complete")):
         fail("guarded isolation state does not match a stopped, unsaved VM")
     devices = part_devices(config)
     verify_no_allowed_swap(devices)
+    verify_no_block_device_users(config, devices)
     verify_partitions_not_writable(devices, config["partitions"])
     if any(mounts_for(devices, part["number"])
            for part in config["partitions"]):
         fail("configured writable partitions must be unmounted for save review")
     verify_qemu_readonly(config["disk"])
     _raw_plan, extents, inventory = make_write_plan(config)
-    root_baseline = verify_root_baseline(config, inventory)
+    firmware_boot = firmware_boot_snapshot(config, inventory)
+    root_baseline_digest = base_baseline_digest(config)
+    root_baseline = (verify_root_baseline(config, inventory)
+                     if root_baseline_digest is not None else None)
     base_fingerprint = base_content_fingerprint(config["disk"], extents)
     host = host_disk_state(inventory, config)
     overlay = overlay_fingerprint(config)
     token = secrets.token_urlsafe(32)
     now = int(time.time())
     notice = (
-        "Dry-run only: no physical-disk writes were issued. A commit is a "
-        "separate, explicitly confirmed action; the helper rechecks the VM, "
-        "disk, GPT layout, host isolation, overlay, and exact write plan before "
-        "the first physical write."
+        "Offline review only: no physical-disk writes were issued and Windows "
+        "was not started. The review ID is valid for one hour. Commit checks "
+        "the ID and current VM, device, GPT, and host-isolation safety state, "
+        "but does not repeat the full QEMU write traversal or content scans. "
+        "Raw disk writes after review are not detected; decide whether the "
+        "review is recent enough before explicitly confirming commit."
         if PHYSICAL_COMMIT_ENABLED else
         "Dry-run only: no physical-disk writes were issued. This review does "
         "not prove a real commit will succeed. Physical commit remains disabled "
-        "until the exact installed QEMU and helper pass disposable-disk "
-        "success, failure, and retry validation."
+        "until disposable-disk tests cover the full commit, interruption, "
+        "resume, and boot fail-closed recovery path."
     )
+    if firmware_boot:
+        notice += (
+            " Before the first physical write, the helper will temporarily make "
+            "the identified Linux recovery entry the only automatic UEFI boot "
+            "target and deactivate Windows entries for this disk; it restores "
+            "their original states only after the save and host-state restoration "
+            "complete."
+        )
     report = {"schema": "qemu-guarded-cow-review-v1", "review_id": token,
               "domain": domain, "created_at": now, "expires_at": now + REVIEW_TTL,
               "physical_disk_written": False,
               "commit_enabled": PHYSICAL_COMMIT_ENABLED,
               "notice": notice,
+              "helper": helper_info,
+              "recovery_guard": recovery_guard,
               "disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
                        "logical_sector_size": inventory["sector_size"],
                        "size_lba": inventory["size_lba"]},
               "shutdown": {"reason": state.get("last_shutdown_reason", "unknown"),
                            "clean_snapshot_eligible":
                                state.get("snapshot_eligible") is True},
+              "firmware_boot": firmware_boot,
               "overlay": {**overlay, "health": "qemu-img check passed"},
               "partitions": inventory["partitions"], "host_state": host,
               "guard": {"driver": "partition-write-guard",
@@ -948,13 +1286,23 @@ def review_action(domain):
                         "plan_sha256": write_plan_sha256(extents),
                         "base_content_sha256": base_fingerprint,
                         "base_content_coverage": "planned commit extents at review time",
-                        "base_root_content_sha256": root_baseline["content_sha256"],
-                        "base_root_content_coverage": root_baseline["coverage"],
-                        "base_root_capture_basis": root_baseline.get(
-                            "capture_basis", "captured at guarded COW root creation"),
+                        "base_root_baseline_status":
+                            "verified" if root_baseline else "missing-legacy",
+                        "base_root_baseline_sha256": root_baseline_digest,
+                        "base_root_content_sha256":
+                            root_baseline["content_sha256"] if root_baseline else None,
+                        "base_root_content_coverage":
+                            root_baseline["coverage"] if root_baseline else
+                            "not available; this legacy COW root predates baseline capture",
+                        "base_root_capture_basis":
+                            (root_baseline.get(
+                                "capture_basis", "captured at guarded COW root creation")
+                             if root_baseline else None),
                         "base_root_captured_at_unix_ns":
-                            root_baseline["captured_at_unix_ns"],
-                        "base_root_disk_metadata": root_baseline["disk_metadata"]},
+                            (root_baseline["captured_at_unix_ns"]
+                             if root_baseline else None),
+                        "base_root_disk_metadata":
+                            (root_baseline["disk_metadata"] if root_baseline else None)},
               "planned_extents": extents}
     report["disk_map_svg"] = disk_map_svg(inventory, config, extents)
     REVIEW_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1012,28 +1360,75 @@ def commit_review(domain, token, progress=False):
     if not PHYSICAL_COMMIT_ENABLED:
         fail("physical COW commit is disabled until the exact installed QEMU and helper pass disposable-disk success, failure, and retry validation")
     if progress:
-        print("Guarded COW save: rechecking the reviewed disk, overlay, and write plan; no writes yet.",
+        print("Guarded COW save: validating review authorization and current safety conditions; no writes yet.",
               file=sys.stderr, flush=True)
     if not re.fullmatch(r"[A-Za-z0-9_-]{40,60}", token):
         fail("invalid or missing review token")
     review_path = REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
+    state = None
+    if STATE.exists():
+        try:
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            fail(f"cannot read guarded isolation state: {exc}")
+    durable = read_journal(domain)
+    if durable is not None and durable.get("save_pending"):
+        state = durable
+    pending = bool(state and state.get("save_pending")
+                   and not state.get("save_complete"))
+    transaction = state.get("save_transaction", {}) if pending else {}
     try:
         saved = json.loads(review_path.read_text(encoding="utf-8"))
         previous = saved["report"]
     except Exception as exc:
-        fail(f"cannot load the reviewed save plan: {exc}")
-    if (previous.get("review_id") != token or previous.get("domain") != domain
-            or previous.get("expires_at", 0) < int(time.time())):
-        fail("save review expired or belongs to another VM; review again")
+        previous = transaction.get("review_report")
+        if previous is None:
+            fail(f"cannot load the reviewed save plan: {exc}")
+    if pending:
+        if transaction.get("review_id") != token:
+            fail("pending save belongs to a different review; manual reconciliation is required")
+    elif previous.get("expires_at", 0) < int(time.time()):
+        fail("save review expired; review again before starting a physical commit")
+    current_helper = helper_identity(require_source=not pending)
+    reviewed_helper = previous.get("helper", {})
+    same_installed_helper = all(
+        current_helper.get(key) == reviewed_helper.get(key)
+        for key in ("path", "sha256", "installed", "manifest_sha256"))
+    if (not same_installed_helper
+            or (not pending and reviewed_helper != current_helper)
+            or (current_helper.get("installed") and not pending
+                and current_helper.get("source_match") is not True)):
+        fail("guarded COW helper or its source changed after review")
+    current_recovery_guard = recovery_guard_identity(require_active=not pending)
+    reviewed_recovery_guard = previous.get("recovery_guard", {})
+    same_recovery_guard = (
+        current_recovery_guard.get("path") == reviewed_recovery_guard.get("path")
+        and current_recovery_guard.get("sha256") == reviewed_recovery_guard.get("sha256")
+        and current_recovery_guard.get("enabled") == reviewed_recovery_guard.get("enabled")
+        and current_recovery_guard.get("failure_target") ==
+            reviewed_recovery_guard.get("failure_target")
+        and current_recovery_guard.get("effective_properties") ==
+            reviewed_recovery_guard.get("effective_properties"))
+    if not same_recovery_guard:
+        fail("early-boot guarded COW recovery service changed after review")
     assert_vm_off(domain)
     config = parse_config(domain)
+    phase = transaction.get("phase") if pending else "merge-pending"
+    if pending and config["overlay"] != transaction.get(
+            "overlay", {}).get("path", previous.get("overlay", {}).get("path")):
+        fail("configured overlay path changed during an incomplete save")
+    if phase in ("firmware-guarding", "merge-pending", "merge-interrupted"):
+        validate_overlay(config, check=False)
+    elif phase == "replacement-complete":
+        validate_overlay(config)
+    elif phase not in ("merge-complete", "replacement-pending",
+                       "replacement-interrupted"):
+        fail(f"unknown guarded COW recovery phase {phase!r}; manual reconciliation is required")
     if progress:
-        print("Guarded COW save: checking overlay format, backing chain, and qcow2 health; no writes yet.",
+        print("Guarded COW save: checking disk identity, overlay metadata, and host isolation; no writes yet.",
               file=sys.stderr, flush=True)
-    validate_overlay(config)
-    if not STATE.exists():
+    if state is None:
         fail("guarded isolation state is missing; refusing physical commit")
-    state = json.loads(STATE.read_text(encoding="utf-8"))
     if (state.get("domain") != domain or state.get("disk") != config["disk"]
             or state.get("partitions") != config["partitions"]
             or state.get("guest_active") or state.get("save_complete")
@@ -1041,112 +1436,106 @@ def commit_review(domain, token, progress=False):
         fail("guarded isolation state changed after review")
     devices = part_devices(config)
     verify_no_allowed_swap(devices)
+    verify_no_block_device_users(config, devices)
     verify_partitions_not_writable(devices, config["partitions"])
     if any(mounts_for(devices, part["number"])
            for part in config["partitions"]):
         fail("configured writable partitions are no longer unmounted")
     verify_qemu_readonly(config["disk"])
 
-    reviewed_base_fingerprint = (
-        state.get("save_retry_base_content_sha256")
-        if state.get("save_pending") else
-        previous["guard"]["base_content_sha256"])
-    if state.get("save_pending") and not reviewed_base_fingerprint:
-        fail("incomplete save has no recorded retry fingerprint; manual reconciliation is required")
-    reviewed = {"disk": previous["disk"], "overlay": previous["overlay"],
-                "partitions": previous["partitions"],
-                "host_state": previous["host_state"],
-                "plan_sha256": previous["guard"]["plan_sha256"],
-                "base_content_sha256": reviewed_base_fingerprint,
-                "base_root_content_sha256":
-                    previous["guard"]["base_root_content_sha256"],
-                "planned_extents": previous["planned_extents"]}
-
+    # A review is the user's authorization for its recorded plan during the
+    # stated validity window. Do not rerun QEMU's full commit traversal or hash
+    # disk contents here: those operations can take many minutes and would turn
+    # the review identifier into a misleading promise of conflict detection.
+    # Verify current device/GPT identity and isolation cheaply; arbitrary raw
+    # writes after review remain an explicit, user-assessed window of risk.
+    inventory = disk_inventory(config)
+    firmware_boot = firmware_boot_snapshot(config, inventory)
+    current_disk = {**inventory["identity"], "size_bytes": inventory["size_bytes"],
+                    "logical_sector_size": inventory["sector_size"],
+                    "size_lba": inventory["size_lba"]}
+    if (current_disk != previous.get("disk")
+            or inventory["partitions"] != previous.get("partitions")
+            or config["partitions"] != previous.get("guard", {}).get(
+                "configured_partitions")):
+        fail("disk identity, GPT layout, or partition allowlist changed after review")
+    previous_guard = previous.get("guard", {})
+    if ("base_root_baseline_sha256" not in previous_guard
+            or (not pending and base_baseline_digest(config)
+                != previous_guard.get("base_root_baseline_sha256"))):
+        fail("COW-root baseline record changed or is no longer in the reviewed state")
+    if pending and phase == "firmware-guarding":
+        # No physical merge has started in this phase. A power loss may have
+        # occurred before UEFI was fully redirected to Linux, so Windows could
+        # have booted natively and changed the base before recovery began.
+        if previous_guard.get("base_root_baseline_status") == "verified":
+            verify_root_baseline(config, inventory)
+        elif base_content_fingerprint(
+                config["disk"], previous.get("planned_extents")) != \
+                previous_guard.get("base_content_sha256"):
+            fail("backing sectors changed before the physical merge began; "
+                 "manual reconciliation is required")
+    if not pending and firmware_boot != previous.get("firmware_boot"):
+        fail("UEFI boot order or native-Windows boot entries changed after review")
+    verify_no_block_device_users(config, devices)
+    if (not pending or phase in ("merge-pending", "merge-interrupted")) and \
+            overlay_fingerprint(config) != previous.get("overlay"):
+        fail("overlay metadata changed after review; review again")
     if progress:
-        print("Guarded COW save: checking the reviewed plan with one fresh guarded dry-run (QEMU percentage is disk-traversal progress, not writes).",
-              file=sys.stderr, flush=True)
-    _raw_plan, extents, inventory = make_write_plan(config, progress=progress)
-    root_baseline = (
-        verify_root_baseline(
-            config, inventory, progress=progress,
-            progress_label=("COW-root baseline verification"
-                            if progress else "Checking COW-root baseline"))
-        if not state.get("save_pending") else load_base_baseline(config))
-    base_fingerprint = base_content_fingerprint(
-        config["disk"], extents,
-        progress_label=("planned-write-range fingerprint " +
-                        ("(retry state)" if state.get("save_pending") else
-                         "(reviewed-plan recheck)")) if progress else None)
-    host = host_disk_state(inventory, config)
-    final_check = {
-        "disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
-                 "logical_sector_size": inventory["sector_size"],
-                 "size_lba": inventory["size_lba"]},
-        "overlay": overlay_fingerprint(config),
-        "partitions": inventory["partitions"], "host_state": host,
-        "plan_sha256": write_plan_sha256(extents),
-        "base_content_sha256": base_fingerprint,
-        "base_root_content_sha256": root_baseline["content_sha256"],
-        "planned_extents": extents,
-    }
-    if final_check != reviewed:
-        changed = ", ".join(key for key in final_check
-                             if final_check[key] != reviewed[key])
-        review_path.unlink(missing_ok=True)
-        fail(f"disk, GPT, overlay, host isolation, or planned extents changed after review ({changed}); review again")
-
-    # The expensive comparison above proves the reviewed bytes and plan are
-    # still current. Repeat only cheap live-state checks at the write boundary.
-    if progress:
-        print("Guarded COW save: confirming VM, mounts, and device identity at the write boundary.",
-              file=sys.stderr, flush=True)
-    assert_vm_off(domain)
-    config_now = parse_config(domain)
-    if (config_now["disk"] != config["disk"]
-            or config_now["overlay"] != config["overlay"]
-            or config_now["partitions"] != config["partitions"]
-            or config_now["guard"] != config["guard"]):
-        fail("VM disk configuration changed at the commit boundary; isolation remains held")
-    devices_now = part_devices(config_now)
-    verify_no_allowed_swap(devices_now)
-    verify_partitions_not_writable(devices_now, config_now["partitions"])
-    if any(mounts_for(devices_now, part["number"])
-           for part in config_now["partitions"]):
-        fail("configured writable partitions are no longer unmounted")
-    verify_qemu_readonly(config_now["disk"])
-    inventory_now = disk_inventory(config_now)
-    if inventory_now != inventory:
-        fail("disk identity or GPT layout changed at the commit boundary; isolation remains held")
-    if (overlay_fingerprint(config_now) != final_check["overlay"]
-            or host_disk_state(inventory_now, config_now) != final_check["host_state"]):
-        fail("overlay or host isolation changed at the commit boundary; isolation remains held")
-    if previous.get("expires_at", 0) < int(time.time()):
-        review_path.unlink(missing_ok=True)
-        fail("save review expired during preflight; review again")
-
-    if progress:
-        print("Guarded COW save: recording the write-pending state.",
+        print("Guarded COW save: recording a durable write-pending state.",
               file=sys.stderr, flush=True)
 
     # The token represents a user-reviewed plan. The GUI calls this action
     # only after its separate explicit commit confirmation.
-    state["save_pending"] = True
-    state["save_retry_base_content_sha256"] = final_check["base_content_sha256"]
-    write_state(state)
+    if not pending:
+        state["save_pending"] = True
+        state["save_transaction"] = {
+            "review_id": token,
+            "review_created_at": previous["created_at"],
+            "review_expires_at": previous["expires_at"],
+            "disk": current_disk,
+            "overlay": previous["overlay"],
+            "partition_allowlist": config["partitions"],
+            "plan_sha256": previous["guard"]["plan_sha256"],
+            "planned_extents": previous["planned_extents"],
+            "firmware_boot": previous.get("firmware_boot"),
+            "review_report": previous,
+            "phase": ("firmware-guarding" if previous.get("firmware_boot")
+                      else "merge-pending"),
+            "started_at": int(time.time()),
+        }
+    transaction = state["save_transaction"]
+
+    def set_phase(phase):
+        transaction["phase"] = phase
+        write_state(state)
+
+    phase = transaction.get("phase", "merge-pending")
     try:
-        commit_overlay(config, progress=progress)
+        if phase == "firmware-guarding":
+            apply_firmware_boot_guard(transaction.get("firmware_boot"))
+            set_phase("merge-pending")
+            phase = "merge-pending"
+        if phase in ("merge-pending", "merge-interrupted"):
+            set_phase("merge-pending")
+            commit_overlay(config, progress=progress, phase_callback=set_phase)
+        elif phase in ("merge-complete", "replacement-pending",
+                       "replacement-interrupted"):
+            set_phase("replacement-pending")
+            replace_overlay(config, progress=progress)
+            set_phase("replacement-complete")
+        elif phase == "replacement-complete":
+            validate_overlay(config)
+        else:
+            fail(f"unknown guarded COW recovery phase {phase!r}; manual reconciliation is required")
     except Exception as exc:
-        try:
-            state["save_retry_base_content_sha256"] = base_content_fingerprint(
-                config["disk"], extents,
-                progress_label=("recording safe retry fingerprint"
-                                if progress else None))
-            write_state(state)
-        except Exception:
-            raise GuardError(
-                "physical save failed and retry-state fingerprinting also failed; "
-                "host isolation remains held and manual reconciliation is required"
-            ) from exc
+        current_phase = transaction.get("phase")
+        if current_phase in ("merge-pending", "merge-interrupted"):
+            transaction["phase"] = "merge-interrupted"
+        elif current_phase in ("replacement-pending", "replacement-interrupted"):
+            transaction["phase"] = "replacement-interrupted"
+        state["save_transaction"]["last_error"] = str(exc)
+        write_state(state)
         raise
     state["save_complete"] = True
     write_state(state)
@@ -1160,6 +1549,8 @@ def commit_review(domain, token, progress=False):
 
 
 def prepare(config):
+    if read_journal(config["domain"]) is not None:
+        fail("durable guarded COW save journal needs reconciliation before VM start")
     if STATE.exists():
         try:
             state = json.loads(STATE.read_text(encoding="utf-8"))
@@ -1235,12 +1626,14 @@ def prepare(config):
 
 
 def restore(domain):
-    if not STATE.exists():
+    state = read_journal(domain)
+    if state is None and STATE.exists():
+        try:
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            fail(f"cannot read guarded COW state: {exc}")
+    if state is None:
         return
-    try:
-        state = json.loads(STATE.read_text(encoding="utf-8"))
-    except Exception as exc:
-        fail(f"cannot read guarded COW state: {exc}")
     if state.get("domain") != domain:
         fail("release hook domain does not match the guarded COW state")
     if state.get("save_pending") and not state.get("save_complete"):
@@ -1251,15 +1644,27 @@ def restore(domain):
         fail("cannot restore host write access until guarded COW changes are saved or discarded")
     config = {"disk": state["disk"], "partitions": state["partitions"]}
     devices = part_devices(config)
+    saved_mounts = {mount["number"]: mount for mount in state["mounts"]}
     for part in config["partitions"]:
-        if mounts_for(devices, part["number"]):
-            fail(f"partition {part['number']} was mounted while guarded COW isolation was active")
+        rows = mounts_for(devices, part["number"])
+        expected = saved_mounts.get(part["number"])
+        if rows and (not expected or len(rows) != 1
+                     or rows[0]["target"] != expected["target"]):
+            fail(f"partition {part['number']} has an unexpected mount while guarded COW isolation was active")
+        if rows and not (state.get("save_complete") or state.get("discard_complete")):
+            fail(f"partition {part['number']} was mounted before guarded COW completion")
     try:
         for mount in state["mounts"]:
-            if mount["mode"] == "ro":
-                run("mount", "-o", "ro", "--", mount["target"])
+            rows = mounts_for(devices, mount["number"])
+            if rows:
+                if (mount["mode"] == "ro") != is_ro(rows[0]):
+                    mode = "ro" if mount["mode"] == "ro" else "rw"
+                    run("mount", "-o", f"remount,{mode}", "--", mount["target"])
             else:
-                run("mount", "--", mount["target"])
+                if mount["mode"] == "ro":
+                    run("mount", "-o", "ro", "--", mount["target"])
+                else:
+                    run("mount", "--", mount["target"])
             rows = mounts_for(devices, mount["number"])
             if len(rows) != 1 or rows[0]["target"] != mount["target"]:
                 fail(f"fresh mount for partition {mount['number']} did not resolve to {mount['target']}")
@@ -1278,6 +1683,10 @@ def restore(domain):
         restore_disk_acl(state["disk"], state["disk_acl"])
     except Exception as exc:
         fail(f"host mount restoration completed, but disk ACL restoration failed: {exc}")
+    if state.get("save_complete"):
+        transaction = state.get("save_transaction", {})
+        restore_firmware_boot(transaction.get("firmware_boot"))
+    remove_journal(domain)
     STATE.unlink()
 
 
@@ -1312,12 +1721,56 @@ def guest_started(domain):
 
 
 def assert_vm_off(domain):
-    state = run("virsh", "domstate", domain).stdout.strip().lower()
-    if state != "shut off":
-        fail(f"VM must be fully shut off before save/discard (current state: {state})")
-    info = run("virsh", "dominfo", domain).stdout
-    if not re.search(r"^Managed save:\s+no\s*$", info, re.MULTILINE):
-        fail("VM has a managed-save state; clear it before save/discard")
+    try:
+        state = run("virsh", "domstate", domain).stdout.strip().lower()
+        if state != "shut off":
+            fail(f"VM must be fully shut off before save/discard (current state: {state})")
+        info = run("virsh", "dominfo", domain).stdout
+        if not re.search(r"^Managed save:\s+no\s*$", info, re.MULTILINE):
+            fail("VM has a managed-save state; clear it before save/discard")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        # Permit explicit recovery from the early-boot fail-closed state,
+        # before libvirt services and ordinary local mounts have started.
+        qemu = []
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdecimal():
+                continue
+            try:
+                comm = (proc / "comm").read_text(encoding="utf-8").strip()
+                cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ")
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            if ("qemu" in comm.lower() and
+                    re.search(rb"(?:^|[ =,])" + re.escape(domain.encode()) +
+                              rb"(?:$|[, ])", cmdline)):
+                qemu.append(f"{proc.name} ({comm})")
+        if qemu:
+            fail("cannot verify that the VM is off while libvirt is unavailable; "
+                 "QEMU processes remain: " + ", ".join(qemu))
+        save_state = Path("/var/lib/libvirt/qemu/save") / f"{domain}.save"
+        if save_state.exists():
+            fail("VM has a managed-save state; clear it before save/discard")
+        if not Path("/etc/libvirt/qemu", f"{domain}.xml").is_file():
+            fail(f"cannot verify VM state while libvirt is unavailable: {exc}")
+
+
+def boot_check():
+    try:
+        directory_stat = os.lstat(JOURNAL_DIR)
+    except FileNotFoundError:
+        return
+    if (not stat.S_ISDIR(directory_stat.st_mode)
+            or directory_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(directory_stat.st_mode) != 0o700):
+        fail(f"durable guarded COW journal directory is not private: {JOURNAL_DIR}")
+    try:
+        journals = sorted(JOURNAL_DIR.glob("*.json"))
+    except OSError as exc:
+        fail(f"cannot inspect durable guarded COW journals: {exc}")
+    if journals:
+        names = ", ".join(path.name for path in journals)
+        fail("unreconciled guarded COW transaction journal(s) exist: " + names +
+             "; affected partitions must remain unavailable until explicit recovery")
 
 
 def replace_overlay(config, progress=False):
@@ -1420,7 +1873,7 @@ def replace_overlay(config, progress=False):
                 pass
 
 
-def commit_overlay(config, progress=False):
+def commit_overlay(config, progress=False, phase_callback=None):
     args = [QEMU_IMG, "commit"]
     if progress:
         print("Guarded COW save: writing the reviewed extents to the physical disk.",
@@ -1436,7 +1889,12 @@ def commit_overlay(config, progress=False):
               file=sys.stderr, flush=True)
     else:
         run(*args)
+    if phase_callback:
+        phase_callback("merge-complete")
+        phase_callback("replacement-pending")
     replace_overlay(config, progress=progress)
+    if phase_callback:
+        phase_callback("replacement-complete")
 
 
 def offline_action(domain, action):
@@ -1490,7 +1948,12 @@ def offline_action(domain, action):
 
 
 def dispatch(action, domain, operation_argument=None, progress=False):
+    if action == "boot-check":
+        boot_check()
+        return
     if action == "check-start":
+        if JOURNAL_DIR.exists() and any(JOURNAL_DIR.glob("*.json")):
+            fail("a durable guarded COW transaction needs reconciliation before VM start")
         if STATE.exists():
             held = json.loads(STATE.read_text(encoding="utf-8")).get("domain")
             if held != domain:
@@ -1544,8 +2007,12 @@ def dispatch(action, domain, operation_argument=None, progress=False):
 def main():
     if os.geteuid() != 0:
         fail("must run as root")
+    if len(sys.argv) == 2 and sys.argv[1] == "boot-check":
+        with operation_lock():
+            boot_check()
+        return
     if len(sys.argv) not in (3, 4, 5):
-        fail("usage: qemu-guarded-cow prepare|verify|guest-started|restore|initialize|review|commit DOMAIN [REVIEW_ID [--progress]] | guest-stopped DOMAIN SHUTOFF_REASON | discard DOMAIN | check-start DOMAIN")
+        fail("usage: qemu-guarded-cow prepare|verify|guest-started|restore|initialize|review|commit DOMAIN [REVIEW_ID [--progress]] | guest-stopped DOMAIN SHUTOFF_REASON | discard DOMAIN | check-start DOMAIN | boot-check")
     action, domain = sys.argv[1:3]
     progress = False
     if action == "commit":

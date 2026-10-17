@@ -147,6 +147,86 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         self.assertIsNone(state['last_shutdown_reason'])
         self.assertFalse(state['snapshot_eligible'])
 
+    def test_firmware_boot_guard_is_reversible_and_targets_the_disk_esp(self) -> None:
+        helper_path = Path(__file__).resolve().parents[3] / 'scripts/qemu-guarded-cow'
+        loader = importlib.machinery.SourceFileLoader(
+            'qemu_guarded_cow_firmware_test', str(helper_path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+
+        esp_guid = '0cffc624-2969-4e6c-981e-ebbbc1308966'
+        other_guid = 'aa12c624-2969-4e6c-981e-ebbbc1308966'
+        state = {'order': ['0000', '0002', '2001'],
+                 'active': {'0000': True, '0002': True, '0004': True}}
+
+        def efibootmgr_output():
+            order = ','.join(state['order'])
+            rows = [f'BootOrder: {order}']
+            for ident, name, guid, path in (
+                    ('0000', 'Windows Boot Manager', esp_guid,
+                    r'\EFI\Microsoft\Boot\bootmgfw.efi'),
+                    ('0002', 'debian', esp_guid,
+                    r'\EFI\debian\shimx64.efi'),
+                    ('0004', 'Windows Boot Manager', other_guid,
+                    r'\EFI\Microsoft\Boot\bootmgfw.efi')):
+                marker = '*' if state['active'][ident] else ''
+                rows.append(
+                    f'Boot{ident}{marker} {name} '
+                    f'HD(1,GPT,{guid},0x800,0x1000)/File({path})')
+            return '\n'.join(rows) + '\n'
+
+        original_run = helper.run
+
+        def fake_run(*args, input=None):
+            if args[0] != 'efibootmgr':
+                return original_run(*args, input=input)
+            if args[1] == '-o':
+                state['order'] = args[2].split(',')
+            elif args[1] == '-b':
+                state['active'][args[2]] = args[3] == '-a'
+            elif args[1] == '-O':
+                state['order'] = []
+            elif args[1] == '-v':
+                return subprocess.CompletedProcess(
+                    args, 0, efibootmgr_output(), '')
+            else:
+                self.fail(f'unexpected efibootmgr command: {args!r}')
+            return subprocess.CompletedProcess(
+                args, 0, efibootmgr_output(), '')
+
+        helper.run = fake_run
+        try:
+            original = efibootmgr_output()
+            snapshot = helper.parse_firmware_boot(original, [esp_guid])
+            self.assertEqual(snapshot['linux_entry'], '0002')
+            self.assertEqual(snapshot['windows_entries'], [
+                {'id': '0000', 'active': True}])
+
+            helper.apply_firmware_boot_guard(snapshot)
+            self.assertEqual(state['order'], ['0002'])
+            self.assertFalse(state['active']['0000'])
+            self.assertTrue(state['active']['0004'])
+
+            helper.restore_firmware_boot(snapshot)
+            self.assertEqual(state['order'], ['0000', '0002', '2001'])
+            self.assertTrue(state['active']['0000'])
+            self.assertTrue(state['active']['0004'])
+
+            empty_order_snapshot = dict(snapshot, boot_order=[])
+            state['order'] = ['0002']
+            helper.restore_firmware_boot(empty_order_snapshot)
+            self.assertEqual(state['order'], [])
+
+            off_disk_linux = original.replace(
+                f'Boot0002* debian HD(1,GPT,{esp_guid}',
+                f'Boot0002* debian HD(1,GPT,{other_guid}')
+            with self.assertRaisesRegex(helper.GuardError,
+                                        'cannot identify an active Linux EFI boot entry'):
+                helper.parse_firmware_boot(off_disk_linux, [esp_guid])
+        finally:
+            helper.run = original_run
+
     def write(self, offset: int, command: str = 'write'):
         return qemu_io('--image-opts', self.image_opts,
                        '-c', f'{command} {offset} {SECTOR_SIZE}',
@@ -758,6 +838,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                                    check=False)
         self.assertEqual(untouched_suffix.returncode, 0,
                          untouched_suffix.stdout)
+
+        # The raw base is only partly merged, while the retained overlay still
+        # exposes the complete guest view until the retry below succeeds.
         differs = qemu_img('compare', '-s', '-f', 'raw', '-F', 'qcow2',
                            image, overlay, check=False)
         self.assertNotEqual(differs.returncode, 0,
@@ -774,6 +857,12 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                          (identical.stdout or '') + (identical.stderr or ''))
         self.assertEqual(qemu_img('check', '-q', overlay,
                                   check=False).returncode, 0)
+        for index in range(extent_count):
+            result = qemu_io('-f', 'raw', image, '-c',
+                             f'read -P 0xab '
+                             f'{offset + index * extent_stride} {extent_size}',
+                             check=False)
+            self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_guarded_helper_builds_plan_with_qemu_img(self) -> None:
         image = os.path.join(iotests.test_dir, 'helper-review-disk.img')
@@ -824,11 +913,60 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         self.assertFalse(helper.disk_metadata_matches(
             regular_metadata, dict(regular_metadata, mtime_ns=200)))
 
-        helper.RUN_DIR = Path(iotests.test_dir) / 'guard-helper-run'
+        helper.RUN_DIR = Path(iotests.test_dir) / (
+            f'guard-helper-run-{os.getpid()}')
         sector_size = SECTOR_SIZE
         original_run = helper.run
+        original_firmware_boot_snapshot = helper.firmware_boot_snapshot
+        original_helper_source_manifest = helper.HELPER_SOURCE_MANIFEST
+        original_recovery_guard_identity = helper.recovery_guard_identity
+        original_path_read_bytes = Path.read_bytes
+        source_path = Path(helper.helper_identity()['source_path']) \
+            if helper.helper_identity()['installed'] else None
+
+        if source_path is not None:
+            def hide_helper_source(path):
+                if path == source_path:
+                    raise FileNotFoundError(path)
+                return original_path_read_bytes(path)
+
+            Path.read_bytes = hide_helper_source
+            try:
+                with self.assertRaisesRegex(helper.GuardError,
+                                            'cannot verify guarded COW helper'):
+                    helper.helper_identity()
+                self.assertIsNone(
+                    helper.helper_identity(require_source=False)['source_match'])
+            finally:
+                Path.read_bytes = original_path_read_bytes
+
+        efi_guid = '0cffc624-2969-4e6c-981e-ebbbc1308966'
+        efi_state = {'order': ['0000', '0002', '2001'],
+                     'active': {'0000': True, '0002': True}}
+
+        def efibootmgr_output():
+            rows = [f"BootOrder: {','.join(efi_state['order'])}"]
+            for ident, name, path in (
+                    ('0000', 'Windows Boot Manager',
+                     r'\EFI\Microsoft\Boot\bootmgfw.efi'),
+                    ('0002', 'debian', r'\EFI\debian\shimx64.efi')):
+                marker = '*' if efi_state['active'][ident] else ''
+                rows.append(
+                    f'Boot{ident}{marker} {name} '
+                    f'HD(1,GPT,{efi_guid},0x800,0x1000)/File({path})')
+            return '\n'.join(rows) + '\n'
+
+        helper.firmware_boot_snapshot = lambda _config, _inventory: \
+            helper.parse_firmware_boot(efibootmgr_output(), [efi_guid])
 
         def run_with_disposable_geometry(*args, input=None):
+            if args[0] == 'efibootmgr':
+                if args[1] == '-o':
+                    efi_state['order'] = args[2].split(',')
+                elif args[1] == '-b':
+                    efi_state['active'][args[2]] = args[3] == '-a'
+                return subprocess.CompletedProcess(
+                    args, 0, efibootmgr_output(), '')
             if args[:2] == ('blockdev', '--getsize64'):
                 return subprocess.CompletedProcess(
                     args, 0, str(len(base_before)), '')
@@ -953,10 +1091,8 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         helper.RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         helper.STATE = helper.RUN_DIR / 'active.json'
         helper.REVIEW_DIR = helper.RUN_DIR / 'reviews'
-        helper.STATE.write_text(json.dumps({
-            'domain': 'disposable', 'disk': image,
-            'partitions': config['partitions'], 'guest_active': False,
-        }), encoding='utf-8')
+        helper.JOURNAL_DIR = helper.RUN_DIR / 'journals'
+        helper.PHYSICAL_COMMIT_ENABLED = True
         helper.assert_vm_off = lambda _domain: None
         helper.parse_config = lambda _domain: config
         helper.part_devices = lambda _config: {
@@ -974,18 +1110,48 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                            for part in live['partitions']],
             'swap': [],
         }
+
+        # The existing COW root can predate baseline capture. Reviewing it
+        # must stay offline, report the missing evidence, and leave the
+        # decision to an explicit user acknowledgement in Virt-manager.
+        saved_baseline = baseline_path.read_bytes()
+        baseline_path.unlink()
+        helper.PHYSICAL_COMMIT_ENABLED = False
+        missing_baseline_output = io.StringIO()
+        with contextlib.redirect_stdout(missing_baseline_output):
+            helper.review_action('disposable')
+        missing_baseline_report = json.loads(
+            missing_baseline_output.getvalue())
+        self.assertEqual(
+            missing_baseline_report['guard']['base_root_baseline_status'],
+            'missing-legacy')
+        self.assertIsNone(
+            missing_baseline_report['guard']['base_root_baseline_sha256'])
+        offline_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
+        self.assertFalse(offline_state['guest_active'])
+        self.assertEqual(offline_state['mounts'], [])
+        baseline_path.write_bytes(saved_baseline)
+        os.chmod(baseline_path, 0o600)
+        helper.PHYSICAL_COMMIT_ENABLED = True
+
         review_output = io.StringIO()
         with contextlib.redirect_stdout(review_output):
             helper.review_action('disposable')
         report = json.loads(review_output.getvalue())
         self.assertFalse(report['physical_disk_written'])
         self.assertTrue(report['commit_enabled'])
+        if report['helper']['installed']:
+            self.assertTrue(report['helper']['source_match'])
+            self.assertTrue(report['recovery_guard']['enabled'])
+            self.assertTrue(report['recovery_guard']['active'])
+            self.assertEqual(
+                report['recovery_guard']['effective_properties']['UnitFileState'],
+                'enabled')
         self.assertIn('base_root_capture_basis', report['guard'])
-        if 'shutdown' in report:
-            self.assertEqual(report['shutdown'], {
-                'reason': 'unknown', 'clean_snapshot_eligible': False,
-            })
-        self.assertIn('separate, explicitly confirmed action',
+        self.assertEqual(report['shutdown'], {
+            'reason': 'unknown', 'clean_snapshot_eligible': False,
+        })
+        self.assertIn('review ID is valid for one hour',
                       report['notice'])
         fingerprint_supported = 'base_content_sha256' in report['guard']
         if fingerprint_supported:
@@ -1024,7 +1190,7 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         commit_report = json.loads(review_output.getvalue())
         self.assertTrue(commit_report['commit_enabled'])
         self.assertIn('base_root_capture_basis', commit_report['guard'])
-        self.assertIn('separate, explicitly confirmed action',
+        self.assertIn('review ID is valid for one hour',
                       commit_report['notice'])
         _raw_recheck, extents_recheck, _inventory_recheck = helper.make_write_plan(config)
         self.assertEqual(extents_recheck, commit_report['planned_extents'])
@@ -1041,62 +1207,149 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
 
         helper.make_write_plan = count_commit_write_plan
 
-        # A reviewed physical extent changing after review invalidates the
-        # token before save-pending is recorded or any commit is attempted.
-        if fingerprint_supported:
-            changed_offset = commit_report['planned_extents'][0]['offset']
-            with open(image, 'r+b') as stream:
-                stream.seek(changed_offset)
-                original_byte = stream.read(1)
-                stream.seek(changed_offset)
-                stream.write(bytes([original_byte[0] ^ 0xff]))
-            with self.assertRaisesRegex(helper.GuardError,
-                                        'COW-root baseline.*physical save is blocked'):
-                calls_before = commit_plan_calls
-                helper.commit_review('disposable', commit_report['review_id'])
-            self.assertEqual(commit_plan_calls - calls_before, 1)
-            self.assertNotIn('save_pending', json.loads(
-                helper.STATE.read_text(encoding='utf-8')))
-            with open(image, 'r+b') as stream:
-                stream.seek(changed_offset)
-                stream.write(original_byte)
-            root_baseline = helper.capture_base_baseline(config, _inventory)
-            helper.store_base_baseline(config, root_baseline)
-
-            review_output = io.StringIO()
-            with contextlib.redirect_stdout(review_output):
-                helper.review_action('disposable')
-            commit_report = json.loads(review_output.getvalue())
+        # A recent review is the user's authorization; do not spend minutes
+        # repeating its full-base content scan after the write phase begins.
+        changed_offset = untouched_allowed_offset
+        change_base_once = fingerprint_supported
         old_overlay_stat = os.stat(overlay)
         fail_after_commit = True
         restore_calls = []
-        helper.restore = lambda _domain: restore_calls.append(_domain)
+        qemu_commit_calls = 0
+
+        def finish_restore(domain):
+            restore_calls.append(domain)
+            transaction_state = helper.read_journal(domain)
+            helper.restore_firmware_boot(
+                transaction_state['save_transaction']['firmware_boot'])
+            helper.remove_journal(domain)
+            helper.STATE.unlink(missing_ok=True)
+
+        helper.restore = finish_restore
+        original_replace_overlay = helper.replace_overlay
 
         def fail_once_after_commit(*args, input=None):
-            nonlocal fail_after_commit
+            nonlocal fail_after_commit, qemu_commit_calls, change_base_once
             if args[0] == 'blockdev' and args[1] == '--getss':
                 return subprocess.CompletedProcess(args, 0, '512\n', '')
+            if (args[0] == helper.QEMU_IMG and 'commit' in args
+                    and change_base_once):
+                with open(image, 'r+b') as stream:
+                    stream.seek(changed_offset)
+                    original_byte = stream.read(1)
+                    stream.seek(changed_offset)
+                    stream.write(bytes([original_byte[0] ^ 0xff]))
+                expected[changed_offset] ^= 0xff
+                change_base_once = False
+                helper.disk_metadata_matches = original_metadata_matches
             result = run_with_disposable_geometry(*args, input=input)
-            if args[0] == helper.QEMU_IMG and 'commit' in args and fail_after_commit:
-                fail_after_commit = False
-                raise subprocess.CalledProcessError(
-                    1, args, output=result.stdout,
-                    stderr='injected failure after disposable-disk commit')
+            if args[0] == helper.QEMU_IMG and 'commit' in args:
+                qemu_commit_calls += 1
+                if fail_after_commit:
+                    fail_after_commit = False
+                    raise subprocess.CalledProcessError(
+                        1, args, output=result.stdout,
+                        stderr='injected failure after disposable-disk commit')
             return result
 
         helper.run = fail_once_after_commit
+        original_metadata_matches = helper.disk_metadata_matches
+        old_time = helper.time.time
         try:
+            original_apply_firmware_boot_guard = helper.apply_firmware_boot_guard
+
+            def interrupt_before_merge(snapshot):
+                original_apply_firmware_boot_guard(snapshot)
+                raise RuntimeError('injected interruption before physical merge')
+
+            helper.apply_firmware_boot_guard = interrupt_before_merge
+            with self.assertRaisesRegex(RuntimeError,
+                                        'injected interruption before physical merge'):
+                helper.commit_review('disposable', commit_report['review_id'])
+            helper.apply_firmware_boot_guard = original_apply_firmware_boot_guard
+            prewrite_state = json.loads(helper.journal_path(
+                'disposable').read_text(encoding='utf-8'))
+            self.assertEqual(prewrite_state['save_transaction']['phase'],
+                             'firmware-guarding')
+            self.assertEqual(qemu_commit_calls, 0)
+
+            # The merge has not started, so a native boot after a crash in
+            # firmware-guarding must be detected from the base content before
+            # a retry can begin writing.
+            helper.disk_metadata_matches = lambda _baseline, _current: True
+            with open(image, 'r+b') as stream:
+                stream.seek(untouched_allowed_offset)
+                base_byte = stream.read(1)
+                stream.seek(untouched_allowed_offset)
+                stream.write(bytes([base_byte[0] ^ 0xff]))
+            try:
+                with self.assertRaisesRegex(helper.GuardError,
+                                            'backing disk differs from its COW-root baseline'):
+                    helper.commit_review('disposable', commit_report['review_id'])
+                self.assertEqual(qemu_commit_calls, 0)
+            finally:
+                with open(image, 'r+b') as stream:
+                    stream.seek(untouched_allowed_offset)
+                    stream.write(base_byte)
+
             calls_before = commit_plan_calls
             with self.assertRaises(subprocess.CalledProcessError):
                 helper.commit_review('disposable', commit_report['review_id'])
-            self.assertEqual(commit_plan_calls - calls_before, 1)
+            self.assertEqual(commit_plan_calls - calls_before, 0)
             failed_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
             self.assertTrue(failed_state['save_pending'])
             self.assertNotIn('save_complete', failed_state)
             self.assertEqual(os.stat(overlay).st_ino, old_overlay_stat.st_ino)
             self.assertEqual(restore_calls, [])
+            self.assertEqual(efi_state['order'], ['0002'])
+            self.assertFalse(efi_state['active']['0000'])
             with open(image, 'rb') as stream:
                 self.assertEqual(stream.read(), expected)
+
+            # Simulate loss of volatile /run state and the review cache. The
+            # durable transaction must block startup and authorize a retry
+            # after its original one-hour window.
+            review_path = helper.REVIEW_DIR / (
+                helper.hashlib.sha256(
+                    commit_report['review_id'].encode()).hexdigest() + '.json')
+            review_path.unlink()
+            helper.STATE.unlink()
+            with self.assertRaisesRegex(helper.GuardError,
+                                        'unreconciled guarded COW transaction'):
+                helper.boot_check()
+            helper.time.time = lambda: commit_report['expires_at'] + 1
+
+            # During a real reboot recovery, the early-boot unit has failed
+            # into emergency.target and its source checkout may not be mounted.
+            # The durable review must still authorize retry with the exact
+            # installed helper and the same fail-closed unit configuration.
+            pending_guard = dict(commit_report['recovery_guard'], active=False)
+            helper.recovery_guard_identity = lambda require_active=True: (
+                self.fail('pending retry incorrectly requires an active guard unit')
+                if require_active else pending_guard)
+            if source_path is not None:
+                Path.read_bytes = hide_helper_source
+
+            # Simulate process death after the fresh overlay has replaced the
+            # committed overlay but before the replacement-complete phase is
+            # journaled. Recovery must finish replacement without merging a
+            # third time.
+            def replace_then_interrupt(config, progress=False):
+                original_replace_overlay(config, progress=progress)
+                raise SystemExit('injected interruption after overlay replacement')
+
+            helper.replace_overlay = replace_then_interrupt
+            with self.assertRaisesRegex(SystemExit, 'injected interruption'):
+                helper.commit_review('disposable', commit_report['review_id'])
+            helper.replace_overlay = original_replace_overlay
+            self.assertEqual(qemu_commit_calls, 2)
+            interrupted_state = json.loads(
+                helper.journal_path('disposable').read_text(encoding='utf-8'))
+            self.assertEqual(interrupted_state['save_transaction']['phase'],
+                             'replacement-pending')
+            helper.STATE.unlink()
+            with self.assertRaisesRegex(helper.GuardError,
+                                        'unreconciled guarded COW transaction'):
+                helper.boot_check()
 
             calls_before = commit_plan_calls
             progress_path = os.path.join(iotests.test_dir,
@@ -1107,17 +1360,23 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                     helper.commit_review('disposable',
                                          commit_report['review_id'],
                                          progress=True)
+            helper.time.time = old_time
             with open(progress_path, 'r') as progress_stream:
                 progress_text = progress_stream.read()
-            self.assertIn('one fresh guarded dry-run', progress_text)
-            self.assertGreaterEqual(progress_text.count('100.00/100%'), 2)
-            self.assertIn('writing the reviewed extents to the physical disk',
+            self.assertNotIn('fresh guarded dry-run', progress_text)
+            self.assertIn('checking disk identity, overlay metadata, and host isolation',
                           progress_text)
+            self.assertNotIn('writing the reviewed extents to the physical disk',
+                             progress_text)
             self.assertIn('Guarded COW save: complete.', progress_text)
-            self.assertEqual(commit_plan_calls - calls_before, 1)
-            completed_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
-            self.assertTrue(completed_state['save_complete'])
+            self.assertEqual(commit_plan_calls - calls_before, 0)
+            self.assertEqual(qemu_commit_calls, 2)
+            helper.boot_check()
+            self.assertFalse(helper.STATE.exists())
+            self.assertFalse(helper.journal_path('disposable').exists())
             self.assertEqual(restore_calls, ['disposable'])
+            self.assertEqual(efi_state['order'], ['0000', '0002', '2001'])
+            self.assertTrue(efi_state['active']['0000'])
             self.assertNotEqual(os.stat(overlay).st_ino, old_overlay_stat.st_ino)
             self.assertEqual(original_run(
                 helper.QEMU_IMG, 'check', '-q', overlay).returncode, 0)
@@ -1131,7 +1390,14 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                 self.assertEqual(stream.read(), expected)
         finally:
             helper.run = original_run
+            helper.firmware_boot_snapshot = original_firmware_boot_snapshot
+            helper.HELPER_SOURCE_MANIFEST = original_helper_source_manifest
+            helper.recovery_guard_identity = original_recovery_guard_identity
+            Path.read_bytes = original_path_read_bytes
             helper.make_write_plan = original_make_write_plan
+            helper.replace_overlay = original_replace_overlay
+            helper.time.time = old_time
+            helper.disk_metadata_matches = original_metadata_matches
             helper.pwd.getpwnam = original_getpwnam
             helper.PHYSICAL_COMMIT_ENABLED = False
 

@@ -1099,7 +1099,21 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                 self.assertEqual(stream.read(), expected)
 
             calls_before = commit_plan_calls
-            helper.commit_review('disposable', commit_report['review_id'])
+            progress_path = os.path.join(iotests.test_dir,
+                                         'guarded-commit-progress.txt')
+            with open(progress_path, 'w') as progress_stream:
+                with contextlib.redirect_stdout(progress_stream), \
+                        contextlib.redirect_stderr(progress_stream):
+                    helper.commit_review('disposable',
+                                         commit_report['review_id'],
+                                         progress=True)
+            with open(progress_path, 'r') as progress_stream:
+                progress_text = progress_stream.read()
+            self.assertIn('one fresh guarded dry-run', progress_text)
+            self.assertIn('100.00/100%', progress_text)
+            self.assertIn('writing the reviewed extents to the physical disk',
+                          progress_text)
+            self.assertIn('Guarded COW save: complete.', progress_text)
             self.assertEqual(commit_plan_calls - calls_before, 1)
             completed_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
             self.assertTrue(completed_state['save_complete'])

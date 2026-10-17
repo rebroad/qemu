@@ -1431,7 +1431,7 @@ def commit_overlay(config, progress=False):
     if progress:
         # qemu-img prints its live percentage to stdout. Inherit the caller's
         # terminal for this opt-in CLI mode; normal GUI runs keep captured IO.
-        subprocess.run(args, check=True)
+        subprocess.run(args, check=True, stdout=sys.stdout)
         print("Guarded COW save: replacing the committed overlay with a fresh root.",
               file=sys.stderr, flush=True)
     else:

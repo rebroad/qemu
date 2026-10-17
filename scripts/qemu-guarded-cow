@@ -4,6 +4,7 @@
 import json
 import hashlib
 import fcntl
+import math
 import os
 import pwd
 import re
@@ -32,6 +33,10 @@ HELPER_SOURCE_MANIFEST = Path("/usr/local/libexec/qemu-guarded-cow.source.json")
 RECOVERY_SERVICE = "qemu-guarded-cow-recovery-check.service"
 RECOVERY_SERVICE_PATH = Path("/etc/systemd/system") / RECOVERY_SERVICE
 REVIEW_TTL = 3600
+TIMING_HISTORY = JOURNAL_DIR / "timing" / "history.json"
+TIMING_SCHEMA = "qemu-guarded-cow-timing-v1"
+TIMING_SAMPLE_LIMIT = 32
+_TIMING_WARNING_EMITTED = False
 # Disposable-disk success, partial interruption, retry, and reboot-state
 # recovery validation passed with the installed helper and qemu-img. Each real
 # save still requires a fresh review and explicit confirmation.
@@ -512,6 +517,109 @@ def atomic_json(path, data, prefix):
         raise
 
 
+def timing_workload(report):
+    disk = report.get("disk", {})
+    identity = disk.get("identity", disk)
+    stable = {key: identity.get(key) for key in
+              ("ptuuid", "wwn", "size", "log-sec") if identity.get(key)}
+    stable["size_bytes"] = disk.get("size_bytes")
+    profile = hashlib.sha256(json.dumps(
+        stable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    extents = report.get("planned_extents", [])
+    overlay = report.get("overlay", {})
+    return {"disk_profile": profile,
+            "extent_count": len(extents),
+            "planned_bytes": sum(item.get("length", 0) for item in extents),
+            "overlay_bytes": overlay.get("size", 0),
+            "disk_bytes": disk.get("size_bytes", 0)}
+
+
+def read_timing_history():
+    """Timing history is advisory; every failure degrades to no estimate."""
+    global _TIMING_WARNING_EMITTED
+    try:
+        st = os.lstat(TIMING_HISTORY)
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or st.st_uid != os.geteuid()
+                or stat.S_IMODE(st.st_mode) != 0o600 or st.st_size > 1024 * 1024):
+            raise ValueError("unsafe owner, mode, or file type")
+        data = json.loads(TIMING_HISTORY.read_text(encoding="utf-8"))
+        if data.get("schema") != TIMING_SCHEMA or not isinstance(
+                data.get("samples"), list):
+            raise ValueError("unsupported timing history schema")
+        for row in data["samples"]:
+            workload = row.get("workload") if isinstance(row, dict) else None
+            if (not isinstance(workload, dict)
+                    or not isinstance(row.get("phase"), str)
+                    or not isinstance(row.get("seconds"), (int, float))
+                    or not math.isfinite(row["seconds"])
+                    or row["seconds"] < 0
+                    or not re.fullmatch(r"[0-9a-f]{64}",
+                                        workload.get("disk_profile", ""))
+                    or any(not isinstance(workload.get(key), (int, float))
+                           or not math.isfinite(workload[key])
+                           or workload[key] < 0
+                           for key in ("planned_bytes", "overlay_bytes",
+                                       "extent_count", "disk_bytes"))):
+                raise ValueError("malformed completed-run sample")
+        return data
+    except FileNotFoundError:
+        return {"schema": TIMING_SCHEMA, "samples": []}
+    except Exception as exc:
+        if not _TIMING_WARNING_EMITTED:
+            _TIMING_WARNING_EMITTED = True
+            print(f"qemu-guarded-cow: timing history unavailable ({exc}); ETA unavailable",
+                  file=sys.stderr)
+        return {"schema": TIMING_SCHEMA, "samples": []}
+
+
+def estimate_phase_seconds(phase, workload):
+    rows = [row for row in read_timing_history()["samples"]
+            if row.get("phase") == phase
+            and row.get("workload", {}).get("disk_profile") ==
+            workload.get("disk_profile")
+            and isinstance(row.get("seconds"), (int, float))
+            and row["seconds"] >= 0]
+    if not rows:
+        return None
+    rows = rows[-TIMING_SAMPLE_LIMIT:]
+    ratios = []
+    for key in ("planned_bytes", "overlay_bytes", "extent_count"):
+        old, new = rows[-1]["workload"].get(key), workload.get(key)
+        if isinstance(old, (int, float)) and old > 0 and isinstance(new, (int, float)):
+            ratios.append(new / old)
+    scale = max(0.5, min(2.0, sorted(ratios)[len(ratios) // 2])) if ratios else 1.0
+    durations = sorted(row["seconds"] for row in rows)
+    middle = len(durations) // 2
+    median = (durations[middle] if len(durations) % 2 else
+              (durations[middle - 1] + durations[middle]) / 2)
+    return round(median * scale)
+
+
+def record_timing_samples(workload, durations):
+    """Best-effort bounded history; never let estimates block a guarded save."""
+    try:
+        history = read_timing_history()
+        now = int(time.time())
+        for phase, seconds in durations.items():
+            if (isinstance(seconds, (int, float)) and math.isfinite(seconds)
+                    and seconds >= 0):
+                history["samples"].append({
+                    "phase": phase, "seconds": round(seconds, 3),
+                    "workload": workload, "completed_at": now})
+        history["samples"] = history["samples"][-TIMING_SAMPLE_LIMIT * 8:]
+        for directory in (JOURNAL_DIR, TIMING_HISTORY.parent):
+            directory.mkdir(mode=0o700, exist_ok=True)
+            st = os.lstat(directory)
+            if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
+                    or stat.S_IMODE(st.st_mode) != 0o700):
+                raise ValueError(f"unsafe timing history directory {directory}")
+        atomic_json(TIMING_HISTORY, history, ".guarded-cow-timing-")
+    except Exception as exc:
+        print(f"qemu-guarded-cow: could not save timing history ({exc}); continuing safely",
+              file=sys.stderr)
+
+
 def journal_path(domain):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", domain):
         fail("invalid domain name for guarded COW journal")
@@ -860,7 +968,7 @@ def overlay_fingerprint(config):
             "health": "qemu-img check passed"}
 
 
-def make_write_plan(config, progress=False):
+def make_write_plan(config, progress=False, progress_estimate=None):
     inventory_before = disk_inventory(config)
     RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, plan_path = tempfile.mkstemp(prefix=".review-plan-", dir=RUN_DIR)
@@ -874,14 +982,17 @@ def make_write_plan(config, progress=False):
             args.append("-p")
         args.extend(("-d", "--image-opts", "--backing-image-opts",
                      guard_options(config, plan_path), overlay_options(config)))
-        result = subprocess.run(
-            args, check=False, text=True,
-            stdout=sys.stderr if progress else subprocess.PIPE,
-            stderr=subprocess.PIPE)
-        if result.returncode:
-            fail("guarded dry-run commit failed: " +
-                 (result.stderr.strip() or (result.stdout or "").strip() or
-                  f"exit status {result.returncode}"))
+        if progress:
+            run_with_progress(args, "review write-plan traversal",
+                              progress_estimate)
+        else:
+            result = subprocess.run(args, check=False, text=True,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+            if result.returncode:
+                fail("guarded dry-run commit failed: " +
+                     (result.stderr.strip() or (result.stdout or "").strip() or
+                      f"exit status {result.returncode}"))
         with open(plan_path, "rb") as stream:
             raw = stream.read()
         records = [json.loads(line) for line in raw.splitlines()]
@@ -931,13 +1042,15 @@ def write_plan_sha256(extents):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def base_content_fingerprint(disk, extents, progress_label=None):
+def base_content_fingerprint(disk, extents, progress_label=None,
+                             historical_seconds=None):
     digest = hashlib.sha256()
     ordered_extents = sorted(extents, key=lambda item: (item["offset"],
                                                         item["length"]))
     total = sum(extent["length"] for extent in ordered_extents)
     completed = 0
     reported = -5
+    started = time.monotonic()
     if progress_label:
         print(f"Guarded COW save: {progress_label}: 0% (0/{total} bytes)",
               file=sys.stderr, flush=True)
@@ -959,8 +1072,16 @@ def base_content_fingerprint(disk, extents, progress_label=None):
                     percent = completed * 100 // total
                     if percent >= reported + 5 or completed == total:
                         reported = percent
+                        elapsed = max(0.001, time.monotonic() - started)
+                        rate_eta = elapsed * (100 - percent) / percent if percent else None
+                        history_eta = (historical_seconds * (100 - percent) / 100
+                                       if historical_seconds is not None else None)
+                        estimates = [item for item in (rate_eta, history_eta)
+                                     if item is not None]
+                        eta_text = (f"; about {int(sum(estimates) / len(estimates))}s remaining (estimate)"
+                                    if estimates and percent < 100 else "")
                         print(f"\rGuarded COW save: {progress_label}: "
-                              f"{percent}% ({completed}/{total} bytes)",
+                              f"{percent}% ({completed}/{total} bytes){eta_text}",
                               end="", file=sys.stderr, flush=True)
     finally:
         os.close(fd)
@@ -1007,13 +1128,15 @@ def disk_metadata_matches(baseline, current):
 
 
 def capture_base_baseline(config, inventory=None, progress=False,
-                          progress_label="Checking the COW-root baseline"):
+                          progress_label="Checking the COW-root baseline",
+                          historical_seconds=None):
     inventory = inventory or disk_inventory(config)
     disk_stat_before = os.stat(config["disk"])
     coverage = base_fingerprint_extents(config, inventory)
     content_sha256 = base_content_fingerprint(
         config["disk"], coverage,
-        progress_label=progress_label if progress else None)
+        progress_label=progress_label if progress else None,
+        historical_seconds=historical_seconds)
     disk_stat_after = os.stat(config["disk"])
     inventory_after = disk_inventory(config)
     stat_keys = disk_metadata_stat_keys(disk_stat_after.st_mode)
@@ -1107,10 +1230,12 @@ def load_base_baseline(config):
 
 
 def verify_root_baseline(config, inventory=None, progress=False,
-                         progress_label="Checking the COW-root baseline"):
+                         progress_label="Checking the COW-root baseline",
+                         historical_seconds=None):
     baseline = load_base_baseline(config)
     current = capture_base_baseline(config, inventory, progress=progress,
-                                    progress_label=progress_label)
+                                    progress_label=progress_label,
+                                    historical_seconds=historical_seconds)
     keys = ("disk_identity", "disk_geometry", "disk_metadata", "partitions",
             "coverage_extents", "content_sha256", "coverage")
     changed = [key for key in keys if key != "disk_metadata"
@@ -1206,12 +1331,21 @@ def disk_map_svg(inventory, config, extents):
     return "\n".join(svg)
 
 
-def review_action(domain):
+def review_action(domain, progress=False, emit=True):
+    review_started = time.monotonic()
+    timings = {}
+    def measured(name, function, *args, **kwargs):
+        started = time.monotonic()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            timings[name] = time.monotonic() - started
+
     assert_vm_off(domain)
     config = parse_config(domain)
     helper_info = helper_identity()
     recovery_guard = recovery_guard_identity()
-    validate_overlay(config)
+    measured("review-overlay-validation", validate_overlay, config)
     if not STATE.exists():
         devices = part_devices(config)
         state = offline_review_state(domain, config, devices)
@@ -1235,18 +1369,50 @@ def review_action(domain):
            for part in config["partitions"]):
         fail("configured writable partitions must be unmounted for save review")
     verify_qemu_readonly(config["disk"])
-    _raw_plan, extents, inventory = make_write_plan(config)
+    plan_inventory = disk_inventory(config)
+    planning_workload = timing_workload({
+        "disk": {**plan_inventory["identity"],
+                 "size_bytes": plan_inventory["size_bytes"]},
+        "overlay": {"size": os.stat(config["overlay"]).st_size},
+        "planned_extents": []})
+    plan_estimate = estimate_phase_seconds("review-write-plan", planning_workload)
+    if progress:
+        if plan_estimate is None:
+            print("Guarded COW review: no comparable completed-run estimate for write-plan traversal yet.",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"Guarded COW review: historical write-plan estimate about {plan_estimate}s.",
+                  file=sys.stderr, flush=True)
+    _raw_plan, extents, inventory = measured(
+        "review-write-plan", make_write_plan, config, progress=progress,
+        progress_estimate=plan_estimate)
     firmware_boot = firmware_boot_snapshot(config, inventory)
     root_baseline_digest = base_baseline_digest(config)
-    root_baseline = (verify_root_baseline(config, inventory)
-                     if root_baseline_digest is not None else None)
-    precommit_base_sha256 = (
-        root_baseline["content_sha256"] if root_baseline else
-        base_content_fingerprint(
-            config["disk"], base_fingerprint_extents(config, inventory)))
-    base_fingerprint = base_content_fingerprint(config["disk"], extents)
-    host = host_disk_state(inventory, config)
-    overlay = overlay_fingerprint(config)
+    planned_workload = timing_workload({
+        "disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"]},
+        "overlay": {"size": os.stat(config["overlay"]).st_size},
+        "planned_extents": extents})
+    root_baseline = (measured(
+        "review-root-baseline", verify_root_baseline, config, inventory,
+        progress=progress,
+        historical_seconds=estimate_phase_seconds(
+            "review-root-baseline", planned_workload))
+        if root_baseline_digest is not None else None)
+    fingerprint_estimate = estimate_phase_seconds(
+        "review-plan-fingerprint", planned_workload)
+    precommit_base_sha256 = root_baseline["content_sha256"] if root_baseline else measured(
+        "review-precommit-fingerprint", base_content_fingerprint,
+        config["disk"], base_fingerprint_extents(config, inventory),
+        progress_label="Fingerprinting the precommit base" if progress else None,
+        historical_seconds=estimate_phase_seconds(
+            "review-precommit-fingerprint", planned_workload))
+    base_fingerprint = measured(
+        "review-plan-fingerprint", base_content_fingerprint,
+        config["disk"], extents,
+        progress_label="Fingerprinting planned extents" if progress else None,
+        historical_seconds=fingerprint_estimate)
+    host = measured("review-host-state", host_disk_state, inventory, config)
+    overlay = measured("review-overlay-fingerprint", overlay_fingerprint, config)
     token = secrets.token_urlsafe(32)
     now = int(time.time())
     notice = (
@@ -1313,6 +1479,22 @@ def review_action(domain):
                             (root_baseline["disk_metadata"] if root_baseline else None)},
               "planned_extents": extents}
     report["disk_map_svg"] = disk_map_svg(inventory, config, extents)
+    timings["review-total"] = time.monotonic() - review_started
+    workload = timing_workload(report)
+    commit_estimates = {phase: estimate_phase_seconds(phase, workload)
+                        for phase in ("commit-safety-validation",
+                                      "commit-merge", "commit-replacement",
+                                      "commit-host-restore")}
+    report["timing_estimates"] = {
+        "review_seconds": estimate_phase_seconds("review-total", workload),
+        "this_review_seconds": round(timings["review-total"], 1),
+        "review_phases_seconds": {
+            phase: estimate_phase_seconds(phase, workload)
+            for phase in ("review-write-plan", "review-root-baseline",
+                          "review-precommit-fingerprint",
+                          "review-plan-fingerprint")},
+        "commit_phases_seconds": commit_estimates,
+        "basis": "historical completed runs for this disk profile; estimates only"}
     REVIEW_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(REVIEW_DIR, 0o700)
     review_path = REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
@@ -1323,7 +1505,8 @@ def review_action(domain):
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-    if sys.stdout.isatty():
+    record_timing_samples(workload, timings)
+    if emit and sys.stdout.isatty():
         # Keep an interactive terminal readable while retaining the complete
         # extent-by-extent report for inspection. Virt-manager captures stdout
         # and continues to receive the machine-readable JSON below.
@@ -1359,20 +1542,25 @@ def review_action(domain):
             print(f"  p{number}: {byte_count} bytes")
         print(f"Full report: {report_path} (root-readable; use sudo to inspect)")
         print(f"Review ID: {token}")
+        review_estimate = report["timing_estimates"]["review_seconds"]
+        if review_estimate is None:
+            print(f"Review completed in {report['timing_estimates']['this_review_seconds']}s; no comparable historical estimate yet.")
+        else:
+            print(f"Review completed in {report['timing_estimates']['this_review_seconds']}s; historical estimate was about {review_estimate}s.")
         print("Commit only after reviewing the full report; this ID expires in one hour.")
-    else:
+    elif emit:
         print(json.dumps(report, separators=(",", ":")))
+    return report
 
 
-def commit_review(domain, token, progress=False):
+def commit_review(domain, token, progress=False, override_mode=None):
     if not PHYSICAL_COMMIT_ENABLED:
         fail("physical COW commit is disabled until the exact installed QEMU and helper pass disposable-disk success, failure, and retry validation")
     if progress:
         print("Guarded COW save: validating review authorization and current safety conditions; no writes yet.",
               file=sys.stderr, flush=True)
-    if not re.fullmatch(r"[A-Za-z0-9_-]{40,60}", token):
-        fail("invalid or missing review token")
-    review_path = REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
+    if token is not None and not re.fullmatch(r"[A-Za-z0-9_-]{40,60}", token):
+        fail("invalid review token")
     state = None
     if STATE.exists():
         try:
@@ -1385,18 +1573,50 @@ def commit_review(domain, token, progress=False):
     pending = bool(state and state.get("save_pending")
                    and not state.get("save_complete"))
     transaction = state.get("save_transaction", {}) if pending else {}
-    try:
-        saved = json.loads(review_path.read_text(encoding="utf-8"))
-        previous = saved["report"]
-    except Exception as exc:
+    if pending:
+        # After a restart/resume, phase elapsed time is no longer a complete
+        # successful-run sample and must not enter the learned history.
+        transaction["timing_samples_eligible"] = False
+    if token is None:
+        if not pending:
+            fail("a review ID is required; use --override-review-id to authorize a fresh internal review")
+        token = transaction.get("internal_review_token") or transaction.get("review_id")
+        if not token:
+            fail("pending save journal has no resumable authorization token")
         previous = transaction.get("review_report")
         if previous is None:
-            fail(f"cannot load the reviewed save plan: {exc}")
+            fail("pending save journal has no recorded reviewed plan")
+    else:
+        review_path = REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")
+        try:
+            saved = json.loads(review_path.read_text(encoding="utf-8"))
+            previous = saved["report"]
+        except Exception as exc:
+            previous = transaction.get("review_report")
+            if previous is None:
+                fail(f"cannot load the reviewed save plan: {exc}")
+    validation_started = time.monotonic()
+    timing_work = timing_workload(previous)
+    validation_estimate = estimate_phase_seconds(
+        "commit-safety-validation", timing_work)
+    if progress:
+        print("Guarded COW save: safety validation estimate " +
+              (f"about {validation_estimate}s from completed runs."
+               if validation_estimate is not None else
+               "unavailable until a comparable save completes."),
+              file=sys.stderr, flush=True)
     if pending:
-        if transaction.get("review_id") != token:
+        if token not in (transaction.get("review_id"),
+                         transaction.get("internal_review_token")):
             fail("pending save belongs to a different review; manual reconciliation is required")
-    elif previous.get("expires_at", 0) < int(time.time()):
+    elif (previous.get("expires_at", 0) < int(time.time())
+          and override_mode != "expired-review-id"):
         fail("save review expired; review again before starting a physical commit")
+    if override_mode == "expired-review-id":
+        print("Guarded COW save: explicitly accepting the expired review ID; "
+              f"original created_at={previous.get('created_at')} and "
+              f"expires_at={previous.get('expires_at')} remain unchanged.",
+              file=sys.stderr, flush=True)
     current_helper = helper_identity(require_source=not pending)
     reviewed_helper = previous.get("helper", {})
     same_installed_helper = all(
@@ -1407,8 +1627,8 @@ def commit_review(domain, token, progress=False):
             or (current_helper.get("installed") and not pending
                 and current_helper.get("source_match") is not True)):
         fail("guarded COW helper or its source changed after review")
-    current_recovery_guard = recovery_guard_identity(require_active=not pending)
-    reviewed_recovery_guard = previous.get("recovery_guard", {})
+    current_recovery_guard = recovery_guard_identity(require_active=not pending) or {}
+    reviewed_recovery_guard = previous.get("recovery_guard") or {}
     same_recovery_guard = (
         current_recovery_guard.get("path") == reviewed_recovery_guard.get("path")
         and current_recovery_guard.get("sha256") == reviewed_recovery_guard.get("sha256")
@@ -1493,13 +1713,35 @@ def commit_review(domain, token, progress=False):
     if progress:
         print("Guarded COW save: recording a durable write-pending state.",
               file=sys.stderr, flush=True)
+    validation_elapsed = time.monotonic() - validation_started
+    if progress:
+        print(f"Guarded COW save: safety validation completed in "
+              f"{validation_elapsed:.1f}s.", file=sys.stderr, flush=True)
 
     # The token represents a user-reviewed plan. The GUI calls this action
     # only after its separate explicit commit confirmation.
     if not pending:
+        merge_estimate = estimate_phase_seconds("commit-merge", timing_work)
+        replacement_estimate = estimate_phase_seconds(
+            "commit-replacement", timing_work)
+        if progress:
+            for label, estimate in (("physical merge", merge_estimate),
+                                    ("overlay replacement", replacement_estimate)):
+                detail = (f"about {estimate}s from completed runs"
+                          if estimate is not None else
+                          "unavailable until a comparable run completes")
+                print(f"Guarded COW save: {label} estimate {detail}.",
+                      file=sys.stderr, flush=True)
         state["save_pending"] = True
         state["save_transaction"] = {
-            "review_id": token,
+            "review_id": (token if override_mode != "no-review-id" else None),
+            "internal_review_token": token,
+            "authorization_mode": override_mode or "review-id",
+            "user_override_authorized": override_mode in
+                ("expired-review-id", "no-review-id"),
+            "authorization_recorded_at": int(time.time()),
+            "authorization_source": ("explicit --override-review-id option"
+                                     if override_mode else "review ID argument"),
             "review_created_at": previous["created_at"],
             "review_expires_at": previous["expires_at"],
             "disk": current_disk,
@@ -1512,11 +1754,29 @@ def commit_review(domain, token, progress=False):
             "phase": ("firmware-guarding" if previous.get("firmware_boot")
                       else "merge-pending"),
             "started_at": int(time.time()),
+            "timing_workload": timing_work,
+            "timing_samples_eligible": True,
+            "phase_started_at_monotonic": time.monotonic(),
+            "phase_durations": {},
         }
+        state["save_transaction"]["phase_durations"][
+            "commit-safety-validation"] = validation_elapsed
+        # Persist the authorization and recovery record before changing the
+        # firmware boot guard or starting any other commit-side effect.
+        write_state(state)
     transaction = state["save_transaction"]
 
     def set_phase(phase):
+        old = transaction.get("phase")
+        now = time.monotonic()
+        if old == "merge-pending" and phase == "merge-complete":
+            transaction.setdefault("phase_durations", {})["commit-merge"] = max(
+                0, now - transaction.get("phase_started_at_monotonic", now))
+        elif old == "replacement-pending" and phase == "replacement-complete":
+            transaction.setdefault("phase_durations", {})["commit-replacement"] = max(
+                0, now - transaction.get("phase_started_at_monotonic", now))
         transaction["phase"] = phase
+        transaction["phase_started_at_monotonic"] = now
         write_state(state)
 
     phase = transaction.get("phase", "merge-pending")
@@ -1527,7 +1787,11 @@ def commit_review(domain, token, progress=False):
             phase = "merge-pending"
         if phase in ("merge-pending", "merge-interrupted"):
             set_phase("merge-pending")
-            commit_overlay(config, progress=progress, phase_callback=set_phase)
+            commit_overlay(
+                config, progress=progress, phase_callback=set_phase,
+                merge_estimate=estimate_phase_seconds(
+                    "commit-merge", transaction.get(
+                        "timing_workload", timing_workload(previous))))
         elif phase in ("merge-complete", "replacement-pending",
                        "replacement-interrupted"):
             set_phase("replacement-pending")
@@ -1538,6 +1802,7 @@ def commit_review(domain, token, progress=False):
         else:
             fail(f"unknown guarded COW recovery phase {phase!r}; manual reconciliation is required")
     except Exception as exc:
+        transaction["timing_samples_eligible"] = False
         current_phase = transaction.get("phase")
         if current_phase in ("merge-pending", "merge-interrupted"):
             transaction["phase"] = "merge-interrupted"
@@ -1552,9 +1817,18 @@ def commit_review(domain, token, progress=False):
         print("Guarded COW save: physical merge complete; restoring host mount state.",
               file=sys.stderr, flush=True)
     restore(domain)
-    review_path.unlink(missing_ok=True)
-    if progress:
-        print("Guarded COW save: complete.", file=sys.stderr, flush=True)
+    transaction.setdefault("phase_durations", {})["commit-host-restore"] = max(
+        0, time.monotonic() - transaction.get("phase_started_at_monotonic",
+                                              time.monotonic()))
+    if transaction.get("timing_samples_eligible"):
+        record_timing_samples(transaction.get("timing_workload", {}),
+                              transaction.get("phase_durations", {}))
+    if token is not None:
+        (REVIEW_DIR / (hashlib.sha256(token.encode()).hexdigest() + ".json")).unlink(
+            missing_ok=True)
+    authorization = transaction.get("authorization_mode", "review-id")
+    print(f"Guarded COW save: complete. Authorization: {authorization}.",
+          file=sys.stderr if progress else sys.stdout, flush=True)
 
 
 def prepare(config):
@@ -1882,7 +2156,47 @@ def replace_overlay(config, progress=False):
                 pass
 
 
-def commit_overlay(config, progress=False, phase_callback=None):
+def run_with_progress(args, phase, historical_seconds=None):
+    started = time.monotonic()
+    process = subprocess.Popen(args, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, bufsize=0)
+    buffer = b""
+    last_report = -5
+    output_tail = b""
+    while True:
+        chunk = process.stdout.read(4096)
+        if not chunk:
+            break
+        output_tail = (output_tail + chunk)[-4096:]
+        buffer = (buffer + chunk)[-512:]
+        for match in re.finditer(rb"\(\s*([0-9]+(?:\.[0-9]+)?)/100%\)", buffer):
+            percent = float(match.group(1))
+            if percent < last_report + 5 and percent < 100:
+                continue
+            last_report = int(percent // 5 * 5)
+            elapsed = max(0.001, time.monotonic() - started)
+            rate_eta = elapsed * (100 - percent) / percent if percent > 0 else None
+            history_eta = (historical_seconds * (100 - percent) / 100
+                           if historical_seconds is not None else None)
+            estimates = [item for item in (rate_eta, history_eta)
+                         if item is not None]
+            eta = (f"about {int(sum(estimates) / len(estimates))}s remaining"
+                   if estimates and percent < 100 else "finishing")
+            print(f"Guarded COW save: {phase} {percent:.0f}% · "
+                  f"{int(elapsed)}s elapsed · {eta} (estimate)",
+                  file=sys.stderr, flush=True)
+    status = process.wait()
+    if status:
+        raise subprocess.CalledProcessError(
+            status, args, output=output_tail.decode(errors="replace"))
+    elapsed = time.monotonic() - started
+    print(f"Guarded COW save: {phase} completed in {elapsed:.1f}s",
+          file=sys.stderr, flush=True)
+    return elapsed
+
+
+def commit_overlay(config, progress=False, phase_callback=None,
+                   merge_estimate=None):
     args = [QEMU_IMG, "commit"]
     if progress:
         print("Guarded COW save: writing the reviewed extents to the physical disk.",
@@ -1891,9 +2205,7 @@ def commit_overlay(config, progress=False, phase_callback=None):
     args.extend(("-d", "--image-opts", "--backing-image-opts",
                  guard_options(config), overlay_options(config)))
     if progress:
-        # qemu-img prints its live percentage to stdout. Inherit the caller's
-        # terminal for this opt-in CLI mode; normal GUI runs keep captured IO.
-        subprocess.run(args, check=True, stdout=sys.stdout)
+        run_with_progress(args, "physical merge traversal", merge_estimate)
         print("Guarded COW save: replacing the committed overlay with a fresh root.",
               file=sys.stderr, flush=True)
     else:
@@ -1956,7 +2268,8 @@ def offline_action(domain, action):
         restore(domain)
 
 
-def dispatch(action, domain, operation_argument=None, progress=False):
+def dispatch(action, domain, operation_argument=None, progress=False,
+             override_review_id=False):
     if action == "boot-check":
         boot_check()
         return
@@ -2004,9 +2317,30 @@ def dispatch(action, domain, operation_argument=None, progress=False):
         write_state(state)
         restore(domain)
     elif action == "review":
-        review_action(domain)
+        review_action(domain, progress=progress)
     elif action == "commit":
-        commit_review(domain, operation_argument, progress=progress)
+        override_mode = None
+        token = operation_argument
+        if override_review_id and token is None:
+            print("Guarded COW save: no review ID supplied. --override-review-id "
+                  "authorizes a fresh full guarded review and write plan to be "
+                  "performed internally before writing; its new report will not "
+                  "be presented for separate inspection.",
+                  file=sys.stderr, flush=True)
+            report = review_action(domain, progress=progress, emit=False)
+            token = report["review_id"]
+            override_mode = "no-review-id"
+        elif override_review_id and token is not None:
+            try:
+                cached = json.loads((REVIEW_DIR / (
+                    hashlib.sha256(token.encode()).hexdigest() + ".json"
+                )).read_text(encoding="utf-8"))["report"]
+            except Exception:
+                cached = {}
+            if cached.get("expires_at", 0) < int(time.time()):
+                override_mode = "expired-review-id"
+        commit_review(domain, token, progress=progress,
+                      override_mode=override_mode)
     elif action == "discard":
         offline_action(domain, action)
     else:
@@ -2020,18 +2354,27 @@ def main():
         with operation_lock():
             boot_check()
         return
-    if len(sys.argv) not in (3, 4, 5):
-        fail("usage: qemu-guarded-cow prepare|verify|guest-started|restore|initialize|review|commit DOMAIN [REVIEW_ID [--progress]] | guest-stopped DOMAIN SHUTOFF_REASON | discard DOMAIN | check-start DOMAIN | boot-check")
+    if len(sys.argv) < 3:
+        fail("usage: qemu-guarded-cow prepare|verify|guest-started|restore|initialize|review|commit DOMAIN [REVIEW_ID] [--override-review-id] [--progress] | guest-stopped DOMAIN SHUTOFF_REASON | discard DOMAIN | check-start DOMAIN | boot-check")
     action, domain = sys.argv[1:3]
     progress = False
-    if action == "commit":
-        if len(sys.argv) not in (4, 5):
-            fail("commit requires the review identifier")
-        operation_argument = sys.argv[3]
-        if len(sys.argv) == 5:
-            if sys.argv[4] != "--progress":
-                fail("commit's optional fifth argument must be --progress")
-            progress = True
+    override_review_id = False
+    if action in ("commit", "review"):
+        positional = []
+        for argument in sys.argv[3:]:
+            if argument == "--progress" and not progress:
+                progress = True
+            elif argument == "--override-review-id" and not override_review_id:
+                override_review_id = True
+            elif argument.startswith("--"):
+                fail(f"unknown or duplicate option {argument}")
+            else:
+                positional.append(argument)
+        if action == "review" and (positional or override_review_id):
+            fail("review accepts only --progress")
+        if action == "commit" and len(positional) > 1:
+            fail("commit accepts at most one review ID")
+        operation_argument = positional[0] if positional else None
     elif action == "guest-stopped":
         if len(sys.argv) != 4:
             fail("guest-stopped requires libvirt's shutdown reason")
@@ -2044,7 +2387,8 @@ def main():
         dispatch(action, domain)
         return
     with operation_lock():
-        dispatch(action, domain, operation_argument, progress=progress)
+        dispatch(action, domain, operation_argument, progress=progress,
+                 override_review_id=override_review_id)
 
 
 if __name__ == "__main__":

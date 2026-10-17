@@ -177,25 +177,48 @@ def generic_commit(domain, token, config):
 def main():
     if os.geteuid() != 0:
         fail("must run as root")
-    if len(sys.argv) not in (3, 4) or sys.argv[1] not in ("review", "commit", "discard"):
-        fail("usage: qemu-cow-manager review|discard DOMAIN | commit DOMAIN REVIEW_ID")
+    if len(sys.argv) < 3 or sys.argv[1] not in ("review", "commit", "discard"):
+        fail("usage: qemu-cow-manager review|discard DOMAIN | commit DOMAIN [REVIEW_ID] [--override-review-id] [--progress]")
     action, domain = sys.argv[1:3]
-    if (action == "commit") != (len(sys.argv) == 4):
-        fail("commit requires a review identifier; review and discard take only a domain")
+    remaining = sys.argv[3:]
+    token = None
+    flags = []
+    for item in remaining:
+        if item.startswith("--"):
+            if item in flags:
+                fail(f"duplicate option {item}")
+            if item not in ("--override-review-id", "--progress"):
+                fail(f"unknown option {item}")
+            flags.append(item)
+        elif token is None:
+            token = item
+        else:
+            fail("commit accepts at most one review ID")
+    if action != "commit" and (token is not None or flags):
+        fail("review and discard take only a domain")
+    if action == "commit" and token is None and "--override-review-id" not in flags:
+        # A tokenless call is also the resume form for a durable pending save;
+        # the guarded helper decides whether such a journal exists.
+        pass
     config = domain_config(domain)
     root = config["root"]
     if root.find(f"./metadata/{{{PWG_NS}}}guardedCow") is not None:
         args = [GUARDED_HELPER, action, domain]
-        if action == "commit":
-            args.append(sys.argv[3])
+        if token is not None:
+            args.append(token)
+        args.extend(flags)
         os.execv(GUARDED_HELPER, args)
+    if flags:
+        fail("progress and review-ID override are supported only for guarded physical-disk saves")
     if action == "discard":
         validate_overlay(config)
         make_overlay(config)
     elif action == "review":
         generic_review(domain, config)
     elif action == "commit":
-        generic_commit(domain, sys.argv[3], config)
+        if token is None:
+            fail("file-backed COW commit requires a review identifier")
+        generic_commit(domain, token, config)
 
 
 if __name__ == "__main__":

@@ -914,7 +914,40 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             regular_metadata, dict(regular_metadata, mtime_ns=200)))
 
         helper.RUN_DIR = Path(iotests.test_dir) / (
-            f'guard-helper-run-{os.getpid()}')
+            f'guard-helper-run-{os.getpid()}-{time.time_ns()}')
+        helper.STATE = helper.RUN_DIR / 'active.json'
+        helper.REVIEW_DIR = helper.RUN_DIR / 'reviews'
+        helper.JOURNAL_DIR = helper.RUN_DIR / 'journals'
+        helper.TIMING_HISTORY = helper.JOURNAL_DIR / 'timing' / 'history.json'
+        helper.JOURNAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(helper.JOURNAL_DIR, 0o700)
+        sample_workload = {'disk_profile': 'a' * 64,
+                           'planned_bytes': 1024, 'overlay_bytes': 512,
+                           'extent_count': 4, 'disk_bytes': 4096}
+        self.assertIsNone(helper.estimate_phase_seconds(
+            'test-phase', sample_workload))
+        helper.record_timing_samples(sample_workload, {'test-phase': 10})
+        self.assertEqual(helper.estimate_phase_seconds(
+            'test-phase', sample_workload), 10)
+        helper.record_timing_samples(sample_workload, {'test-phase': 14})
+        self.assertEqual(helper.estimate_phase_seconds(
+            'test-phase', sample_workload), 12)
+        fake_progress = os.path.join(iotests.test_dir, 'fake-qemu-progress')
+        with open(fake_progress, 'w', encoding='utf-8') as stream:
+            stream.write("#!/bin/sh\nprintf '%s\\r%s\\r' "
+                         "'    ( 10.00/100%)' '    ( 50.00/100%)'\n")
+        os.chmod(fake_progress, 0o700)
+        live_estimate_output = io.StringIO()
+        with contextlib.redirect_stderr(live_estimate_output):
+            helper.run_with_progress([fake_progress], 'estimate test', 100)
+        self.assertIn('estimate test 10%', live_estimate_output.getvalue())
+        self.assertIn('estimate test 50%', live_estimate_output.getvalue())
+        self.assertIn('remaining (estimate)', live_estimate_output.getvalue())
+        helper.TIMING_HISTORY.write_text('{corrupt', encoding='utf-8')
+        os.chmod(helper.TIMING_HISTORY, 0o600)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(helper.estimate_phase_seconds(
+                'test-phase', sample_workload))
         sector_size = SECTOR_SIZE
         original_run = helper.run
         original_firmware_boot_snapshot = helper.firmware_boot_snapshot
@@ -1039,7 +1072,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                     helper.make_write_plan(config, progress=True)
         with open(progress_path, 'r') as progress_stream:
             progress_text = progress_stream.read()
-        self.assertIn('100.00/100%', progress_text)
+        self.assertIn('review write-plan traversal completed in', progress_text)
+        self.assertRegex(progress_text,
+                         r'review write-plan traversal [0-9]+%')
         self.assertEqual(progress_extents, extents)
         with open(image, 'rb') as stream:
             self.assertEqual(stream.read(), base_before)
@@ -1092,9 +1127,10 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         helper.STATE = helper.RUN_DIR / 'active.json'
         helper.REVIEW_DIR = helper.RUN_DIR / 'reviews'
         helper.JOURNAL_DIR = helper.RUN_DIR / 'journals'
+        helper.TIMING_HISTORY = helper.JOURNAL_DIR / 'timing' / 'history.json'
         helper.PHYSICAL_COMMIT_ENABLED = True
         helper.assert_vm_off = lambda _domain: None
-        helper.parse_config = lambda _domain: config
+        helper.parse_config = lambda _domain, _xml_data=None: config
         helper.part_devices = lambda _config: {
             part['number']: {'path': image, 'mm': '0:0'}
             for part in config['partitions']
@@ -1203,14 +1239,39 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         self.assertEqual(extents_recheck, commit_report['planned_extents'])
         self.assertEqual(helper.write_plan_sha256(extents_recheck),
                          commit_report['guard']['plan_sha256'])
+        original_time_for_override = helper.time.time
+        helper.time.time = lambda: commit_report['expires_at'] + 1
+        with self.assertRaisesRegex(helper.GuardError, 'review expired'):
+            helper.commit_review('disposable', commit_report['review_id'])
+        captured_override = {}
+        commit_review_impl = helper.commit_review
+
+        def capture_commit_override(domain, token, progress=False,
+                                    override_mode=None):
+            captured_override.update(domain=domain, token=token,
+                                     mode=override_mode)
+
+        helper.commit_review = capture_commit_override
+        try:
+            helper.dispatch('commit', 'disposable', commit_report['review_id'],
+                            override_review_id=True)
+        finally:
+            helper.commit_review = commit_review_impl
+            helper.time.time = original_time_for_override
+        self.assertEqual(captured_override['mode'], 'expired-review-id')
+        with self.assertRaisesRegex(helper.GuardError, 'review ID is required'):
+            helper.commit_review('disposable', None)
 
         original_make_write_plan = helper.make_write_plan
         commit_plan_calls = 0
 
-        def count_commit_write_plan(config, progress=False):
+        def count_commit_write_plan(config, progress=False,
+                                   progress_estimate=None):
             nonlocal commit_plan_calls
             commit_plan_calls += 1
-            return original_make_write_plan(config, progress=progress)
+            return original_make_write_plan(
+                config, progress=progress,
+                progress_estimate=progress_estimate)
 
         helper.make_write_plan = count_commit_write_plan
 
@@ -1221,11 +1282,14 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         old_overlay_stat = os.stat(overlay)
         fail_after_commit = True
         restore_calls = []
+        authorization_modes = []
         qemu_commit_calls = 0
 
         def finish_restore(domain):
             restore_calls.append(domain)
             transaction_state = helper.read_journal(domain)
+            authorization_modes.append(
+                transaction_state['save_transaction']['authorization_mode'])
             helper.restore_firmware_boot(
                 transaction_state['save_transaction']['firmware_boot'])
             helper.remove_journal(domain)
@@ -1269,12 +1333,20 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                 raise RuntimeError('injected interruption before physical merge')
 
             helper.apply_firmware_boot_guard = interrupt_before_merge
-            with self.assertRaisesRegex(RuntimeError,
-                                        'injected interruption before physical merge'):
-                helper.commit_review('disposable', commit_report['review_id'])
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        'injected interruption before physical merge'):
+                    helper.dispatch('commit', 'disposable', None,
+                                    override_review_id=True)
             helper.apply_firmware_boot_guard = original_apply_firmware_boot_guard
             prewrite_state = json.loads(helper.journal_path(
                 'disposable').read_text(encoding='utf-8'))
+            transaction = prewrite_state['save_transaction']
+            self.assertEqual(transaction['authorization_mode'], 'no-review-id')
+            self.assertTrue(transaction['user_override_authorized'])
+            self.assertIsNone(transaction['review_id'])
+            commit_report = transaction['review_report']
             self.assertEqual(prewrite_state['save_transaction']['phase'],
                              'firmware-guarding')
             self.assertEqual(qemu_commit_calls, 0)
@@ -1311,6 +1383,10 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             self.assertFalse(efi_state['active']['0000'])
             with open(image, 'rb') as stream:
                 self.assertEqual(stream.read(), expected)
+            timing_samples = helper.read_timing_history()['samples']
+            self.assertFalse(any(sample['phase'].startswith('commit-')
+                                 for sample in timing_samples),
+                             'an interrupted/resumed save must not train commit estimates')
 
             # Simulate loss of volatile /run state and the review cache. The
             # durable transaction must block startup and authorize a retry
@@ -1329,7 +1405,8 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             # into emergency.target and its source checkout may not be mounted.
             # The durable review must still authorize retry with the exact
             # installed helper and the same fail-closed unit configuration.
-            pending_guard = dict(commit_report['recovery_guard'], active=False)
+            pending_guard = (dict(commit_report['recovery_guard'], active=False)
+                             if commit_report['recovery_guard'] else None)
             helper.recovery_guard_identity = lambda require_active=True: (
                 self.fail('pending retry incorrectly requires an active guard unit')
                 if require_active else pending_guard)
@@ -1346,7 +1423,7 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
 
             helper.replace_overlay = replace_then_interrupt
             with self.assertRaisesRegex(SystemExit, 'injected interruption'):
-                helper.commit_review('disposable', commit_report['review_id'])
+                helper.commit_review('disposable', None)
             helper.replace_overlay = original_replace_overlay
             self.assertEqual(qemu_commit_calls, 2)
             interrupted_state = json.loads(
@@ -1364,9 +1441,7 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             with open(progress_path, 'w') as progress_stream:
                 with contextlib.redirect_stdout(progress_stream), \
                         contextlib.redirect_stderr(progress_stream):
-                    helper.commit_review('disposable',
-                                         commit_report['review_id'],
-                                         progress=True)
+                    helper.commit_review('disposable', None, progress=True)
             helper.time.time = old_time
             with open(progress_path, 'r') as progress_stream:
                 progress_text = progress_stream.read()
@@ -1382,6 +1457,7 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             self.assertFalse(helper.STATE.exists())
             self.assertFalse(helper.journal_path('disposable').exists())
             self.assertEqual(restore_calls, ['disposable'])
+            self.assertEqual(authorization_modes, ['no-review-id'])
             self.assertEqual(efi_state['order'], ['0000', '0002', '2001'])
             self.assertTrue(efi_state['active']['0000'])
             self.assertNotEqual(os.stat(overlay).st_ino, old_overlay_stat.st_ino)
@@ -1393,6 +1469,30 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             self.assertEqual(new_info['backing-filename'], image)
             self.assertEqual(new_info['backing-filename-format'], 'raw')
             self.assertEqual(new_info['virtual-size'], len(base_before))
+            with open(image, 'rb') as stream:
+                self.assertEqual(stream.read(), expected)
+
+            # A fresh, ordinary review-ID commit must still complete and train
+            # the timing history after the override/recovery scenario above.
+            helper.recovery_guard_identity = original_recovery_guard_identity
+            extra_offset = (PARTITIONS[1][0] + 1) * sector_size
+            qemu_io('-f', 'qcow2', overlay, '-c',
+                    f'write -P 0x55 {extra_offset} {sector_size}')
+            expected[extra_offset:extra_offset + sector_size] = \
+                bytes([0x55]) * sector_size
+            normal_review_output = io.StringIO()
+            with contextlib.redirect_stdout(normal_review_output):
+                helper.review_action('disposable')
+            normal_report = json.loads(normal_review_output.getvalue())
+            helper.commit_review('disposable', normal_report['review_id'])
+            self.assertEqual(restore_calls, ['disposable', 'disposable'])
+            self.assertEqual(authorization_modes,
+                             ['no-review-id', 'review-id'])
+            complete_samples = helper.read_timing_history()['samples']
+            self.assertTrue(any(sample['phase'] == 'commit-merge'
+                                for sample in complete_samples))
+            self.assertIsNotNone(helper.estimate_phase_seconds(
+                'commit-merge', helper.timing_workload(normal_report)))
             with open(image, 'rb') as stream:
                 self.assertEqual(stream.read(), expected)
         finally:

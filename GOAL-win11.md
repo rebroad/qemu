@@ -245,13 +245,13 @@ QEMU and helper have passed disposable-disk success, failure, and retry
 validation.
 
 The command-line guarded commit must support an opt-in `--progress` flag. It
-should show phase messages while revalidating the reviewed plan, a live
-percentage during QEMU's physical merge, and a completion message only after
-the replacement overlay and host-state restoration succeed. The default CLI
-and Virt-manager flows remain quiet/machine-readable as they are today. The
-percentage covers QEMU's merge job; hashing and other safety checks may take
-time and should be identified as phases rather than presented as measured
-percentages.
+should show phase messages while revalidating the reviewed plan, byte-count
+percentages for fingerprint scans with a known byte total, QEMU's live merge
+percentage, and a completion message only after the replacement overlay and
+host-state restoration succeed. Any long phase without a reliable denominator
+(such as building QEMU's dry-run write plan) must be named as in progress,
+without inventing a percentage. The default CLI and Virt-manager flows remain
+quiet/machine-readable as they are today.
 
 ### Interrupted physical commits and power loss
 
@@ -264,6 +264,24 @@ overlay and its baseline intact after any interruption. Do not boot or mount
 the raw partitions read/write, discard the overlay, or start Windows natively
 until recovery has reconciled the partial merge.
 
+On the same boot, the durable overlay remains the authoritative guest view and
+the save-pending record blocks ordinary restore/start paths. After an
+interruption, first confirm QEMU is no longer using either image, preserve the
+overlay, keep host access to the affected partitions read-only or unmounted,
+and use an explicit recovery/review path to compare the partially updated base
+with the retained overlay before retrying. Never assume a killed process wrote
+nothing, and never treat a successful exit alone as proof of power-loss
+durability. A retry is safe only after the idempotent merge and its flush/error
+handling have been validated against disposable images.
+
+QEMU's `qemu-img commit` must explicitly flush the backing target after the
+merge and return failure if that flush fails. If the source image is emptied,
+its metadata must also be flushed before success is reported. The helper must
+keep the overlay and isolation state when either operation fails. This asks
+the storage stack to make completed writes stable; it still cannot make the
+multi-partition update atomic or protect against hardware that lies about
+flush completion.
+
 The current isolation/review records live under `/run` and therefore do not
 survive a reboot. This is not power-loss recovery: after a crash the physical
 disk may be partially updated while the host no longer has the save-pending
@@ -275,6 +293,11 @@ the affected partitions from being mounted writable or used for native boot
 until that journal is reconciled. Make resume/retry idempotent and retain the
 overlay until the new base and replacement overlay are verified. Clear the
 journal only after durable completion and safe mount-state handling.
+Reduce exposure during real commits by requiring a clean guest shutdown,
+avoiding other host I/O to the target disk, using reliable power protection
+(UPS or a laptop battery), and retaining an independent backup of data that
+must not be lost. These measures reduce likelihood or impact; they do not make
+an in-place multi-partition commit atomic.
 
 Validate interruption recovery on disposable disks by terminating the commit
 at several points, including during writes and between merge completion and

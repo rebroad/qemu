@@ -25,6 +25,9 @@ import importlib.util
 import importlib.machinery
 import os
 from pathlib import Path
+import re
+import select
+import signal
 import struct
 import subprocess
 import time
@@ -641,6 +644,137 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         with open(image, 'rb') as stream:
             self.assertEqual(stream.read(), expected)
 
+    def test_interrupted_commit_retains_overlay_for_retry(self) -> None:
+        image = os.path.join(iotests.test_dir, 'interrupted-commit-disk.img')
+        overlay = image + '.qcow2'
+        image_size = 64 * 1024 * 1024
+        partitions = {
+            1: (128, 255),
+            3: (256, 120000),
+            7: (120016, 120800),
+        }
+        global PARTITIONS
+        previous_partitions = PARTITIONS
+        PARTITIONS = partitions
+        try:
+            make_gpt(image, image_size=image_size)
+        finally:
+            PARTITIONS = previous_partitions
+
+        qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
+                 '-o', 'cluster_size=65536', '-b', image, overlay)
+        offset = partitions[3][0] * SECTOR_SIZE
+        extent_size = 65536
+        extent_stride = 128 * 1024
+        extent_count = 128
+        write_commands = []
+        for index in range(extent_count):
+            write_commands.extend((
+                '-c', f'write -P 0xab '
+                f'{offset + index * extent_stride} {extent_size}'))
+        qemu_io('-f', 'qcow2', overlay, *write_commands)
+        qemu_img('check', '-q', overlay)
+
+        backing_opts = ','.join([
+            'driver=partition-write-guard',
+            'file.driver=file',
+            f'file.filename={image}',
+            'partitions.0=1',
+            'partitions.1=3',
+            'partitions.2=7',
+        ])
+        top_opts = ','.join([
+            'driver=qcow2',
+            'file.driver=file',
+            f'file.filename={overlay}',
+        ])
+        command = iotests.qemu_img_args + [
+            'commit', '-p', '-d', '-r', '128K', '--image-opts',
+            '--backing-image-opts', backing_opts, top_opts,
+        ]
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, bufsize=0)
+        output = bytearray()
+        progress = 0.0
+        prefix_written = False
+        deadline = time.monotonic() + 20
+        try:
+            while proc.poll() is None and not prefix_written:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.fail('qemu-img did not report progress before timeout')
+                readable, _, _ = select.select([proc.stdout], [], [],
+                                               min(remaining, 0.25))
+                if readable:
+                    chunk = os.read(proc.stdout.fileno(), 4096)
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    matches = re.findall(
+                        rb'\(\s*([0-9]+(?:\.[0-9]+)?)/100%\)', output)
+                    if matches:
+                        progress = max(float(value) for value in matches)
+                if progress >= 1.0:
+                    with open(image, 'rb', buffering=0) as backing:
+                        prefix_written = (os.pread(backing.fileno(), 65536,
+                                                   offset)
+                                          == b'\xab' * 65536)
+            self.assertGreaterEqual(progress, 1.0,
+                                    output.decode(errors='replace'))
+            self.assertTrue(prefix_written,
+                            'commit progress advanced without writing the '
+                            'expected prefix')
+            self.assertIsNone(proc.poll(),
+                              'rate-limited commit completed before interruption')
+            proc.send_signal(signal.SIGKILL)
+            proc.wait(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+            proc.stdout.close()
+        self.assertNotEqual(proc.returncode, 0)
+
+        # A killed qemu-img commit may have copied only some clusters to the
+        # raw backing. With -d, the source overlay must remain healthy and keep
+        # presenting its complete pre-commit contents for a later retry.
+        self.assertEqual(qemu_img('check', '-q', overlay,
+                                  check=False).returncode, 0)
+        read_commands = []
+        for index in range(extent_count):
+            read_commands.extend((
+                '-c', f'read -P 0xab '
+                f'{offset + index * extent_stride} {extent_size}'))
+        retained = qemu_io('-f', 'qcow2', overlay, *read_commands,
+                           check=False)
+        self.assertEqual(retained.returncode, 0, retained.stdout)
+        written_prefix = qemu_io('-f', 'raw', image, '-c',
+                                 f'read -P 0xab {offset} {extent_size}', check=False)
+        self.assertEqual(written_prefix.returncode, 0, written_prefix.stdout)
+        untouched_suffix = qemu_io('-f', 'raw', image, '-c',
+                                   f'read -P 0x00 '
+                                   f'{offset + extent_count * extent_stride} '
+                                   f'{extent_size}',
+                                   check=False)
+        self.assertEqual(untouched_suffix.returncode, 0,
+                         untouched_suffix.stdout)
+        differs = qemu_img('compare', '-s', '-f', 'raw', '-F', 'qcow2',
+                           image, overlay, check=False)
+        self.assertNotEqual(differs.returncode, 0,
+                            'interrupted commit unexpectedly completed fully')
+
+        retry = qemu_img('commit', '-d', '--image-opts',
+                         '--backing-image-opts', backing_opts, top_opts,
+                         check=False)
+        self.assertEqual(retry.returncode, 0,
+                         (retry.stdout or '') + (retry.stderr or ''))
+        identical = qemu_img('compare', '-s', '-f', 'raw', '-F', 'qcow2',
+                             image, overlay, check=False)
+        self.assertEqual(identical.returncode, 0,
+                         (identical.stdout or '') + (identical.stderr or ''))
+        self.assertEqual(qemu_img('check', '-q', overlay,
+                                  check=False).returncode, 0)
+
     def test_guarded_helper_builds_plan_with_qemu_img(self) -> None:
         image = os.path.join(iotests.test_dir, 'helper-review-disk.img')
         overlay = image + '.qcow2'
@@ -649,6 +783,7 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             base_before = stream.read()
         qemu_img('create', '-q', '-f', 'qcow2', '-F', 'raw',
                  '-o', 'cluster_size=512', '-b', image, overlay)
+        os.chmod(overlay, 0o600)
         for number in (1, 3, 7):
             first, last = PARTITIONS[number]
             for lba in (first, last):
@@ -666,6 +801,13 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         spec.loader.exec_module(helper)
         helper.QEMU_IMG = os.environ.get(
             'QEMU_GUARDED_COW_TEST_QEMU_IMG', iotests.qemu_img_args[0])
+
+        progress_output = io.StringIO()
+        with contextlib.redirect_stderr(progress_output):
+            helper.base_content_fingerprint(
+                image, [{'offset': 0, 'length': SECTOR_SIZE}],
+                progress_label='test fingerprint')
+        self.assertIn('100% (512/512 bytes)', progress_output.getvalue())
 
         block_metadata = {
             'mode': helper.stat.S_IFBLK | 0o600,

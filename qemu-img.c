@@ -907,6 +907,7 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
     int c, ret, flags;
     const char *filename, *fmt, *cache, *base, *backing_opts_str = NULL;
     BlockBackend *blk;
+    BlockBackend *commit_target_blk;
     BlockDriverState *bs, *base_bs;
     BlockDriverState *custom_backing_bs = NULL;
     BlockJob *job;
@@ -1149,6 +1150,22 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
         goto unref_backing;
     }
 
+    /* Do not report a successful commit until the backing node has flushed
+     * the copied data through to stable storage.  In particular, a physical
+     * block device may otherwise still have the writes in a volatile cache. */
+    commit_target_blk = blk_new_with_bs(base_bs, BLK_PERM_WRITE, BLK_PERM_ALL,
+                                        &local_err);
+    if (!commit_target_blk) {
+        goto unref_backing;
+    }
+    ret = blk_flush(commit_target_blk);
+    blk_unref(commit_target_blk);
+    if (ret < 0) {
+        error_setg_errno(&local_err, -ret,
+                         "Error while flushing commit target");
+        goto unref_backing;
+    }
+
     if (!drop) {
         BlockBackend *old_backing_blk;
 
@@ -1164,6 +1181,16 @@ static int img_commit(const img_cmd_t *ccmd, int argc, char **argv)
             local_err = NULL;
         } else if (ret < 0) {
             goto unref_backing;
+        }
+
+        /* If the source was emptied, make that metadata update durable too. */
+        if (!local_err && ret != -ENOTSUP) {
+            ret = blk_flush(blk);
+            if (ret < 0) {
+                error_setg_errno(&local_err, -ret,
+                                 "Error while flushing emptied source image");
+                goto unref_backing;
+            }
         }
     }
 

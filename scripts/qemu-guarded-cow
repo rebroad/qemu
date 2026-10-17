@@ -639,12 +639,19 @@ def write_plan_sha256(extents):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def base_content_fingerprint(disk, extents):
+def base_content_fingerprint(disk, extents, progress_label=None):
     digest = hashlib.sha256()
+    ordered_extents = sorted(extents, key=lambda item: (item["offset"],
+                                                        item["length"]))
+    total = sum(extent["length"] for extent in ordered_extents)
+    completed = 0
+    reported = -5
+    if progress_label:
+        print(f"Guarded COW save: {progress_label}: 0% (0/{total} bytes)",
+              file=sys.stderr, flush=True)
     fd = os.open(disk, os.O_RDONLY | os.O_CLOEXEC)
     try:
-        for extent in sorted(extents, key=lambda item: (item["offset"],
-                                                        item["length"])):
+        for extent in ordered_extents:
             offset = extent["offset"]
             remaining = extent["length"]
             digest.update(struct.pack(">QQ", offset, remaining))
@@ -655,8 +662,18 @@ def base_content_fingerprint(disk, extents):
                 digest.update(chunk)
                 offset += len(chunk)
                 remaining -= len(chunk)
+                completed += len(chunk)
+                if progress_label and total:
+                    percent = completed * 100 // total
+                    if percent >= reported + 5 or completed == total:
+                        reported = percent
+                        print(f"\rGuarded COW save: {progress_label}: "
+                              f"{percent}% ({completed}/{total} bytes)",
+                              end="", file=sys.stderr, flush=True)
     finally:
         os.close(fd)
+    if progress_label:
+        print(file=sys.stderr, flush=True)
     return digest.hexdigest()
 
 
@@ -697,11 +714,14 @@ def disk_metadata_matches(baseline, current):
     return all(baseline.get(key) == current.get(key) for key in keys)
 
 
-def capture_base_baseline(config, inventory=None):
+def capture_base_baseline(config, inventory=None, progress=False,
+                          progress_label="Checking the COW-root baseline"):
     inventory = inventory or disk_inventory(config)
     disk_stat_before = os.stat(config["disk"])
     coverage = base_fingerprint_extents(config, inventory)
-    content_sha256 = base_content_fingerprint(config["disk"], coverage)
+    content_sha256 = base_content_fingerprint(
+        config["disk"], coverage,
+        progress_label=progress_label if progress else None)
     disk_stat_after = os.stat(config["disk"])
     inventory_after = disk_inventory(config)
     stat_keys = disk_metadata_stat_keys(disk_stat_after.st_mode)
@@ -794,9 +814,11 @@ def load_base_baseline(config):
     return baseline
 
 
-def verify_root_baseline(config, inventory=None):
+def verify_root_baseline(config, inventory=None, progress=False,
+                         progress_label="Checking the COW-root baseline"):
     baseline = load_base_baseline(config)
-    current = capture_base_baseline(config, inventory)
+    current = capture_base_baseline(config, inventory, progress=progress,
+                                    progress_label=progress_label)
     keys = ("disk_identity", "disk_geometry", "disk_metadata", "partitions",
             "coverage_extents", "content_sha256", "coverage")
     changed = [key for key in keys if key != "disk_metadata"
@@ -1017,11 +1039,21 @@ def commit_review(domain, token, progress=False):
            for part in config["partitions"]):
         fail("configured writable partitions are no longer unmounted")
     verify_qemu_readonly(config["disk"])
+    if progress:
+        print("Guarded COW save: building the guarded write plan (dry-run).",
+              file=sys.stderr, flush=True)
     _raw_plan, extents, inventory = make_write_plan(config)
-    root_baseline = (verify_root_baseline(config, inventory)
-                     if not state.get("save_pending")
-                     else load_base_baseline(config))
-    base_fingerprint = base_content_fingerprint(config["disk"], extents)
+    root_baseline = (
+        verify_root_baseline(
+            config, inventory, progress=progress,
+            progress_label=("COW-root baseline verification (pass 1/2)"
+                            if progress else "Checking COW-root baseline"))
+        if not state.get("save_pending") else load_base_baseline(config))
+    base_fingerprint = base_content_fingerprint(
+        config["disk"], extents,
+        progress_label=("planned-write-range fingerprint " +
+                        ("(retry state)" if state.get("save_pending") else
+                         "(pass 1/2)")) if progress else None)
     host = host_disk_state(inventory, config)
     current = {"disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
                         "logical_sector_size": inventory["sector_size"],
@@ -1068,11 +1100,21 @@ def commit_review(domain, token, progress=False):
            for part in config_now["partitions"]):
         fail("configured writable partitions are no longer unmounted")
     verify_qemu_readonly(config_now["disk"])
+    if progress:
+        print("Guarded COW save: rebuilding the guarded write plan (dry-run).",
+              file=sys.stderr, flush=True)
     _raw_plan_now, extents_now, inventory_now = make_write_plan(config_now)
-    root_baseline_now = (verify_root_baseline(config_now, inventory_now)
-                         if not state.get("save_pending")
-                         else load_base_baseline(config_now))
-    base_fingerprint_now = base_content_fingerprint(config_now["disk"], extents_now)
+    root_baseline_now = (
+        verify_root_baseline(
+            config_now, inventory_now, progress=progress,
+            progress_label="COW-root baseline verification (pass 2/2)"
+            if progress else "Checking COW-root baseline")
+        if not state.get("save_pending") else load_base_baseline(config_now))
+    base_fingerprint_now = base_content_fingerprint(
+        config_now["disk"], extents_now,
+        progress_label=("planned-write-range fingerprint " +
+                        ("(retry state)" if state.get("save_pending") else
+                         "(pass 2/2)")) if progress else None)
     host_now = host_disk_state(inventory_now, config_now)
     final_check = {
         "disk": {**inventory_now["identity"],
@@ -1100,7 +1142,9 @@ def commit_review(domain, token, progress=False):
     except Exception as exc:
         try:
             state["save_retry_base_content_sha256"] = base_content_fingerprint(
-                config["disk"], extents_now)
+                config["disk"], extents_now,
+                progress_label=("recording safe retry fingerprint"
+                                if progress else None))
             write_state(state)
         except Exception:
             raise GuardError(
@@ -1280,7 +1324,7 @@ def assert_vm_off(domain):
         fail("VM has a managed-save state; clear it before save/discard")
 
 
-def replace_overlay(config):
+def replace_overlay(config, progress=False):
     sector_size = int(run("blockdev", "--getss", config["disk"]).stdout.strip())
     if sector_size < 512 or sector_size > 4096 or sector_size & (sector_size - 1):
         fail(f"unsupported logical sector size for guarded COW: {sector_size}")
@@ -1305,7 +1349,9 @@ def replace_overlay(config):
         candidate = dict(config)
         candidate["overlay"] = temp_path
         validate_overlay(candidate)
-        baseline = capture_base_baseline(config)
+        baseline = capture_base_baseline(
+            config, progress=progress,
+            progress_label="Capturing the new COW-root baseline")
         baseline_temp = stage_base_baseline(config, baseline)
 
         # Keep the previous overlay and its matching baseline recoverable
@@ -1334,7 +1380,9 @@ def replace_overlay(config):
         validate_overlay(config)
         if load_base_baseline(config) != baseline:
             fail("installed COW-root baseline differs from its staged record")
-        verify_root_baseline(config)
+        verify_root_baseline(
+            config, progress=progress,
+            progress_label="Verifying the new COW-root baseline")
     except Exception as exc:
         try:
             if baseline_installed:
@@ -1392,7 +1440,7 @@ def commit_overlay(config, progress=False):
               file=sys.stderr, flush=True)
     else:
         run(*args)
-    replace_overlay(config)
+    replace_overlay(config, progress=progress)
 
 
 def offline_action(domain, action):

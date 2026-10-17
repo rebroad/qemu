@@ -1110,7 +1110,7 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             with open(progress_path, 'r') as progress_stream:
                 progress_text = progress_stream.read()
             self.assertIn('one fresh guarded dry-run', progress_text)
-            self.assertIn('100.00/100%', progress_text)
+            self.assertGreaterEqual(progress_text.count('100.00/100%'), 2)
             self.assertIn('writing the reviewed extents to the physical disk',
                           progress_text)
             self.assertIn('Guarded COW save: complete.', progress_text)

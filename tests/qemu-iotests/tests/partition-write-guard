@@ -891,6 +891,21 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         with open(image, 'rb') as stream:
             self.assertEqual(stream.read(), base_before)
 
+        # Opt-in commit preflight streams QEMU's virtual-disk traversal
+        # percentage. The dry-run still leaves its physical backing unchanged.
+        progress_path = os.path.join(iotests.test_dir,
+                                     'guarded-plan-progress.txt')
+        with open(progress_path, 'w') as progress_stream:
+            with contextlib.redirect_stderr(progress_stream):
+                _progress_raw, progress_extents, _progress_inventory = \
+                    helper.make_write_plan(config, progress=True)
+        with open(progress_path, 'r') as progress_stream:
+            progress_text = progress_stream.read()
+        self.assertIn('100.00/100%', progress_text)
+        self.assertEqual(progress_extents, extents)
+        with open(image, 'rb') as stream:
+            self.assertEqual(stream.read(), base_before)
+
         root_baseline = helper.capture_base_baseline(config, _inventory)
         helper.store_base_baseline(config, root_baseline)
 
@@ -1016,6 +1031,16 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         self.assertEqual(helper.write_plan_sha256(extents_recheck),
                          commit_report['guard']['plan_sha256'])
 
+        original_make_write_plan = helper.make_write_plan
+        commit_plan_calls = 0
+
+        def count_commit_write_plan(config, progress=False):
+            nonlocal commit_plan_calls
+            commit_plan_calls += 1
+            return original_make_write_plan(config, progress=progress)
+
+        helper.make_write_plan = count_commit_write_plan
+
         # A reviewed physical extent changing after review invalidates the
         # token before save-pending is recorded or any commit is attempted.
         if fingerprint_supported:
@@ -1027,7 +1052,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                 stream.write(bytes([original_byte[0] ^ 0xff]))
             with self.assertRaisesRegex(helper.GuardError,
                                         'COW-root baseline.*physical save is blocked'):
+                calls_before = commit_plan_calls
                 helper.commit_review('disposable', commit_report['review_id'])
+            self.assertEqual(commit_plan_calls - calls_before, 1)
             self.assertNotIn('save_pending', json.loads(
                 helper.STATE.read_text(encoding='utf-8')))
             with open(image, 'r+b') as stream:
@@ -1059,8 +1086,10 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
 
         helper.run = fail_once_after_commit
         try:
+            calls_before = commit_plan_calls
             with self.assertRaises(subprocess.CalledProcessError):
                 helper.commit_review('disposable', commit_report['review_id'])
+            self.assertEqual(commit_plan_calls - calls_before, 1)
             failed_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
             self.assertTrue(failed_state['save_pending'])
             self.assertNotIn('save_complete', failed_state)
@@ -1069,7 +1098,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             with open(image, 'rb') as stream:
                 self.assertEqual(stream.read(), expected)
 
+            calls_before = commit_plan_calls
             helper.commit_review('disposable', commit_report['review_id'])
+            self.assertEqual(commit_plan_calls - calls_before, 1)
             completed_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
             self.assertTrue(completed_state['save_complete'])
             self.assertEqual(restore_calls, ['disposable'])
@@ -1086,6 +1117,7 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
                 self.assertEqual(stream.read(), expected)
         finally:
             helper.run = original_run
+            helper.make_write_plan = original_make_write_plan
             helper.pwd.getpwnam = original_getpwnam
             helper.PHYSICAL_COMMIT_ENABLED = False
 

@@ -199,12 +199,21 @@ Virt-manager must provide a two-step save flow:
    overlay state. These acknowledgements supplement, and do not replace, the
    machine-checked safety gates or disposable-disk validation.
 2. **Commit COW changes** is a separate, explicit action enabled only when the
-   review passes. Recheck the VM, QEMU block graph, disk identity, overlay
-   chain, GPT layout, and mount state immediately before committing. For a live
-   commit, use QEMU's block job and verify its completion and graph transition;
-   for the offline fallback, require a fully shut-off VM with no managed save.
-   Show the reviewed target and affected branches, then require a separate
-   confirmation before the first physical write.
+   review passes. The review ID is a record of what the user approved, not a
+   lock on the VM or disk. At commit time, perform one fresh exact guarded
+   write-plan traversal and compare disk identity, overlay, GPT layout, host
+   state, root baseline, planned extents, and planned-range content with the
+   reviewed report. Then repeat the cheap VM/configuration/mount/device checks
+   at the write boundary. Avoid repeating the full virtual-disk traversal and
+   full content fingerprints twice during one commit; that duplicates long
+   reads without closing the final race after the last check. These checks do
+   not lock out an arbitrary privileged process that writes directly to the raw
+   disk; the configured partitions must stay unmounted and unused as swap, and
+   the commit must not overlap another block-device writer. For a live commit,
+   use QEMU's block job and verify its completion and graph transition; for the
+   offline fallback, require a fully shut-off VM with no managed save. Show the
+   reviewed target and affected branches, then require a separate confirmation
+   before the first physical write.
 
 The review must include a verbose, inspectable report with the backing disk's
 stable identity and size, overlay path and health, the configured writable
@@ -245,13 +254,17 @@ QEMU and helper have passed disposable-disk success, failure, and retry
 validation.
 
 The command-line guarded commit must support an opt-in `--progress` flag. It
-should show phase messages while revalidating the reviewed plan, byte-count
-percentages for fingerprint scans with a known byte total, QEMU's live merge
-percentage, and a completion message only after the replacement overlay and
-host-state restoration succeed. Any long phase without a reliable denominator
-(such as building QEMU's dry-run write plan) must be named as in progress,
-without inventing a percentage. The default CLI and Virt-manager flows remain
-quiet/machine-readable as they are today.
+should show phase messages while revalidating the reviewed plan, QEMU's
+percentage through the virtual-disk traversal while building each dry-run
+write plan, byte-count percentages for fingerprint scans with a known byte
+total, QEMU's live physical-merge percentage, and a completion message only
+after the replacement overlay and host-state restoration succeed. Label the
+dry-run percentage as traversal progress: it measures scanning the virtual
+disk, not bytes planned or physically written. The actual merge percentage is
+also traversal progress through the virtual disk, not the fraction of planned
+extents physically written. Any long phase without a reliable denominator must
+be named as in progress without inventing a percentage. The default CLI and
+Virt-manager flows remain quiet/machine-readable as they are today.
 
 ### Interrupted physical commits and power loss
 

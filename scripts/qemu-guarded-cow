@@ -575,20 +575,27 @@ def overlay_fingerprint(config):
             "health": "qemu-img check passed"}
 
 
-def make_write_plan(config):
+def make_write_plan(config, progress=False):
     inventory_before = disk_inventory(config)
     RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, plan_path = tempfile.mkstemp(prefix=".review-plan-", dir=RUN_DIR)
     os.close(fd)
     os.unlink(plan_path)
     try:
+        args = [QEMU_IMG, "commit"]
+        if progress:
+            # This is QEMU's traversal progress through the virtual disk while
+            # it records the guarded plan. It is not physical-write progress.
+            args.append("-p")
+        args.extend(("-d", "--image-opts", "--backing-image-opts",
+                     guard_options(config, plan_path), overlay_options(config)))
         result = subprocess.run(
-            [QEMU_IMG, "commit", "-d", "--image-opts", "--backing-image-opts",
-             guard_options(config, plan_path), overlay_options(config)],
-            check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            args, check=False, text=True,
+            stdout=sys.stderr if progress else subprocess.PIPE,
+            stderr=subprocess.PIPE)
         if result.returncode:
             fail("guarded dry-run commit failed: " +
-                 (result.stderr.strip() or result.stdout.strip() or
+                 (result.stderr.strip() or (result.stdout or "").strip() or
                   f"exit status {result.returncode}"))
         with open(plan_path, "rb") as stream:
             raw = stream.read()
@@ -1018,11 +1025,11 @@ def commit_review(domain, token, progress=False):
     if (previous.get("review_id") != token or previous.get("domain") != domain
             or previous.get("expires_at", 0) < int(time.time())):
         fail("save review expired or belongs to another VM; review again")
-    if progress:
-        print("Guarded COW save: checking the reviewed state; physical disk unchanged.",
-              file=sys.stderr, flush=True)
     assert_vm_off(domain)
     config = parse_config(domain)
+    if progress:
+        print("Guarded COW save: checking overlay format, backing chain, and qcow2 health; no writes yet.",
+              file=sys.stderr, flush=True)
     validate_overlay(config)
     if not STATE.exists():
         fail("guarded isolation state is missing; refusing physical commit")
@@ -1039,31 +1046,7 @@ def commit_review(domain, token, progress=False):
            for part in config["partitions"]):
         fail("configured writable partitions are no longer unmounted")
     verify_qemu_readonly(config["disk"])
-    if progress:
-        print("Guarded COW save: building the guarded write plan (dry-run).",
-              file=sys.stderr, flush=True)
-    _raw_plan, extents, inventory = make_write_plan(config)
-    root_baseline = (
-        verify_root_baseline(
-            config, inventory, progress=progress,
-            progress_label=("COW-root baseline verification (pass 1/2)"
-                            if progress else "Checking COW-root baseline"))
-        if not state.get("save_pending") else load_base_baseline(config))
-    base_fingerprint = base_content_fingerprint(
-        config["disk"], extents,
-        progress_label=("planned-write-range fingerprint " +
-                        ("(retry state)" if state.get("save_pending") else
-                         "(pass 1/2)")) if progress else None)
-    host = host_disk_state(inventory, config)
-    current = {"disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
-                        "logical_sector_size": inventory["sector_size"],
-                        "size_lba": inventory["size_lba"]},
-               "overlay": overlay_fingerprint(config),
-               "partitions": inventory["partitions"], "host_state": host,
-               "plan_sha256": write_plan_sha256(extents),
-               "base_content_sha256": base_fingerprint,
-               "base_root_content_sha256": root_baseline["content_sha256"],
-               "planned_extents": extents}
+
     reviewed_base_fingerprint = (
         state.get("save_retry_base_content_sha256")
         if state.get("save_pending") else
@@ -1078,13 +1061,44 @@ def commit_review(domain, token, progress=False):
                 "base_root_content_sha256":
                     previous["guard"]["base_root_content_sha256"],
                 "planned_extents": previous["planned_extents"]}
-    if current != reviewed:
-        changed = ", ".join(key for key in current if current[key] != reviewed[key])
+
+    if progress:
+        print("Guarded COW save: checking the reviewed plan with one fresh guarded dry-run (QEMU percentage is disk-traversal progress, not writes).",
+              file=sys.stderr, flush=True)
+    _raw_plan, extents, inventory = make_write_plan(config, progress=progress)
+    root_baseline = (
+        verify_root_baseline(
+            config, inventory, progress=progress,
+            progress_label=("COW-root baseline verification"
+                            if progress else "Checking COW-root baseline"))
+        if not state.get("save_pending") else load_base_baseline(config))
+    base_fingerprint = base_content_fingerprint(
+        config["disk"], extents,
+        progress_label=("planned-write-range fingerprint " +
+                        ("(retry state)" if state.get("save_pending") else
+                         "(reviewed-plan recheck)")) if progress else None)
+    host = host_disk_state(inventory, config)
+    final_check = {
+        "disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
+                 "logical_sector_size": inventory["sector_size"],
+                 "size_lba": inventory["size_lba"]},
+        "overlay": overlay_fingerprint(config),
+        "partitions": inventory["partitions"], "host_state": host,
+        "plan_sha256": write_plan_sha256(extents),
+        "base_content_sha256": base_fingerprint,
+        "base_root_content_sha256": root_baseline["content_sha256"],
+        "planned_extents": extents,
+    }
+    if final_check != reviewed:
+        changed = ", ".join(key for key in final_check
+                             if final_check[key] != reviewed[key])
         review_path.unlink(missing_ok=True)
         fail(f"disk, GPT, overlay, host isolation, or planned extents changed after review ({changed}); review again")
 
+    # The expensive comparison above proves the reviewed bytes and plan are
+    # still current. Repeat only cheap live-state checks at the write boundary.
     if progress:
-        print("Guarded COW save: repeating safety checks immediately before commit.",
+        print("Guarded COW save: confirming VM, mounts, and device identity at the write boundary.",
               file=sys.stderr, flush=True)
     assert_vm_off(domain)
     config_now = parse_config(domain)
@@ -1093,44 +1107,26 @@ def commit_review(domain, token, progress=False):
             or config_now["partitions"] != config["partitions"]
             or config_now["guard"] != config["guard"]):
         fail("VM disk configuration changed at the commit boundary; isolation remains held")
-    devices = part_devices(config_now)
-    verify_no_allowed_swap(devices)
-    verify_partitions_not_writable(devices, config_now["partitions"])
-    if any(mounts_for(devices, part["number"])
+    devices_now = part_devices(config_now)
+    verify_no_allowed_swap(devices_now)
+    verify_partitions_not_writable(devices_now, config_now["partitions"])
+    if any(mounts_for(devices_now, part["number"])
            for part in config_now["partitions"]):
         fail("configured writable partitions are no longer unmounted")
     verify_qemu_readonly(config_now["disk"])
-    if progress:
-        print("Guarded COW save: rebuilding the guarded write plan (dry-run).",
-              file=sys.stderr, flush=True)
-    _raw_plan_now, extents_now, inventory_now = make_write_plan(config_now)
-    root_baseline_now = (
-        verify_root_baseline(
-            config_now, inventory_now, progress=progress,
-            progress_label="COW-root baseline verification (pass 2/2)"
-            if progress else "Checking COW-root baseline")
-        if not state.get("save_pending") else load_base_baseline(config_now))
-    base_fingerprint_now = base_content_fingerprint(
-        config_now["disk"], extents_now,
-        progress_label=("planned-write-range fingerprint " +
-                        ("(retry state)" if state.get("save_pending") else
-                         "(pass 2/2)")) if progress else None)
-    host_now = host_disk_state(inventory_now, config_now)
-    final_check = {
-        "disk": {**inventory_now["identity"],
-                 "size_bytes": inventory_now["size_bytes"],
-                 "logical_sector_size": inventory_now["sector_size"],
-                 "size_lba": inventory_now["size_lba"]},
-        "overlay": overlay_fingerprint(config_now),
-        "partitions": inventory_now["partitions"], "host_state": host_now,
-        "plan_sha256": write_plan_sha256(extents_now),
-        "base_content_sha256": base_fingerprint_now,
-        "base_root_content_sha256": root_baseline_now["content_sha256"],
-        "planned_extents": extents_now,
-    }
-    if final_check != current:
+    inventory_now = disk_inventory(config_now)
+    if inventory_now != inventory:
+        fail("disk identity or GPT layout changed at the commit boundary; isolation remains held")
+    if (overlay_fingerprint(config_now) != final_check["overlay"]
+            or host_disk_state(inventory_now, config_now) != final_check["host_state"]):
+        fail("overlay or host isolation changed at the commit boundary; isolation remains held")
+    if previous.get("expires_at", 0) < int(time.time()):
         review_path.unlink(missing_ok=True)
-        fail("reviewed state changed at the commit boundary; isolation remains held and review must be repeated")
+        fail("save review expired during preflight; review again")
+
+    if progress:
+        print("Guarded COW save: recording the write-pending state.",
+              file=sys.stderr, flush=True)
 
     # The token represents a user-reviewed plan. The GUI calls this action
     # only after its separate explicit commit confirmation.
@@ -1142,7 +1138,7 @@ def commit_review(domain, token, progress=False):
     except Exception as exc:
         try:
             state["save_retry_base_content_sha256"] = base_content_fingerprint(
-                config["disk"], extents_now,
+                config["disk"], extents,
                 progress_label=("recording safe retry fingerprint"
                                 if progress else None))
             write_state(state)

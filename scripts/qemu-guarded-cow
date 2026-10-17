@@ -32,9 +32,10 @@ HELPER_SOURCE_MANIFEST = Path("/usr/local/libexec/qemu-guarded-cow.source.json")
 RECOVERY_SERVICE = "qemu-guarded-cow-recovery-check.service"
 RECOVERY_SERVICE_PATH = Path("/etc/systemd/system") / RECOVERY_SERVICE
 REVIEW_TTL = 3600
-# Physical commits stay disabled until the current review, durability, and
-# interruption/recovery requirements have passed disposable-disk validation.
-PHYSICAL_COMMIT_ENABLED = False
+# Disposable-disk success, partial interruption, retry, and reboot-state
+# recovery validation passed with the installed helper and qemu-img. Each real
+# save still requires a fresh review and explicit confirmation.
+PHYSICAL_COMMIT_ENABLED = True
 # Libvirt's hook PATH places /usr/local/sbin first, where this host has
 # command copies that libvirtd's AppArmor profile intentionally cannot run.
 os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
@@ -1239,6 +1240,10 @@ def review_action(domain):
     root_baseline_digest = base_baseline_digest(config)
     root_baseline = (verify_root_baseline(config, inventory)
                      if root_baseline_digest is not None else None)
+    precommit_base_sha256 = (
+        root_baseline["content_sha256"] if root_baseline else
+        base_content_fingerprint(
+            config["disk"], base_fingerprint_extents(config, inventory)))
     base_fingerprint = base_content_fingerprint(config["disk"], extents)
     host = host_disk_state(inventory, config)
     overlay = overlay_fingerprint(config)
@@ -1294,6 +1299,9 @@ def review_action(domain):
                         "base_root_content_coverage":
                             root_baseline["coverage"] if root_baseline else
                             "not available; this legacy COW root predates baseline capture",
+                        "base_precommit_sha256": precommit_base_sha256,
+                        "base_precommit_coverage":
+                            "configured writable partitions and GPT metadata at review time",
                         "base_root_capture_basis":
                             (root_baseline.get(
                                 "capture_basis", "captured at guarded COW root creation")
@@ -1470,9 +1478,10 @@ def commit_review(domain, token, progress=False):
         # have booted natively and changed the base before recovery began.
         if previous_guard.get("base_root_baseline_status") == "verified":
             verify_root_baseline(config, inventory)
-        elif base_content_fingerprint(
-                config["disk"], previous.get("planned_extents")) != \
-                previous_guard.get("base_content_sha256"):
+        reviewed_base_sha256 = previous_guard.get("base_precommit_sha256")
+        if (not reviewed_base_sha256 or base_content_fingerprint(
+                config["disk"], base_fingerprint_extents(config, inventory))
+                != reviewed_base_sha256):
             fail("backing sectors changed before the physical merge began; "
                  "manual reconciliation is required")
     if not pending and firmware_boot != previous.get("firmware_boot"):

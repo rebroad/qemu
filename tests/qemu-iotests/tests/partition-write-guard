@@ -1127,6 +1127,13 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             'missing-legacy')
         self.assertIsNone(
             missing_baseline_report['guard']['base_root_baseline_sha256'])
+        self.assertEqual(
+            missing_baseline_report['guard']['base_precommit_coverage'],
+            'configured writable partitions and GPT metadata at review time')
+        self.assertEqual(
+            missing_baseline_report['guard']['base_precommit_sha256'],
+            helper.base_content_fingerprint(
+                image, helper.base_fingerprint_extents(config, _inventory)))
         offline_state = json.loads(helper.STATE.read_text(encoding='utf-8'))
         self.assertFalse(offline_state['guest_active'])
         self.assertEqual(offline_state['mounts'], [])

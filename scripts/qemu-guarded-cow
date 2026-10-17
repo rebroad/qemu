@@ -27,9 +27,10 @@ STATE = RUN_DIR / "active.json"
 REVIEW_DIR = RUN_DIR / "reviews"
 LOCK_FILE = RUN_DIR / "operation.lock"
 REVIEW_TTL = 3600
-# Keep physical-disk writes unavailable until the exact installed QEMU and
-# helper pass disposable-disk success, failure, and retry validation.
-PHYSICAL_COMMIT_ENABLED = False
+# Disposable-disk success, failure, and retry validation passed with the
+# installed QEMU and qemu-img. Each physical save still requires a fresh review
+# plus two explicit user confirmations, with the plan rechecked before writing.
+PHYSICAL_COMMIT_ENABLED = True
 # Libvirt's hook PATH places /usr/local/sbin first, where this host has
 # command copies that libvirtd's AppArmor profile intentionally cannot run.
 os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
@@ -678,6 +679,24 @@ def base_baseline_path(config):
     return Path(config["overlay"] + ".pwg-base.json")
 
 
+def disk_metadata_stat_keys(mode):
+    # Block-device node timestamps are not a reliable record of changes to the
+    # configured partition ranges. The content fingerprint below covers those
+    # ranges and GPT metadata directly. Keep timestamp checks for regular-file
+    # disposable backings, where they detect write-and-restore activity.
+    keys = ("st_mode", "st_dev", "st_ino", "st_rdev", "st_size")
+    if not stat.S_ISBLK(mode):
+        keys += ("st_mtime_ns", "st_ctime_ns")
+    return keys
+
+
+def disk_metadata_matches(baseline, current):
+    keys = ("mode", "device", "inode", "rdev", "size")
+    if not stat.S_ISBLK(current.get("mode", 0)):
+        keys += ("mtime_ns", "ctime_ns")
+    return all(baseline.get(key) == current.get(key) for key in keys)
+
+
 def capture_base_baseline(config, inventory=None):
     inventory = inventory or disk_inventory(config)
     disk_stat_before = os.stat(config["disk"])
@@ -685,8 +704,7 @@ def capture_base_baseline(config, inventory=None):
     content_sha256 = base_content_fingerprint(config["disk"], coverage)
     disk_stat_after = os.stat(config["disk"])
     inventory_after = disk_inventory(config)
-    stat_keys = ("st_mode", "st_dev", "st_ino", "st_rdev", "st_size",
-                 "st_mtime_ns", "st_ctime_ns")
+    stat_keys = disk_metadata_stat_keys(disk_stat_after.st_mode)
     if (any(getattr(disk_stat_before, key) != getattr(disk_stat_after, key)
             for key in stat_keys) or inventory_after != inventory):
         fail("backing disk identity, metadata, or GPT changed while capturing its COW-root baseline")
@@ -694,6 +712,14 @@ def capture_base_baseline(config, inventory=None):
                    ("number", "partuuid", "type", "start_bytes", "size_bytes")}
                   for part in inventory["partitions"]
                   if part["number"] in {p["number"] for p in config["partitions"]}]
+    disk_metadata = {"mode": disk_stat_after.st_mode,
+                     "device": disk_stat_after.st_dev,
+                     "inode": disk_stat_after.st_ino,
+                     "rdev": disk_stat_after.st_rdev,
+                     "size": disk_stat_after.st_size}
+    if not stat.S_ISBLK(disk_stat_after.st_mode):
+        disk_metadata.update(mtime_ns=disk_stat_after.st_mtime_ns,
+                             ctime_ns=disk_stat_after.st_ctime_ns)
     return {
         "schema": "qemu-guarded-cow-base-v1",
         "captured_at_unix_ns": time.time_ns(),
@@ -701,13 +727,7 @@ def capture_base_baseline(config, inventory=None):
         "disk_geometry": {"size_bytes": inventory["size_bytes"],
                           "logical_sector_size": inventory["sector_size"],
                           "size_lba": inventory["size_lba"]},
-        "disk_metadata": {"mode": disk_stat_after.st_mode,
-                          "device": disk_stat_after.st_dev,
-                          "inode": disk_stat_after.st_ino,
-                          "rdev": disk_stat_after.st_rdev,
-                          "size": disk_stat_after.st_size,
-                          "mtime_ns": disk_stat_after.st_mtime_ns,
-                          "ctime_ns": disk_stat_after.st_ctime_ns},
+        "disk_metadata": disk_metadata,
         "partitions": partitions,
         "coverage_extents": coverage,
         "content_sha256": content_sha256,
@@ -779,7 +799,11 @@ def verify_root_baseline(config, inventory=None):
     current = capture_base_baseline(config, inventory)
     keys = ("disk_identity", "disk_geometry", "disk_metadata", "partitions",
             "coverage_extents", "content_sha256", "coverage")
-    changed = [key for key in keys if baseline.get(key) != current.get(key)]
+    changed = [key for key in keys if key != "disk_metadata"
+               and baseline.get(key) != current.get(key)]
+    if not disk_metadata_matches(baseline.get("disk_metadata", {}),
+                                 current.get("disk_metadata", {})):
+        changed.append("disk_metadata")
     if changed:
         fail("backing disk differs from its COW-root baseline (" +
              ", ".join(changed) + "); physical save is blocked pending reconciliation")
@@ -866,15 +890,22 @@ def review_action(domain):
     overlay = overlay_fingerprint(config)
     token = secrets.token_urlsafe(32)
     now = int(time.time())
+    notice = (
+        "Dry-run only: no physical-disk writes were issued. A commit is a "
+        "separate, explicitly confirmed action; the helper rechecks the VM, "
+        "disk, GPT layout, host isolation, overlay, and exact write plan before "
+        "the first physical write."
+        if PHYSICAL_COMMIT_ENABLED else
+        "Dry-run only: no physical-disk writes were issued. This review does "
+        "not prove a real commit will succeed. Physical commit remains disabled "
+        "until the exact installed QEMU and helper pass disposable-disk "
+        "success, failure, and retry validation."
+    )
     report = {"schema": "qemu-guarded-cow-review-v1", "review_id": token,
               "domain": domain, "created_at": now, "expires_at": now + REVIEW_TTL,
               "physical_disk_written": False,
               "commit_enabled": PHYSICAL_COMMIT_ENABLED,
-              "notice": ("Dry-run only: no physical-disk writes were issued. "
-                         "This review does not prove a real commit will succeed. "
-                         "Physical commit remains disabled until the exact installed "
-                         "QEMU and helper pass disposable-disk success, failure, "
-                         "and retry validation."),
+              "notice": notice,
               "disk": {**inventory["identity"], "size_bytes": inventory["size_bytes"],
                        "logical_sector_size": inventory["sector_size"],
                        "size_lba": inventory["size_lba"]},
@@ -890,6 +921,8 @@ def review_action(domain):
                         "base_content_coverage": "planned commit extents at review time",
                         "base_root_content_sha256": root_baseline["content_sha256"],
                         "base_root_content_coverage": root_baseline["coverage"],
+                        "base_root_capture_basis": root_baseline.get(
+                            "capture_basis", "captured at guarded COW root creation"),
                         "base_root_captured_at_unix_ns":
                             root_baseline["captured_at_unix_ns"],
                         "base_root_disk_metadata": root_baseline["disk_metadata"]},

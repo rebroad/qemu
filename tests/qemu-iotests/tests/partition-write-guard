@@ -666,6 +666,22 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         spec.loader.exec_module(helper)
         helper.QEMU_IMG = os.environ.get(
             'QEMU_GUARDED_COW_TEST_QEMU_IMG', iotests.qemu_img_args[0])
+
+        block_metadata = {
+            'mode': helper.stat.S_IFBLK | 0o600,
+            'device': 7, 'inode': 239, 'rdev': 66304, 'size': 0,
+            'mtime_ns': 100, 'ctime_ns': 100,
+        }
+        changed_block_metadata = dict(block_metadata, mtime_ns=200,
+                                      ctime_ns=200)
+        self.assertTrue(helper.disk_metadata_matches(
+            block_metadata, changed_block_metadata))
+        self.assertFalse(helper.disk_metadata_matches(
+            block_metadata, dict(changed_block_metadata, rdev=66305)))
+        regular_metadata = dict(block_metadata, mode=0o100600, size=1024)
+        self.assertFalse(helper.disk_metadata_matches(
+            regular_metadata, dict(regular_metadata, mtime_ns=200)))
+
         helper.RUN_DIR = Path(iotests.test_dir) / 'guard-helper-run'
         sector_size = SECTOR_SIZE
         original_run = helper.run
@@ -806,12 +822,13 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             helper.review_action('disposable')
         report = json.loads(review_output.getvalue())
         self.assertFalse(report['physical_disk_written'])
-        self.assertFalse(report['commit_enabled'])
+        self.assertTrue(report['commit_enabled'])
+        self.assertIn('base_root_capture_basis', report['guard'])
         if 'shutdown' in report:
             self.assertEqual(report['shutdown'], {
                 'reason': 'unknown', 'clean_snapshot_eligible': False,
             })
-        self.assertIn('does not prove a real commit will succeed',
+        self.assertIn('separate, explicitly confirmed action',
                       report['notice'])
         fingerprint_supported = 'base_content_sha256' in report['guard']
         if fingerprint_supported:
@@ -826,8 +843,11 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
         self.assertTrue(report['planned_extents'])
         self.assertIn('<svg ', report['disk_map_svg'])
         self.assertIn('primary GPT entry array', report['disk_map_svg'])
-        with self.assertRaises(helper.GuardError):
+        helper.PHYSICAL_COMMIT_ENABLED = False
+        with self.assertRaisesRegex(helper.GuardError,
+                                    'physical COW commit is disabled'):
             helper.commit_review('disposable', report['review_id'])
+        helper.PHYSICAL_COMMIT_ENABLED = True
         with open(image, 'rb') as stream:
             self.assertEqual(stream.read(), base_before)
 
@@ -846,6 +866,9 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             helper.review_action('disposable')
         commit_report = json.loads(review_output.getvalue())
         self.assertTrue(commit_report['commit_enabled'])
+        self.assertIn('base_root_capture_basis', commit_report['guard'])
+        self.assertIn('separate, explicitly confirmed action',
+                      commit_report['notice'])
         _raw_recheck, extents_recheck, _inventory_recheck = helper.make_write_plan(config)
         self.assertEqual(extents_recheck, commit_report['planned_extents'])
         self.assertEqual(helper.write_plan_sha256(extents_recheck),

@@ -5,6 +5,8 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$script_dir"
 
 cpto . ../qemu.build
+meson configure ../qemu.build/build \
+    -Dqemu_firmwarepath=share/qemu-firmware,../share/qemu
 ninja -C ../qemu.build/build qemu-system-x86_64 qemu-img
 sudo install -m 0755 ../qemu.build/build/qemu-system-x86_64 \
     /usr/local/bin/qemu-system-x86_64

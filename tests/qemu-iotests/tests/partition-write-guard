@@ -1484,7 +1484,12 @@ class TestPartitionWriteGuard(iotests.QMPTestCase):
             with contextlib.redirect_stdout(normal_review_output):
                 helper.review_action('disposable')
             normal_report = json.loads(normal_review_output.getvalue())
-            helper.commit_review('disposable', normal_report['review_id'])
+            normal_commit_output = io.StringIO()
+            with contextlib.redirect_stdout(normal_commit_output), \
+                    contextlib.redirect_stderr(normal_commit_output):
+                helper.commit_review('disposable', normal_report['review_id'])
+            self.assertIn('Guarded COW save: complete.',
+                          normal_commit_output.getvalue())
             self.assertEqual(restore_calls, ['disposable', 'disposable'])
             self.assertEqual(authorization_modes,
                              ['no-review-id', 'review-id'])

@@ -6,12 +6,22 @@ cd "$script_dir"
 
 cpto . ../qemu.build
 meson configure ../qemu.build/build \
-    -Dqemu_firmwarepath=share/qemu-firmware,../share/qemu
+    -Dqemu_firmwarepath=share/qemu-firmware,share/qemu
 ninja -C ../qemu.build/build qemu-system-x86_64 qemu-img
 sudo install -m 0755 ../qemu.build/build/qemu-system-x86_64 \
+    /usr/local/bin/qemu-system-x86_64.real
+sudo install -m 0755 scripts/qemu-system-x86_64-wrapper \
     /usr/local/bin/qemu-system-x86_64
 sudo install -m 0755 ../qemu.build/build/qemu-img \
     /usr/local/bin/qemu-img
+sudo install -D -m 0644 scripts/libvirt-qemu-rom-fallback.apparmor \
+    /etc/apparmor.d/abstractions/libvirt-qemu.d/50-qemu-system-x86_64-rom-fallback
+for profile in /etc/apparmor.d/libvirt/libvirt-*; do
+    [[ -f $profile && $profile != *.files ]] || continue
+    if sudo grep -Fq '/usr/local/bin/qemu-system-x86_64 rix,' "$profile"; then
+        sudo apparmor_parser -r "$profile"
+    fi
+done
 sudo install -D -m 0644 ../qemu.build/pc-bios/efi-virtio.rom \
     /usr/local/share/qemu/efi-virtio.rom
 sudo install -D -m 0644 ../qemu.build/pc-bios/pxe-virtio.rom \

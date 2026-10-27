@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+qemu=/usr/local/bin/qemu-system-x86_64.real
+custom_rom=/usr/local/share/qemu/efi-e1000.rom
+debian_rom=/usr/share/qemu/efi-e1000.rom
+
+# Preserve an explicit caller choice of firmware directory.
+for arg do
+    case $arg in
+        -L|-L?*) exec "$qemu" "$@" ;;
+    esac
+done
+
+if [ ! -r "$custom_rom" ] && [ -r "$debian_rom" ]; then
+    exec "$qemu" -L /usr/share/qemu "$@"
+fi
+
+exec "$qemu" "$@"
